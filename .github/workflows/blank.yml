@@ -7,21 +7,21 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
     inputs:
-      mode:                # 1
+      mode:
         type: choice
         options: [full, lite]
         default: full
-      node_version:        # 2
+      node_version:
         default: "20"
-      workdir:             # 3 - Node 소스가 서브폴더(예: app/)면 바꾸세요
+      workdir:
         default: "."
-      run_tests:           # 4
+      run_tests:
         type: boolean
         default: true
-      boot_if_missing:     # 5 - package.json 없으면 최소 템플릿 자동 생성
+      boot_if_missing:
         type: boolean
         default: true
-      install_cmd:         # 6 - 커스텀 설치 명령이 필요할 때(기본 auto)
+      install_cmd:
         default: "auto"
 
 permissions:
@@ -35,7 +35,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,6 +45,9 @@ jobs:
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
+      - name: Install jq (for script checks)
+        run: sudo apt-get update -y && sudo apt-get install -y jq
+
       - name: Detect Node project & lockfile
         id: detect
         shell: bash
@@ -54,12 +56,10 @@ jobs:
           cd "${{ inputs.workdir }}"
           HAS_PKGJSON="false"
           HAS_LOCK="false"
-
-          if [[ -f package.json ]]; then HAS_PKGJSON="true"; fi
-          if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then HAS_LOCK="true"; fi
-
-          echo "has_pkgjson=${HAS_PKGJSON}"        | tee -a "$GITHUB_OUTPUT"
-          echo "has_lock=${HAS_LOCK}"              | tee -a "$GITHUB_OUTPUT"
+          [[ -f package.json ]] && HAS_PKGJSON="true"
+          [[ -f package-lock.json || -f npm-shrinkwrap.json ]] && HAS_LOCK="true"
+          echo "has_pkgjson=${HAS_PKGJSON}" >> "$GITHUB_OUTPUT"
+          echo "has_lock=${HAS_LOCK}" >> "$GITHUB_OUTPUT"
 
       - name: Bootstrap minimal package.json (optional)
         if: ${{ steps.detect.outputs.has_pkgjson != 'true' && inputs.boot_if_missing == 'true' }}
@@ -84,14 +84,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          # cache는 잠금파일이 있을 때만 의미가 있어 아래에서 조건부로 별도 실행
 
-      - name: Enable npm cache (only if lockfile)
-        if: ${{ steps.detect.outputs.has_lock == 'true' || (inputs.boot_if_missing == 'true') }}
+      - name: Enable npm cache (when lockfile exists or bootstrapped)
+        if: ${{ steps.detect.outputs.has_lock == 'true' || inputs.boot_if_missing == 'true' }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: 'npm'
+          cache: npm
           cache-dependency-path: |
             ${{ inputs.workdir }}/package-lock.json
             ${{ inputs.workdir }}/npm-shrinkwrap.json
@@ -107,7 +106,7 @@ jobs:
             exit 0
           fi
 
-          # 사용자가 커스텀 명령을 지정했다면 그것을 우선 적용
+          # custom install command
           if [[ "${{ inputs.install_cmd }}" != "auto" && -n "${{ inputs.install_cmd }}" ]]; then
             echo "▶ Running custom install: ${{ inputs.install_cmd }}"
             bash -lc "${{ inputs.install_cmd }}" | tee "../${LOG_DIR}/install.log"
