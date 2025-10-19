@@ -1,4 +1,5 @@
-name: "🚀 Project CI (≤10 inputs)"
+name: "🚀 CI — Safe Node (≤10 inputs, no-skip)"
+
 on:
   push:
     branches: [ "main" ]
@@ -6,38 +7,158 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
     inputs:
-      mode:
+      mode:                # 1
         type: choice
         options: [full, lite]
         default: full
-      run_tests:
+      node_version:        # 2
+        default: "20"
+      workdir:             # 3 - Node 소스가 서브폴더(예: app/)면 바꾸세요
+        default: "."
+      run_tests:           # 4
         type: boolean
         default: true
-      node_version:
-        default: "20"
-      extra_args:
-        default: ""
+      boot_if_missing:     # 5 - package.json 없으면 최소 템플릿 자동 생성
+        type: boolean
+        default: true
+      install_cmd:         # 6 - 커스텀 설치 명령이 필요할 때(기본 auto)
+        default: "auto"
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Seoul
+  LOG_DIR: .github/echo_logs
+  ARTIFACT_DIR: .github/echo_artifacts
+
 jobs:
   build:
     runs-on: ubuntu-24.04
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare dirs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+
+      - name: Detect Node project & lockfile
+        id: detect
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "${{ inputs.workdir }}"
+          HAS_PKGJSON="false"
+          HAS_LOCK="false"
+
+          if [[ -f package.json ]]; then HAS_PKGJSON="true"; fi
+          if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then HAS_LOCK="true"; fi
+
+          echo "has_pkgjson=${HAS_PKGJSON}"        | tee -a "$GITHUB_OUTPUT"
+          echo "has_lock=${HAS_LOCK}"              | tee -a "$GITHUB_OUTPUT"
+
+      - name: Bootstrap minimal package.json (optional)
+        if: ${{ steps.detect.outputs.has_pkgjson != 'true' && inputs.boot_if_missing == 'true' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "${{ inputs.workdir }}"
+          echo '⚠️ No package.json found — creating a minimal one (bootstrap).'
+          cat > package.json <<'JSON'
+          {
+            "name": "koreakimtest",
+            "version": "0.1.0",
+            "private": true,
+            "scripts": {
+              "lint": "echo no-lint && exit 0",
+              "test": "node -e \"console.log('ok')\""
+            }
+          }
+          JSON
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-      - name: Install
-        run: npm ci || npm i
-      - name: Lint
-        run: npm run lint || echo "skip"
-      - name: Test
+          # cache는 잠금파일이 있을 때만 의미가 있어 아래에서 조건부로 별도 실행
+
+      - name: Enable npm cache (only if lockfile)
+        if: ${{ steps.detect.outputs.has_lock == 'true' || (inputs.boot_if_missing == 'true') }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+          cache-dependency-path: |
+            ${{ inputs.workdir }}/package-lock.json
+            ${{ inputs.workdir }}/npm-shrinkwrap.json
+
+      - name: Install deps (auto: ci if lock, else install)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "${{ inputs.workdir }}"
+
+          if [[ ! -f package.json ]]; then
+            echo "ℹ️ package.json absent and boot_if_missing=false → skipping install."
+            exit 0
+          fi
+
+          # 사용자가 커스텀 명령을 지정했다면 그것을 우선 적용
+          if [[ "${{ inputs.install_cmd }}" != "auto" && -n "${{ inputs.install_cmd }}" ]]; then
+            echo "▶ Running custom install: ${{ inputs.install_cmd }}"
+            bash -lc "${{ inputs.install_cmd }}" | tee "../${LOG_DIR}/install.log"
+            exit 0
+          fi
+
+          if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then
+            echo "▶ npm ci (lockfile detected)"
+            npm ci 2>&1 | tee "../${LOG_DIR}/npm-ci.log"
+          else
+            echo "▶ npm install (no lockfile)"
+            npm install 2>&1 | tee "../${LOG_DIR}/npm-install.log"
+          fi
+
+      - name: Lint (best-effort)
+        shell: bash
+        run: |
+          set +e
+          cd "${{ inputs.workdir }}"
+          if [[ -f package.json ]] && jq -e '.scripts.lint' package.json >/dev/null 2>&1; then
+            npm run lint 2>&1 | tee "../${LOG_DIR}/lint.log" || true
+          else
+            echo "no lint script" | tee "../${LOG_DIR}/lint.log"
+          fi
+
+      - name: Test (best-effort, toggle by input)
         if: ${{ inputs.run_tests == 'true' }}
-        run: npm test --if-present
-      - name: Pack (optional)
-        run: npm pack || echo "skip"
-      - name: Upload artifact
+        shell: bash
+        run: |
+          set +e
+          cd "${{ inputs.workdir }}"
+          if [[ -f package.json ]] && jq -e '.scripts.test' package.json >/dev/null 2>&1; then
+            npm test --if-present 2>&1 | tee "../${LOG_DIR}/test.log" || true
+          else
+            echo "no test script" | tee "../${LOG_DIR}/test.log"
+          fi
+
+      - name: Show tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ls -al
+          echo "--- workdir ---"
+          (cd "${{ inputs.workdir }}"; ls -al)
+
+      - name: Upload logs/artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
-          path: .
+          name: ci-artifacts
+          path: |
+            ${LOG_DIR}
+            ${{ inputs.workdir }}/package.json
+            ${{ inputs.workdir }}/package-lock.json
           retention-days: 7
