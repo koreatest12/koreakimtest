@@ -1,0 +1,36 @@
+# Node and build artifacts
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store
+
+# Git
+.git
+.gitignore
+
+# CI artifacts
+.github/echo_logs
+.github/echo_artifacts
+
+# OS/editor
+.DS_Store
+*.swp
+*.swo
+.idea
+.vscode
+
+# Docker related
+Dockerfile*
+.dockerignore
+
+# Tests, coverage
+coverage
+*.spec.*
+*.test.*
+
+# Misc
+.tmp
+.temp
+dist
+build
