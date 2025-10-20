@@ -1,0 +1,9 @@
+{
+  "name": "koreakimtest",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "lint": "echo no-lint && exit 0",
+    "test": "node -e \"console.log('ok')\""
+  }
+}
