@@ -1,18 +1,17 @@
-# Maven
-/target/
-!.mvn/wrapper/maven-wrapper.jar
-
-# IDEs and editors
-/.idea/
-/.project
-/.classpath
-/.settings/
-/.vscode/
-*.iml
-
-# OS
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+.cache/
+artifacts/
+*.db
 .DS_Store
-
-# Logs and temp
-*.log
-*.tmp
+.idea/
+.vscode/
+.eggs/
+build/
+dist/
+.coverage
+.pytest_cache/
