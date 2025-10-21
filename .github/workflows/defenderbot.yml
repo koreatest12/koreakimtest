@@ -1,0 +1,228 @@
+name: "🛡️ DefenderBot — Build, Docker, Release & Upgrade"
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "pom.xml"
+      - "src/**"
+      - "Dockerfile"
+      - "docker/**"
+      - "deploy/**"
+      - ".github/workflows/defenderbot.yml"
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (e.g. v1.2.3). If empty, no Release."
+        required: false
+        default: ""
+      image_tag:
+        description: "Docker image tag (default: sha)."
+        required: false
+        default: ""
+      upgrade:
+        description: "Run remote upgrade via SSH (true/false)."
+        required: false
+        default: "false"
+      distro_image:
+        description: "Base distro image to build (ubuntu|ubi|none)."
+        required: false
+        default: "none"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  JAVA_VERSION: "17"
+  TZ: Asia/Seoul
+
+jobs:
+  build-maven:
+    name: "Build with Maven"
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+
+      - name: Build (skip tests on PR)
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            mvn -q -DskipTests package
+          else
+            mvn -q package
+          fi
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: defenderbot-jar
+          path: target/defenderbot.jar
+
+      - name: Publish to GitHub Packages (snapshot ok)
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mvn -q -DskipTests deploy --batch-mode \
+            -DaltDeploymentRepository=github::default::https://maven.pkg.github.com/${{ github.repository }}
+
+  docker-build-push:
+    name: "Docker Build & Push"
+    runs-on: ubuntu-24.04
+    needs: build-maven
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
+
+      - name: Build and push (Spring Boot app image)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Optionally build distro images (Ubuntu/UBI)
+        if: ${{ inputs.distro_image != 'none' }}
+        run: |
+          set -Eeuo pipefail
+          case "${{ inputs.distro_image }}" in
+            ubuntu)
+              docker build -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/ubuntu:sha-${GITHUB_SHA} -f docker/ubuntu/Dockerfile docker/ubuntu
+              ;;
+            ubi)
+              docker build -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/ubi:sha-${GITHUB_SHA} -f docker/ubi/Dockerfile docker/ubi
+              ;;
+            *)
+              echo "No distro image build requested"
+              ;;
+          esac
+
+  release:
+    name: "Create GitHub Release"
+    runs-on: ubuntu-24.04
+    needs: [ build-maven, docker-build-push ]
+    if: ${{ inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: defenderbot-jar
+          path: dist
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum defenderbot.jar > defenderbot.jar.sha256
+
+      - name: Create or update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          name: DefenderBot ${{ inputs.release_tag || github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/defenderbot.jar
+            dist/defenderbot.jar.sha256
+
+  upgrade:
+    name: "Upgrade remote service (optional)"
+    runs-on: ubuntu-24.04
+    needs: docker-build-push
+    if: ${{ inputs.upgrade == 'true' && github.event_name == 'workflow_dispatch' }}
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ${{ github.repository }}
+      CONTAINER_NAME: defenderbot
+      HOST_PORT: 8080
+      CONTAINER_PORT: 8080
+    steps:
+      - name: Install SSH client
+        run: sudo apt-get update -y && sudo apt-get install -y openssh-client
+
+      - name: Add SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+
+      - name: Compute image tag
+        id: img
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ -n "${{ inputs.image_tag }}" ]]; then
+            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pull and restart container
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          TAG: ${{ steps.img.outputs.tag }}
+          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
+          HOST_PORT: ${{ env.HOST_PORT }}
+          CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
+        run: |
+          set -Eeuo pipefail
+          REMOTE_IMAGE="${REGISTRY}/${IMAGE_NAME}:${TAG}"
+          ssh -o StrictHostKeyChecking=yes "${SERVER_USER}@${SERVER_HOST}" bash -lc "
+            set -Eeuo pipefail
+            docker login ${REGISTRY} -u '${{ github.actor }}' -p '${{ secrets.GITHUB_TOKEN }}'
+            docker pull ${REMOTE_IMAGE}
+            docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
+            docker run -d --name ${CONTAINER_NAME} \
+              -p ${HOST_PORT}:${CONTAINER_PORT} \
+              --restart unless-stopped \
+              ${REMOTE_IMAGE}
+          "
