@@ -1,26 +1,21 @@
 # syntax=docker/dockerfile:1
 
-# Base image
-FROM node:20-alpine AS base
+FROM maven:3.9.9-eclipse-temurin-17-alpine AS build
+WORKDIR /workspace
 
-ENV NODE_ENV=production
+# Cache dependencies
+COPY pom.xml ./
+RUN --mount=type=cache,target=/root/.m2 mvn -q -DskipTests dependency:go-offline
+
+# Build application
+COPY src ./src
+RUN --mount=type=cache,target=/root/.m2 mvn -q -DskipTests package
+
+# Runtime image
+FROM eclipse-temurin:17-jre-alpine
+ENV JAVA_OPTS="" \
+    SPRING_PROFILES_ACTIVE=default
 WORKDIR /app
-
-# Install dependencies first (leverage Docker layer cache)
-COPY package*.json ./
-RUN npm ci --omit=dev || npm install --omit=dev
-
-# Copy application source
-COPY . .
-
-# Run as non-root user for security
-USER node
-
-# Default port (override as needed)
-EXPOSE 3000
-
-# Allow overriding the start command at runtime
-ENV START_CMD="npm start"
-
-# Use a shell so START_CMD env is expanded if provided
-CMD ["sh", "-lc", "$START_CMD"]
+COPY --from=build /workspace/target/defenderbot.jar /app/app.jar
+EXPOSE 8080
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
