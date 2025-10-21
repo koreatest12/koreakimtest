@@ -10,6 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 10
       matrix:
         image:
           - name: ubuntu
@@ -41,11 +42,11 @@ jobs:
 
       - name: Smoke test image contents
         run: |
-          docker run --rm ${{ github.repository_owner }}/${{ matrix.image.name }}:sha-${{ github.sha }} bash -lc "cat /etc/app/permissions.conf && test -d /opt/app/data && test -d /var/log/app"
+          docker run --rm ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}:sha-${{ github.sha }} bash -lc "cat /etc/app/permissions.conf && test -d /opt/app/data && test -d /var/log/app"
 
       - name: Save image as artifact
         run: |
-          docker save ${{ github.repository_owner }}/${{ matrix.image.name }}:sha-${{ github.sha }} | gzip > ${{ matrix.image.name }}.tar.gz
+          docker save ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}:sha-${{ github.sha }} | gzip > ${{ matrix.image.name }}.tar.gz
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
