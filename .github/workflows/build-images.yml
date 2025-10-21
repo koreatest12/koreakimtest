@@ -1,0 +1,54 @@
+name: Build Linux Images
+
+on:
+  push:
+    branches: [ main, master, '**/create-and-manage-linux-images**' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image:
+          - name: ubuntu
+            context: ./docker/ubuntu
+            dockerfile: ./docker/ubuntu/Dockerfile
+          - name: ubi
+            context: ./docker/ubi
+            dockerfile: ./docker/ubi/Dockerfile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          push: false
+          load: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}:pr-${{ github.event.pull_request.number || github.run_number }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.image.name }}:sha-${{ github.sha }}
+
+      - name: Smoke test image contents
+        run: |
+          docker run --rm ${{ github.repository_owner }}/${{ matrix.image.name }}:sha-${{ github.sha }} bash -lc "cat /etc/app/permissions.conf && test -d /opt/app/data && test -d /var/log/app"
+
+      - name: Save image as artifact
+        run: |
+          docker save ${{ github.repository_owner }}/${{ matrix.image.name }}:sha-${{ github.sha }} | gzip > ${{ matrix.image.name }}.tar.gz
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.image.name }}-image
+          path: ${{ matrix.image.name }}.tar.gz
