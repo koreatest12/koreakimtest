@@ -36,6 +36,13 @@ def _rng(seed: int | None) -> random.Random:
 
 def generate_customers(params: GenerationParams) -> pd.DataFrame:
     fake = Faker()
+    # Ensure reproducibility and unique email generation
+    if params.seed is not None:
+        try:
+            fake.seed_instance(params.seed)
+        except Exception:
+            # Fallback: global seed if instance seeding not available
+            Faker.seed(params.seed)
     r = _rng(params.seed)
     rows = []
     for _ in range(params.num_customers):
@@ -46,7 +53,8 @@ def generate_customers(params: GenerationParams) -> pd.DataFrame:
         dob = profile["birthdate"]
         if not isinstance(dob, date):
             dob = fake.date_of_birth(minimum_age=18, maximum_age=85)
-        email = profile["mail"]
+        # Guarantee unique emails to satisfy UNIQUE constraint in schema
+        email = fake.unique.email()
         phone = fake.phone_number()
         address = fake.street_address()
         city = fake.city()
