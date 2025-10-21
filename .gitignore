@@ -1,18 +1,18 @@
-# Build and Release Folders
-bin-debug/
-bin-release/
-[Oo]bj/
-[Bb]in/
+# Maven
+/target/
+!.mvn/wrapper/maven-wrapper.jar
 
-# Other files and folders
-.settings/
+# IDEs and editors
+/.idea/
+/.project
+/.classpath
+/.settings/
+/.vscode/
+*.iml
 
-# Executables
-*.swf
-*.air
-*.ipa
-*.apk
+# OS
+.DS_Store
 
-# Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
-# should NOT be excluded as they contain compiler settings and other important
-# information for Eclipse / Flash Builder.
+# Logs and temp
+*.log
+*.tmp
