@@ -1,21 +1,25 @@
-# syntax=docker/dockerfile:1
+FROM python:3.11-slim
 
-FROM maven:3.9.9-eclipse-temurin-17-alpine AS build
-WORKDIR /workspace
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Cache dependencies
-COPY pom.xml ./
-RUN --mount=type=cache,target=/root/.m2 mvn -q -DskipTests dependency:go-offline
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    default-libmysqlclient-dev \
+  && rm -rf /var/lib/apt/lists/*
 
-# Build application
-COPY src ./src
-RUN --mount=type=cache,target=/root/.m2 mvn -q -DskipTests package
-
-# Runtime image
-FROM eclipse-temurin:17-jre-alpine
-ENV JAVA_OPTS="" \
-    SPRING_PROFILES_ACTIVE=default
 WORKDIR /app
-COPY --from=build /workspace/target/defenderbot.jar /app/app.jar
-EXPOSE 8080
-ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
+
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . /app
+
+ENV DB_USER=postgres \
+    DB_PASSWORD=postgres \
+    DB_HOST=localhost \
+    DB_PORT=5432 \
+    DB_NAME=bank
+
+CMD ["python", "-m", "banking_pipeline.pipeline", "--target", "postgres", "--rows", "10000", "--seed", "42", "--out", "artifacts"]
