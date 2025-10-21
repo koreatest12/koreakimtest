@@ -1,0 +1,17 @@
+[Unit]
+Description=Teradata 10-minute Batch Orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/env bash -lc '/workspace/scripts/teradata/batch_orchestrator.sh'
+WorkingDirectory=/workspace
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+SuccessExitStatus=0 2 3 4
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Teradata batch orchestrator every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Unit=teradata-batch.service
+
+[Install]
+WantedBy=timers.target
