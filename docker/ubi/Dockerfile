@@ -2,11 +2,10 @@
 # Requires subscription for full RHEL; UBI is freely redistributable
 FROM registry.access.redhat.com/ubi9/ubi:latest
 
-# Create directories and perform update using microdnf
-# UBI uses microdnf by default
+# Use dnf for package management on UBI9
 RUN set -eux \
-    && microdnf -y update \
-    && microdnf -y clean all \
+    && dnf -y update \
+    && dnf -y clean all \
     # Create directories
     && mkdir -p /opt/app/data /var/log/app /etc/app \
     # Create a sample permission file
