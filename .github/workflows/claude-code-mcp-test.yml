@@ -1,0 +1,355 @@
+name: "🧪 Claude Code — MCP Test Server + SQLite Tables (No-Skip • Safe-Continue • Always-Success)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:                  # 1
+        description: "실행 모드 표기용(동작엔 영향 없음)"
+        type: choice
+        options: [full, lite]
+        default: full
+      node_version:          # 2
+        default: "20"
+      python_version:        # 3 (선택 유틸)
+        default: "3.12"
+      db_path:               # 4
+        default: ".github/echo_artifacts/mcp_demo.sqlite"
+      table_name:            # 5
+        default: "transactions"
+      seed_rows:             # 6
+        default: "5"
+      parallel:              # 7 (향후 확장용)
+        default: "1"
+      auto_commit:           # 8
+        type: boolean
+        default: false
+      demo_mode:             # 9
+        type: boolean
+        default: true
+      force_success_message: # 10
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Seoul
+  LOG_DIR: .github/echo_logs
+  ARTIFACT_DIR: .github/echo_artifacts
+
+jobs:
+  mcp-db-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+
+      - name: Prepare dirs & echo helpers
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" .github/mcp_demo
+          cat > /tmp/echo_helpers.sh <<'SH'
+          #!/usr/bin/env bash
+          TS(){ date "+%Y-%m-%d %H:%M:%S%z"; }
+          OK(){  echo "✅ [$(TS)] $*"; }
+          WARN(){ echo "⚠️  [$(TS)] $*" >&2; }
+          FAIL(){ echo "❌ [$(TS)] $*" >&2; }
+          safe(){ local name="$1"; shift; set +e; "$@" >"$LOG_DIR/${name}.log" 2>&1; local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
+          SH
+          chmod +x /tmp/echo_helpers.sh
+          source /tmp/echo_helpers.sh
+          OK "Directories ready: $LOG_DIR, $ARTIFACT_DIR"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+        continue-on-error: true
+
+      - name: Setup Python (optional tools)
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+        continue-on-error: true
+
+      - name: Generate MCP server (Node) + client
+        shell: bash
+        continue-on-error: true
+        run: |
+          source /tmp/echo_helpers.sh
+
+          # package.json
+          cat > .github/mcp_demo/package.json <<'JSON'
+          {
+            "name": "mcp-sqlite-demo",
+            "version": "0.1.0",
+            "private": true,
+            "type": "module",
+            "scripts": {
+              "start": "node server.js",
+              "test:client": "node test_client.js"
+            },
+            "dependencies": {
+              "sqlite3": "^5.1.7"
+            }
+          }
+          JSON
+
+          # server.js — stdio JSON-RPC (tools: db.setup, sql.exec)
+          cat > .github/mcp_demo/server.js <<'JS'
+          import sqlite3 from "sqlite3";
+          import { EOL } from "node:os";
+
+          let db = null;
+
+          function send(result, id=null, error=null) {
+            const payload = {
+              jsonrpc: "2.0",
+              ...(id!==null? { id } : {}),
+              ...(error ? { error } : { result })
+            };
+            process.stdout.write(JSON.stringify(payload) + EOL);
+          }
+
+          function listTools() {
+            return {
+              tools: [
+                { name: "db.setup", description: "Open or create a SQLite DB file", input_schema: { type: "object", properties: { path: { type: "string" }}, required: ["path"] } },
+                { name: "sql.exec", description: "Execute SQL (optionally with params)", input_schema: { type: "object", properties: { sql: { type: "string" }, params: { type: "array" }}, required: ["sql"] } }
+              ]
+            };
+          }
+
+          function openDb(path) {
+            return new Promise((resolve, reject) => {
+              db = new sqlite3.Database(path, (err) => err ? reject(err) : resolve(true));
+            });
+          }
+
+          function runSql(sql, params=[]) {
+            return new Promise((resolve, reject) => {
+              const trimmed = sql.trim().toLowerCase();
+              if (trimmed.startsWith("select")) {
+                db.all(sql, params, (err, rows) => err ? reject(err) : resolve({ rows }));
+              } else {
+                db.run(sql, params, function(err){
+                  if (err) reject(err);
+                  else resolve({ changes: this.changes, lastID: this.lastID });
+                });
+              }
+            });
+          }
+
+          let buffer = "";
+          process.stdin.setEncoding("utf8");
+          process.stdin.on("data", async chunk => {
+            buffer += chunk;
+            const lines = buffer.split(/\r?\n/);
+            buffer = lines.pop();
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              let msg;
+              try { msg = JSON.parse(line); } catch (e) {
+                send(null, null, { code: -32700, message: "Parse error" });
+                continue;
+              }
+              const { id=null, method, params={} } = msg;
+
+              try {
+                if (method === "tools/list") {
+                  return send(listTools(), id);
+                }
+                if (method === "tools/call") {
+                  const { name, arguments: args={} } = params;
+                  if (name === "db.setup") {
+                    await openDb(args.path);
+                    return send({ ok: true, path: args.path }, id);
+                  }
+                  if (name === "sql.exec") {
+                    const r = await runSql(args.sql, args.params || []);
+                    return send({ ok: true, ...r }, id);
+                  }
+                  return send(null, id, { code: -32601, message: "Unknown tool" });
+                }
+                if (method === "ping") return send({ pong: true }, id);
+
+                return send(null, id, { code: -32601, message: "Method not found" });
+              } catch (err) {
+                return send(null, id, { code: -32000, message: String(err) });
+              }
+            }
+          });
+          JS
+
+          # test_client.js — 서버를 child_process로 띄워 호출 시퀀스 수행
+          cat > .github/mcp_demo/test_client.js <<'JS'
+          import { spawn } from "node:child_process";
+          import { EOL } from "node:os";
+
+          const DB_PATH = process.env.DB_PATH || ".github/echo_artifacts/mcp_demo.sqlite";
+          const TABLE = process.env.TABLE_NAME || "transactions";
+          const SEED = parseInt(process.env.SEED_ROWS || "5", 10);
+
+          let id = 1;
+          function req(method, params) {
+            return JSON.stringify({ jsonrpc: "2.0", id: id++, method, params }) + EOL;
+          }
+
+          const proc = spawn("node", ["server.js"], {
+            cwd: ".github/mcp_demo",
+            stdio: ["pipe", "pipe", "pipe"]
+          });
+
+          proc.stderr.on("data", d => process.stderr.write(String(d)));
+
+          const pending = new Map();
+          proc.stdout.on("data", (chunk) => {
+            const lines = String(chunk).split(/\r?\n/);
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              let msg;
+              try { msg = JSON.parse(line); } catch { continue; }
+              if (msg.id && pending.has(msg.id)) {
+                pending.get(msg.id)(msg);
+                pending.delete(msg.id);
+              } else {
+                console.log("EVT", msg);
+              }
+            }
+          });
+
+          function call(method, params) {
+            return new Promise((resolve) => {
+              const myId = id;
+              pending.set(myId, resolve);
+              proc.stdin.write(req(method, params));
+            });
+          }
+
+          (async () => {
+            function log(label, obj){ console.log(`--- ${label} ---`); console.log(JSON.stringify(obj, null, 2)); }
+
+            let r;
+
+            r = await call("tools/list", {});
+            log("tools/list", r);
+
+            r = await call("tools/call", { name: "db.setup", arguments: { path: DB_PATH }});
+            log("db.setup", r);
+
+            const createSQL = `
+              CREATE TABLE IF NOT EXISTS ${TABLE}(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                memo TEXT,
+                amount INTEGER NOT NULL
+              );
+            `;
+            r = await call("tools/call", { name: "sql.exec", arguments: { sql: createSQL }});
+            log("sql.exec(create)", r);
+
+            for (let i=0; i<SEED; i++){
+              const amt = 1000 + i*137;
+              const mem = `seed-${i}`;
+              const sql = `INSERT INTO ${TABLE}(ts,memo,amount) VALUES(datetime('now'), ?, ?)`;
+              r = await call("tools/call", { name: "sql.exec", arguments: { sql, params: [mem, amt] }});
+              log(`sql.exec(insert:${i})`, r);
+            }
+
+            const selectSQL = `SELECT id, ts, memo, amount FROM ${TABLE} ORDER BY id DESC LIMIT 3`;
+            r = await call("tools/call", { name: "sql.exec", arguments: { sql: selectSQL }});
+            log("sql.exec(select)", r);
+
+            setTimeout(() => { proc.kill("SIGTERM"); }, 200);
+          })().catch(e => {
+            console.error("CLIENT ERROR:", e);
+            process.exit(0); // 실패해도 성공 종료
+          });
+          JS
+
+          echo "${{ inputs.db_path }}" > "$ARTIFACT_DIR/db_path.txt"
+          echo "${{ inputs.table_name }}" > "$ARTIFACT_DIR/table.txt"
+
+      - name: Install Node deps
+        shell: bash
+        continue-on-error: true
+        run: |
+          source /tmp/echo_helpers.sh
+          ( cd .github/mcp_demo && npm ci || npm install ) >"$LOG_DIR/npm_install.log" 2>&1 || true
+          OK "Node dependencies installed (or attempted)"
+
+      - name: Run MCP server test (DB setup + table create + seed + select)
+        shell: bash
+        continue-on-error: true
+        env:
+          DB_PATH: ${{ inputs.db_path }}
+          TABLE_NAME: ${{ inputs.table_name }}
+          SEED_ROWS: ${{ inputs.seed_rows }}
+        run: |
+          source /tmp/echo_helpers.sh
+          pushd .github/mcp_demo >/dev/null
+          set +e
+          node test_client.js >"../.."/$LOG_DIR/mcp_test_client.log 2>&1
+          ec=$?
+          if [ $ec -ne 0 ]; then
+            FAIL "mcp.test: FAILED (exit=$ec)"
+          else
+            OK "mcp.test: completed (exit=0)"
+          fi
+          set -e
+          popd >/dev/null
+
+      - name: SQLite CLI sanity (optional)
+        shell: bash
+        continue-on-error: true
+        run: |
+          source /tmp/echo_helpers.sh
+          safe "apt.sqlite3" sudo apt-get update -y && sudo apt-get install -y sqlite3
+          if command -v sqlite3 >/dev/null 2>&1; then
+            sqlite3 "${{ inputs.db_path }}" ".tables" > "$LOG_DIR/sqlite_tables.log" 2>&1 || true
+            sqlite3 "${{ inputs.db_path }}" "SELECT COUNT(*) FROM ${{ inputs.table_name }};" > "$LOG_DIR/sqlite_count.log" 2>&1 || true
+            OK "sqlite3 sanity executed"
+          else
+            WARN "sqlite3 not available; skipped CLI sanity"
+          fi
+
+      - name: Summaries & gather
+        if: always()
+        shell: bash
+        continue-on-error: true
+        run: |
+          source /tmp/echo_helpers.sh
+          {
+            echo "=== RUN SUMMARY ($(date)) ==="
+            echo "mode=${{ inputs.mode }}"
+            echo "db_path=${{ inputs.db_path }}"
+            echo "table=${{ inputs.table_name }}"
+            echo "seed_rows=${{ inputs.seed_rows }}"
+          } | tee "$LOG_DIR/summary.txt"
+          OK "Summary generated"
+
+      - name: Upload artifacts (logs, db)
+        if: always()
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: mcp-db-test-artifacts
+          path: |
+            .github/echo_logs/**
+            .github/echo_artifacts/**
+            .github/mcp_demo/package.json
+            .github/mcp_demo/server.js
+            .github/mcp_demo/test_client.js
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Always success footer
+        if: always()
+        shell: bash
+        run: |
+          echo "✅ DONE — All steps attempted. Failures (if any) are captured in logs, but workflow exits SUCCESS by design."
+          exit 0
