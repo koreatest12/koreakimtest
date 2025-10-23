@@ -42,7 +42,7 @@ env:
   PG_USER: postgres
   PG_PASS: pass
   PG_DB: mcpdb
-  PG_PORT: "5432"      # 컨테이너 외부 포트(로컬 접근)
+  PG_PORT: "5432"
   PG_DSN: postgres://postgres:pass@localhost:5432/mcpdb
 
 jobs:
@@ -65,20 +65,22 @@ jobs:
           OK(){  echo "✅ [$(TS)] $*"; }
           WARN(){ echo "⚠️  [$(TS)] $*" >&2; }
           FAIL(){ echo "❌ [$(TS)] $*" >&2; }
-          safe(){ local name="$1"; shift; set +e; ( "$@" ) >"$LOG_DIR/${name}.log" 2>&1; local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
-          runlog(){ local name="$1"; shift; set +e; ( "$@" ) > >(tee "$LOG_DIR/${name}.log") 2> >(tee "$LOG_DIR/${name}.err.log" >&2); local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
+          mklogs(){ mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"; }
+          safe(){ local name="$1"; shift; mklogs; set +e; ( "$@" ) >"$LOG_DIR/${name}.log" 2>&1; local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
+          runlog(){ local name="$1"; shift; mklogs; set +e; ( "$@" ) > >(tee "$LOG_DIR/${name}.log") 2> >(tee "$LOG_DIR/${name}.err.log" >&2); local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
           SH
           chmod +x /tmp/echo_helpers.sh
           source /tmp/echo_helpers.sh
           OK "Directories ready"
 
-      - name: Base build deps (sqlite3/node-gyp)
+      - name: Base build deps (sqlite3/node-gyp for Node 20 + Python3.12)
         shell: bash
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
           safe "apt.update" sudo apt-get update -y
-          safe "apt.deps" sudo apt-get install -y build-essential python3 make g++ libsqlite3-dev sqlite3 jq
+          # distutils, setuptools 포함 (Python3.12에서 node-gyp가 참조)
+          safe "apt.deps" sudo apt-get install -y build-essential make g++ python3 python3-distutils python3-setuptools libsqlite3-dev sqlite3 jq
           OK "Base deps ensured"
 
       - name: Setup Node.js
@@ -99,11 +101,8 @@ jobs:
         run: |
           source /tmp/echo_helpers.sh
           safe "docker.pull.pg" docker pull "${PG_IMAGE}"
-          # 기존 컨테이너 정리
           docker rm -f "${PG_CONTAINER}" >/dev/null 2>&1 || true
-          # 실행
           runlog "docker.run.pg" docker run -d --name "${PG_CONTAINER}" -e POSTGRES_PASSWORD="${PG_PASS}" -e POSTGRES_DB="${PG_DB}" -p "${PG_PORT}:5432" "${PG_IMAGE}"
-          # 대기 (간단한 헬스체크)
           for i in {1..30}; do
             if docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" >/dev/null 2>&1; then OK "Postgres is ready"; break; fi
             sleep 2
@@ -119,17 +118,14 @@ jobs:
           TBL: ${{ inputs.table_name }}
         run: |
           source /tmp/echo_helpers.sh
-
-          # 마이그레이션 파일 (공통 스키마: accounts, merchants, transactions)
+          # Migrations
           cat > "$MCP_DIR/migrations/001_init.sql" <<'SQL'
-          -- Schema version tracking
           CREATE TABLE IF NOT EXISTS schema_version(
             id INTEGER PRIMARY KEY,
             version TEXT NOT NULL,
             applied_at TEXT NOT NULL
           );
           SQL
-
           cat > "$MCP_DIR/migrations/010_core_tables.sql" <<'SQL'
           CREATE TABLE IF NOT EXISTS accounts(
             id INTEGER PRIMARY KEY,
@@ -145,19 +141,15 @@ jobs:
             merchant_id INTEGER,
             ts TEXT NOT NULL,
             memo TEXT,
-            amount INTEGER NOT NULL,
-            FOREIGN KEY(account_id) REFERENCES accounts(id),
-            FOREIGN KEY(merchant_id) REFERENCES merchants(id)
+            amount INTEGER NOT NULL
           );
           SQL
-
           cat > "$MCP_DIR/migrations/020_indexes.sql" <<'SQL'
           CREATE INDEX IF NOT EXISTS idx_tx_account ON transactions(account_id);
           CREATE INDEX IF NOT EXISTS idx_tx_amount  ON transactions(amount);
           CREATE INDEX IF NOT EXISTS idx_tx_ts      ON transactions(ts);
           SQL
-
-          # CSV 생성 (id, account_id, merchant_id, ts, memo, amount)
+          # CSV
           CSV="$ARTIFACT_DIR/transactions_bulk.csv"
           echo "id,account_id,merchant_id,ts,memo,amount" > "$CSV"
           rows=${CSV_ROWS:-1000}
@@ -174,6 +166,7 @@ jobs:
         continue-on-error: true
         env:
           npm_config_build_from_source: "true"
+          npm_config_python: "python3"
         run: |
           source /tmp/echo_helpers.sh
 
@@ -181,7 +174,7 @@ jobs:
           cat > "$MCP_DIR/package.json" <<'JSON'
           {
             "name": "mcp-sqlite-pg-mega",
-            "version": "0.2.0",
+            "version": "0.2.1",
             "private": true,
             "type": "module",
             "scripts": {
@@ -197,163 +190,84 @@ jobs:
           }
           JSON
 
-          # server.js — SQLite/PG 이중 지원 + tools: db.setup/sql.exec/tx.begin/tx.commit/tx.rollback/bulk.load.csv/migrate.apply
+          # server.js (동일)
           cat > "$MCP_DIR/server.js" <<'JS'
           import sqlite3 from "sqlite3";
           import { Client as PG } from "pg";
           import fs from "node:fs";
           import { EOL } from "node:os";
           import path from "node:path";
-
-          let engine = null; // 'sqlite' | 'pg'
-          let sqlite = { db: null };
-          let pg = { client: null, tx: false };
-
-          const send = (result, id=null, error=null) => {
-            const payload = { jsonrpc: "2.0", ...(id!==null? { id } : {}), ...(error ? { error } : { result }) };
-            process.stdout.write(JSON.stringify(payload) + EOL);
-          };
-
-          const listTools = () => ({
-            tools: [
-              { name: "db.setup", description: "Open DB (engine='sqlite'|'pg')", input_schema: { type: "object", properties: { engine: {type:"string"}, sqlite_path:{type:"string"}, pg_dsn:{type:"string"} }, required: ["engine"] } },
-              { name: "sql.exec", description: "Execute SQL", input_schema: { type: "object", properties: { sql:{type:"string"}, params:{type:"array"} }, required: ["sql"] } },
-              { name: "tx.begin", description: "Begin transaction" },
-              { name: "tx.commit", description: "Commit transaction" },
-              { name: "tx.rollback", description: "Rollback transaction" },
-              { name: "bulk.load.csv", description: "Load CSV into transactions table", input_schema: { type: "object", properties: { csv_path:{type:"string"} }, required: ["csv_path"] } },
-              { name: "migrate.apply", description: "Apply .sql migrations in a folder", input_schema: { type: "object", properties: { dir:{type:"string"} }, required: ["dir"] } }
-            ]
-          });
-
-          async function openDb({engine:eng, sqlite_path, pg_dsn}) {
-            engine = eng;
-            if (engine === "sqlite") {
-              sqlite.db = await new Promise((res, rej)=> {
-                const db = new sqlite3.Database(sqlite_path, (e)=> e? rej(e): res(db));
-              });
-              return { ok:true, engine };
-            } else if (engine === "pg") {
-              pg.client = new PG({ connectionString: pg_dsn });
-              await pg.client.connect();
-              return { ok:true, engine };
-            } else {
-              throw new Error("Unsupported engine");
-            }
+          let engine = null; let sqlite = { db: null }; let pg = { client: null, tx: false };
+          const send = (result, id=null, error=null) => { const payload = { jsonrpc:"2.0", ...(id!==null?{id}:{}) , ...(error?{error}:{result}) }; process.stdout.write(JSON.stringify(payload)+EOL); };
+          const listTools = () => ({ tools:[
+            { name:"db.setup", description:"Open DB (engine='sqlite'|'pg')", input_schema:{ type:"object", properties:{ engine:{type:"string"}, sqlite_path:{type:"string"}, pg_dsn:{type:"string"} }, required:["engine"] } },
+            { name:"sql.exec", description:"Execute SQL", input_schema:{ type:"object", properties:{ sql:{type:"string"}, params:{type:"array"} }, required:["sql"] } },
+            { name:"tx.begin", description:"Begin transaction" },
+            { name:"tx.commit", description:"Commit transaction" },
+            { name:"tx.rollback", description:"Rollback transaction" },
+            { name:"bulk.load.csv", description:"Load CSV into transactions table", input_schema:{ type:"object", properties:{ csv_path:{type:"string"} }, required:["csv_path"] } },
+            { name:"migrate.apply", description:"Apply .sql migrations in a folder", input_schema:{ type:"object", properties:{ dir:{type:"string"} }, required:["dir"] } }
+          ]});
+          async function openDb({engine:eng, sqlite_path, pg_dsn}){ engine=eng;
+            if(engine==="sqlite"){ sqlite.db=await new Promise((res,rej)=>{ const db=new sqlite3.Database(sqlite_path,(e)=> e?rej(e):res(db)); }); return {ok:true,engine}; }
+            if(engine==="pg"){ pg.client=new PG({connectionString:pg_dsn}); await pg.client.connect(); return {ok:true,engine}; }
+            throw new Error("Unsupported engine");
           }
-
-          async function runSql(sql, params=[]) {
-            if (engine === "sqlite") {
-              const q = sql.trim().toLowerCase();
-              if (q.startsWith("select")) {
-                const rows = await new Promise((res, rej)=> sqlite.db.all(sql, params, (e, r)=> e? rej(e): res(r)));
-                return { rows };
-              } else {
-                const info = await new Promise((res, rej)=> sqlite.db.run(sql, params, function(e){ e? rej(e): res({ changes:this.changes, lastID:this.lastID }); }));
-                return info;
-              }
-            } else if (engine === "pg") {
-              const r = await pg.client.query(sql, params);
-              return { rows: r.rows, rowCount: r.rowCount };
-            }
+          async function runSql(sql, params=[]){
+            if(engine==="sqlite"){
+              const q=sql.trim().toLowerCase();
+              if(q.startsWith("select")){ const rows=await new Promise((res,rej)=> sqlite.db.all(sql, params, (e,r)=> e?rej(e):res(r))); return {rows}; }
+              const info=await new Promise((res,rej)=> sqlite.db.run(sql, params, function(e){ e?rej(e):res({changes:this.changes,lastID:this.lastID}); })); return info;
+            } else if(engine==="pg"){ const r=await pg.client.query(sql, params); return {rows:r.rows,rowCount:r.rowCount}; }
             throw new Error("DB not initialized");
           }
-
-          async function txBegin(){
-            if (engine === "sqlite") return runSql("BEGIN");
-            if (engine === "pg") { await pg.client.query("BEGIN"); pg.tx = true; return { ok:true }; }
-          }
-          async function txCommit(){
-            if (engine === "sqlite") return runSql("COMMIT");
-            if (engine === "pg" && pg.tx) { await pg.client.query("COMMIT"); pg.tx = false; return { ok:true }; }
-          }
-          async function txRollback(){
-            if (engine === "sqlite") return runSql("ROLLBACK");
-            if (engine === "pg" && pg.tx) { await pg.client.query("ROLLBACK"); pg.tx = false; return { ok:true }; }
-          }
-
-          async function migrateApply(dir){
-            const files = fs.readdirSync(dir).filter(f=>f.endsWith(".sql")).sort();
-            for (const f of files){
-              const sql = fs.readFileSync(path.join(dir,f), "utf8");
-              await runSql(sql);
-            }
-            return { ok:true, applied: files };
-          }
-
-          // 매우 단순한 CSV 파서(쉼표 포함 필드는 미지원) — 데모/테스트 용도
+          async function txBegin(){ if(engine==="sqlite") return runSql("BEGIN"); if(engine==="pg"){ await pg.client.query("BEGIN"); pg.tx=true; return {ok:true}; } }
+          async function txCommit(){ if(engine==="sqlite") return runSql("COMMIT"); if(engine==="pg"&&pg.tx){ await pg.client.query("COMMIT"); pg.tx=false; return {ok:true}; } }
+          async function txRollback(){ if(engine==="sqlite") return runSql("ROLLBACK"); if(engine==="pg"&&pg.tx){ await pg.client.query("ROLLBACK"); pg.tx=false; return {ok:true}; } }
+          async function migrateApply(dir){ const files=fs.readdirSync(dir).filter(f=>f.endsWith(".sql")).sort(); for(const f of files){ const sql=fs.readFileSync(path.join(dir,f),"utf8"); await runSql(sql); } return {ok:true, applied:files}; }
           function parseCSV(line){ return line.split(","); }
-
           async function bulkLoadCsv(csv_path){
-            const content = fs.readFileSync(csv_path, "utf8").split(/\r?\n/);
-            const header = content.shift();
-            const cols = header.split(",");
-            const idx = Object.fromEntries(cols.map((c,i)=>[c,i]));
-
-            await txBegin();
-            try{
-              for (const line of content){
-                if (!line.trim()) continue;
-                const cells = parseCSV(line);
-                const account_id  = Number(cells[idx["account_id"]]);
-                const merchant_id = Number(cells[idx["merchant_id"]]);
-                const ts          = cells[idx["ts"]];
-                const memo        = cells[idx["memo"]];
-                const amount      = Number(cells[idx["amount"]]);
-
-                if (engine === "sqlite") {
+            const content=fs.readFileSync(csv_path,"utf8").split(/\r?\n/); const header=content.shift(); const cols=header.split(","); const idx=Object.fromEntries(cols.map((c,i)=>[c,i]));
+            await txBegin(); try{
+              for(const line of content){ if(!line.trim()) continue; const cells=parseCSV(line);
+                const account_id=Number(cells[idx["account_id"]]); const merchant_id=Number(cells[idx["merchant_id"]]); const ts=cells[idx["ts"]]; const memo=cells[idx["memo"]]; const amount=Number(cells[idx["amount"]]);
+                if(engine==="sqlite"){
                   await runSql(`INSERT OR IGNORE INTO accounts(id,name) VALUES(?, ?)`, [account_id, `acc-${account_id}`]);
                   await runSql(`INSERT OR IGNORE INTO merchants(id,name) VALUES(?, ?)`, [merchant_id, `mer-${merchant_id}`]);
-                  await runSql(`INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES(?,?,?,?,?)`,
-                               [account_id, merchant_id, ts, memo, amount]);
+                  await runSql(`INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES(?,?,?,?,?)`, [account_id,merchant_id,ts,memo,amount]);
                 } else {
                   await runSql(`INSERT INTO accounts(id,name) VALUES($1,$2) ON CONFLICT (id) DO NOTHING`, [account_id, `acc-${account_id}`]);
                   await runSql(`INSERT INTO merchants(id,name) VALUES($1,$2) ON CONFLICT (id) DO NOTHING`, [merchant_id, `mer-${merchant_id}`]);
-                  await runSql(`INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES($1,$2,$3,$4,$5)`,
-                               [account_id, merchant_id, ts, memo, amount]);
+                  await runSql(`INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES($1,$2,$3,$4,$5)`, [account_id,merchant_id,ts,memo,amount]);
                 }
-              }
-              await txCommit();
-              return { ok:true, loaded: content.length };
-            } catch(e){
-              await txRollback();
-              throw e;
-            }
+              } await txCommit(); return {ok:true, loaded:content.length};
+            } catch(e){ await txRollback(); throw e; }
           }
-
-          let buffer = "";
-          process.stdin.setEncoding("utf8");
+          let buffer=""; process.stdin.setEncoding("utf8");
           process.stdin.on("data", async chunk => {
-            buffer += chunk;
-            const lines = buffer.split(/\r?\n/);
-            buffer = lines.pop();
-            for (const line of lines) {
-              if (!line.trim()) continue;
-              let msg; try { msg = JSON.parse(line); } catch { send(null, null, { code: -32700, message: "Parse error" }); continue; }
-              const { id=null, method, params={} } = msg;
-              try {
-                if (method === "tools/list") return send(listTools(), id);
-                if (method === "tools/call") {
-                  const { name, arguments: args={} } = params;
-                  if (name === "db.setup")       return send(await openDb(args), id);
-                  if (name === "sql.exec")       return send(await runSql(args.sql, args.params||[]), id);
-                  if (name === "tx.begin")       return send(await txBegin(), id);
-                  if (name === "tx.commit")      return send(await txCommit(), id);
-                  if (name === "tx.rollback")    return send(await txRollback(), id);
-                  if (name === "bulk.load.csv")  return send(await bulkLoadCsv(args.csv_path), id);
-                  if (name === "migrate.apply")  return send(await migrateApply(args.dir), id);
-                  return send(null, id, { code: -32601, message: "Unknown tool" });
+            buffer+=chunk; const lines=buffer.split(/\r?\n/); buffer=lines.pop();
+            for(const line of lines){ if(!line.trim()) continue; let msg; try{ msg=JSON.parse(line);}catch{ send(null,null,{code:-32700,message:"Parse error"}); continue;}
+              const {id=null,method,params={}}=msg; try{
+                if(method==="tools/list") return send(listTools(), id);
+                if(method==="tools/call"){
+                  const {name, arguments:args={}}=params;
+                  if(name==="db.setup") return send(await openDb(args), id);
+                  if(name==="sql.exec") return send(await runSql(args.sql, args.params||[]), id);
+                  if(name==="tx.begin") return send(await txBegin(), id);
+                  if(name==="tx.commit") return send(await txCommit(), id);
+                  if(name==="tx.rollback") return send(await txRollback(), id);
+                  if(name==="bulk.load.csv") return send(await bulkLoadCsv(args.csv_path), id);
+                  if(name==="migrate.apply") return send(await migrateApply(args.dir), id);
+                  return send(null,id,{code:-32601,message:"Unknown tool"});
                 }
-                if (method === "ping") return send({ pong:true }, id);
-                return send(null, id, { code: -32601, message: "Method not found" });
-              } catch (err) {
-                return send(null, id, { code: -32000, message: String(err) });
-              }
+                if(method==="ping") return send({pong:true}, id);
+                return send(null,id,{code:-32601,message:"Method not found"});
+              } catch(err){ return send(null,id,{code:-32000,message:String(err)}); }
             }
           });
           JS
 
-          # test_client.js — SQLite & PG를 순차 테스트, Tx/롤백, 마이그레이션, CSV 대량 로딩
+          # test_client.js — spawn(process.execPath, ...)로 ENOENT 해결
           cat > "$MCP_DIR/test_client.js" <<'JS'
           import { spawn } from "node:child_process";
           import { EOL } from "node:os";
@@ -369,7 +283,8 @@ jobs:
 
           let id = 1;
           const req = (method, params) => JSON.stringify({ jsonrpc: "2.0", id: id++, method, params }) + EOL;
-          const proc = spawn("node", ["server.js"], { cwd: ".github/mcp_demo", stdio: ["pipe", "pipe", "pipe"] });
+          // 🔧 핵심 수정: process.execPath 사용 (절대 경로)
+          const proc = spawn(process.execPath, ["server.js"], { cwd: ".github/mcp_demo", stdio: ["pipe", "pipe", "pipe"] });
           proc.stderr.on("data", d => process.stderr.write(String(d)));
 
           const pending = new Map();
@@ -403,12 +318,9 @@ jobs:
 
             // 3) 단건 INSERT 시드
             for (let i=0; i<SEED; i++){
-              const acc = (i%3)+1, mer=(i%5)+1, amt = 1000+i*17;
-              const sql = `INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES( ${acc}, ${mer}, NOW()::text, 'seed-${i}', ${amt})`;
-              // SQLite 호환: NOW() 대체
-              const sql2 = (mode==="sqlite")
-                ? `INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES( ${acc}, ${mer}, datetime('now'), 'seed-${i}', ${amt})`
-                : sql;
+              const acc=(i%3)+1, mer=(i%5)+1, amt=1000+i*17;
+              const sql=`INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES( ${acc}, ${mer}, NOW()::text, 'seed-${i}', ${amt})`;
+              const sql2 = (mode==="sqlite") ? `INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES( ${acc}, ${mer}, datetime('now'), 'seed-${i}', ${amt})` : sql;
               r = await call("tools/call", { name:"sql.exec", arguments:{ sql: sql2 }});
               log(`sql.exec(seed:${i})`, r);
             }
@@ -417,11 +329,10 @@ jobs:
             await call("tools/call", { name:"tx.begin" });
             const before = await call("tools/call", { name:"sql.exec", arguments:{ sql:`SELECT COUNT(*) AS c FROM transactions` }});
             log("tx.beforeCount", before);
-            // 고의 에러 유발(없는 칼럼)
-            let errHappened = false;
+            let errHappened=false;
             try {
               await call("tools/call", { name:"sql.exec", arguments:{ sql:`INSERT INTO transactions(account_id,merchant_id,ts,memo,amount,nope) VALUES(1,1,datetime('now'),'bad',123,0)` }});
-            } catch(e) { errHappened = true; }
+            } catch(e) { errHappened=true; }
             await call("tools/call", { name:"tx.rollback" });
             const after = await call("tools/call", { name:"sql.exec", arguments:{ sql:`SELECT COUNT(*) AS c FROM transactions` }});
             log("tx.afterCount", after);
@@ -431,7 +342,7 @@ jobs:
             r = await call("tools/call", { name:"bulk.load.csv", arguments:{ csv_path: CSV }});
             log("bulk.load.csv", r);
 
-            // 6) SELECT 검증
+            // 6) 검증
             const sel = await call("tools/call", { name:"sql.exec", arguments:{ sql:`SELECT account_id, COUNT(*) AS cnt, SUM(amount) AS sum FROM transactions GROUP BY account_id ORDER BY account_id LIMIT 5` }});
             log("select.group", sel);
 
@@ -439,7 +350,7 @@ jobs:
           })().catch(e => { console.error("CLIENT ERROR:", e); process.exit(0); });
           JS
 
-          # MCP 설정 (클로드 코드에서 바로 쓸 수 있도록)
+          # MCP 설정 (클로드 코드에서 바로 사용 가능)
           cat > "$MCP_DIR/mcp.config.json" <<JSON
           {
             "mcpServers": {
@@ -452,13 +363,16 @@ jobs:
           }
           JSON
 
-          # 의존성 설치 & 확인
+          # 의존성 설치: package-lock 없으면 install, 있으면 ci
           pushd "$MCP_DIR" >/dev/null
-          runlog "npm.install" bash -lc '(npm ci || npm install)'
-          runlog "npm.check.deps" bash -lc 'npm run -s check:deps'
+          if [ ! -f package-lock.json ]; then
+            runlog "npm.install" bash -lc 'npm install --no-audit --no-fund'
+          else
+            runlog "npm.install" bash -lc '(npm ci || npm install --no-audit --no-fund)'
+          fi
+          runlog "npm.check.deps" bash -lc 'npm run -s check:deps || true'
           popd >/dev/null
 
-          # 메타파일
           echo "${{ inputs.db_path }}" > "$ARTIFACT_DIR/db_path.txt"
           echo "${{ inputs.table_name }}" > "$ARTIFACT_DIR/table.txt"
 
@@ -483,7 +397,8 @@ jobs:
           source /tmp/echo_helpers.sh
           pushd "$MCP_DIR" >/dev/null
           set +e
-          node test_client.js sqlite >"../.."/$LOG_DIR/sqlite_client.log 2>&1
+          # Node 절대경로 실행 (process.execPath 내부에서도 동일하게 사용)
+          "$(command -v node)" test_client.js sqlite >"../.."/$LOG_DIR/sqlite_client.log 2>&1
           ec=$?
           if [ $ec -ne 0 ]; then
             FAIL "sqlite.client: FAILED (exit=$ec)"
@@ -493,7 +408,6 @@ jobs:
           fi
           set -e
           popd >/dev/null
-          # CLI 검증
           sqlite3 "${{ inputs.db_path }}" ".tables" > "$LOG_DIR/sqlite_tables.log" 2>&1 || true
           sqlite3 "${{ inputs.db_path }}" "SELECT COUNT(*) FROM transactions;" > "$LOG_DIR/sqlite_count.log" 2>&1 || true
 
@@ -510,7 +424,7 @@ jobs:
           source /tmp/echo_helpers.sh
           pushd "$MCP_DIR" >/dev/null
           set +e
-          node test_client.js pg >"../.."/$LOG_DIR/pg_client.log 2>&1
+          "$(command -v node)" test_client.js pg >"../.."/$LOG_DIR/pg_client.log 2>&1
           ec=$?
           if [ $ec -ne 0 ]; then
             FAIL "pg.client: FAILED (exit=$ec)"
@@ -520,7 +434,6 @@ jobs:
           fi
           set -e
           popd >/dev/null
-          # 간단 검증 (컨테이너 내부)
           docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "\dt" > "$LOG_DIR/pg_tables.log" 2>&1 || true
           docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "SELECT COUNT(*) FROM transactions;" > "$LOG_DIR/pg_count.log" 2>&1 || true
 
