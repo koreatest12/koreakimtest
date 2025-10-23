@@ -1,28 +1,27 @@
-name: "🧪 Claude Code — MCP Test Server + SQLite Tables (No-Skip • Safe-Continue • Always-Success)"
+name: "🧪 Claude Code — MCP MEGA (SQLite+Postgres • CSV Bulk • Migrations • Tx/Rollback • Always-Success)"
 
 on:
   workflow_dispatch:
     inputs:
       mode:                  # 1
-        description: "실행 모드 표기용(동작엔 영향 없음)"
+        description: "실행 모드(표기용)"
         type: choice
         options: [full, lite]
         default: full
       node_version:          # 2
         default: "20"
-      python_version:        # 3 (선택 유틸)
+      python_version:        # 3
         default: "3.12"
-      db_path:               # 4
+      db_path:               # 4 (SQLite)
         default: ".github/echo_artifacts/mcp_demo.sqlite"
-      table_name:            # 5
+      table_name:            # 5 (주요 테이블명 prefix)
         default: "transactions"
-      seed_rows:             # 6
+      seed_rows:             # 6 (단건 insert 반복 수)
         default: "5"
-      parallel:              # 7 (향후 확장용)
+      csv_rows:              # 7 (CSV 대량 로딩 행 수)
+        default: "1000"
+      parallel:              # 8 (향후 확장)
         default: "1"
-      auto_commit:           # 8
-        type: boolean
-        default: false
       demo_mode:             # 9
         type: boolean
         default: true
@@ -37,9 +36,17 @@ env:
   TZ: Asia/Seoul
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
+  MCP_DIR: .github/mcp_demo
+  PG_CONTAINER: pgtest
+  PG_IMAGE: postgres:16
+  PG_USER: postgres
+  PG_PASS: pass
+  PG_DB: mcpdb
+  PG_PORT: "5432"      # 컨테이너 외부 포트(로컬 접근)
+  PG_DSN: postgres://postgres:pass@localhost:5432/mcpdb
 
 jobs:
-  mcp-db-test:
+  mcp-mega:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -51,18 +58,28 @@ jobs:
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" .github/mcp_demo
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR" "$MCP_DIR/migrations"
           cat > /tmp/echo_helpers.sh <<'SH'
           #!/usr/bin/env bash
           TS(){ date "+%Y-%m-%d %H:%M:%S%z"; }
           OK(){  echo "✅ [$(TS)] $*"; }
           WARN(){ echo "⚠️  [$(TS)] $*" >&2; }
           FAIL(){ echo "❌ [$(TS)] $*" >&2; }
-          safe(){ local name="$1"; shift; set +e; "$@" >"$LOG_DIR/${name}.log" 2>&1; local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
+          safe(){ local name="$1"; shift; set +e; ( "$@" ) >"$LOG_DIR/${name}.log" 2>&1; local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
+          runlog(){ local name="$1"; shift; set +e; ( "$@" ) > >(tee "$LOG_DIR/${name}.log") 2> >(tee "$LOG_DIR/${name}.err.log" >&2); local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
           SH
           chmod +x /tmp/echo_helpers.sh
           source /tmp/echo_helpers.sh
-          OK "Directories ready: $LOG_DIR, $ARTIFACT_DIR"
+          OK "Directories ready"
+
+      - name: Base build deps (sqlite3/node-gyp)
+        shell: bash
+        continue-on-error: true
+        run: |
+          source /tmp/echo_helpers.sh
+          safe "apt.update" sudo apt-get update -y
+          safe "apt.deps" sudo apt-get install -y build-essential python3 make g++ libsqlite3-dev sqlite3 jq
+          OK "Base deps ensured"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -70,78 +87,238 @@ jobs:
           node-version: ${{ inputs.node_version }}
         continue-on-error: true
 
-      - name: Setup Python (optional tools)
+      - name: Setup Python (optional)
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
         continue-on-error: true
 
-      - name: Generate MCP server (Node) + client
+      - name: Start PostgreSQL container
         shell: bash
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
+          safe "docker.pull.pg" docker pull "${PG_IMAGE}"
+          # 기존 컨테이너 정리
+          docker rm -f "${PG_CONTAINER}" >/dev/null 2>&1 || true
+          # 실행
+          runlog "docker.run.pg" docker run -d --name "${PG_CONTAINER}" -e POSTGRES_PASSWORD="${PG_PASS}" -e POSTGRES_DB="${PG_DB}" -p "${PG_PORT}:5432" "${PG_IMAGE}"
+          # 대기 (간단한 헬스체크)
+          for i in {1..30}; do
+            if docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" >/dev/null 2>&1; then OK "Postgres is ready"; break; fi
+            sleep 2
+          done
+          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "SELECT current_database();" || true
+          echo "${PG_DSN}" > "$ARTIFACT_DIR/pg_dsn.txt"
+
+      - name: Generate migrations (DDL) & CSV
+        shell: bash
+        continue-on-error: true
+        env:
+          CSV_ROWS: ${{ inputs.csv_rows }}
+          TBL: ${{ inputs.table_name }}
+        run: |
+          source /tmp/echo_helpers.sh
+
+          # 마이그레이션 파일 (공통 스키마: accounts, merchants, transactions)
+          cat > "$MCP_DIR/migrations/001_init.sql" <<'SQL'
+          -- Schema version tracking
+          CREATE TABLE IF NOT EXISTS schema_version(
+            id INTEGER PRIMARY KEY,
+            version TEXT NOT NULL,
+            applied_at TEXT NOT NULL
+          );
+          SQL
+
+          cat > "$MCP_DIR/migrations/010_core_tables.sql" <<'SQL'
+          CREATE TABLE IF NOT EXISTS accounts(
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS merchants(
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS transactions(
+            id INTEGER PRIMARY KEY,
+            account_id INTEGER NOT NULL,
+            merchant_id INTEGER,
+            ts TEXT NOT NULL,
+            memo TEXT,
+            amount INTEGER NOT NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id),
+            FOREIGN KEY(merchant_id) REFERENCES merchants(id)
+          );
+          SQL
+
+          cat > "$MCP_DIR/migrations/020_indexes.sql" <<'SQL'
+          CREATE INDEX IF NOT EXISTS idx_tx_account ON transactions(account_id);
+          CREATE INDEX IF NOT EXISTS idx_tx_amount  ON transactions(amount);
+          CREATE INDEX IF NOT EXISTS idx_tx_ts      ON transactions(ts);
+          SQL
+
+          # CSV 생성 (id, account_id, merchant_id, ts, memo, amount)
+          CSV="$ARTIFACT_DIR/transactions_bulk.csv"
+          echo "id,account_id,merchant_id,ts,memo,amount" > "$CSV"
+          rows=${CSV_ROWS:-1000}
+          for i in $(seq 1 $rows); do
+            acc=$(( (i % 5) + 1 ))
+            mer=$(( (i % 7) + 1 ))
+            amt=$(( (i % 1000) + 100 ))
+            echo "$i,$acc,$mer,$(date -u +%Y-%m-%dT%H:%M:%SZ),seed-$i,$amt" >> "$CSV"
+          done
+          OK "Generated CSV: $CSV (rows=$rows)"
+
+      - name: Generate MCP server (Node) + client + config
+        shell: bash
+        continue-on-error: true
+        env:
+          npm_config_build_from_source: "true"
+        run: |
+          source /tmp/echo_helpers.sh
 
           # package.json
-          cat > .github/mcp_demo/package.json <<'JSON'
+          cat > "$MCP_DIR/package.json" <<'JSON'
           {
-            "name": "mcp-sqlite-demo",
-            "version": "0.1.0",
+            "name": "mcp-sqlite-pg-mega",
+            "version": "0.2.0",
             "private": true,
             "type": "module",
             "scripts": {
               "start": "node server.js",
-              "test:client": "node test_client.js"
+              "test:client:sqlite": "node test_client.js sqlite",
+              "test:client:pg": "node test_client.js pg",
+              "check:deps": "node -e \"require('sqlite3'); require('pg'); console.log('deps ok')\""
             },
             "dependencies": {
+              "pg": "^8.12.0",
               "sqlite3": "^5.1.7"
             }
           }
           JSON
 
-          # server.js — stdio JSON-RPC (tools: db.setup, sql.exec)
-          cat > .github/mcp_demo/server.js <<'JS'
+          # server.js — SQLite/PG 이중 지원 + tools: db.setup/sql.exec/tx.begin/tx.commit/tx.rollback/bulk.load.csv/migrate.apply
+          cat > "$MCP_DIR/server.js" <<'JS'
           import sqlite3 from "sqlite3";
+          import { Client as PG } from "pg";
+          import fs from "node:fs";
           import { EOL } from "node:os";
+          import path from "node:path";
 
-          let db = null;
+          let engine = null; // 'sqlite' | 'pg'
+          let sqlite = { db: null };
+          let pg = { client: null, tx: false };
 
-          function send(result, id=null, error=null) {
-            const payload = {
-              jsonrpc: "2.0",
-              ...(id!==null? { id } : {}),
-              ...(error ? { error } : { result })
-            };
+          const send = (result, id=null, error=null) => {
+            const payload = { jsonrpc: "2.0", ...(id!==null? { id } : {}), ...(error ? { error } : { result }) };
             process.stdout.write(JSON.stringify(payload) + EOL);
+          };
+
+          const listTools = () => ({
+            tools: [
+              { name: "db.setup", description: "Open DB (engine='sqlite'|'pg')", input_schema: { type: "object", properties: { engine: {type:"string"}, sqlite_path:{type:"string"}, pg_dsn:{type:"string"} }, required: ["engine"] } },
+              { name: "sql.exec", description: "Execute SQL", input_schema: { type: "object", properties: { sql:{type:"string"}, params:{type:"array"} }, required: ["sql"] } },
+              { name: "tx.begin", description: "Begin transaction" },
+              { name: "tx.commit", description: "Commit transaction" },
+              { name: "tx.rollback", description: "Rollback transaction" },
+              { name: "bulk.load.csv", description: "Load CSV into transactions table", input_schema: { type: "object", properties: { csv_path:{type:"string"} }, required: ["csv_path"] } },
+              { name: "migrate.apply", description: "Apply .sql migrations in a folder", input_schema: { type: "object", properties: { dir:{type:"string"} }, required: ["dir"] } }
+            ]
+          });
+
+          async function openDb({engine:eng, sqlite_path, pg_dsn}) {
+            engine = eng;
+            if (engine === "sqlite") {
+              sqlite.db = await new Promise((res, rej)=> {
+                const db = new sqlite3.Database(sqlite_path, (e)=> e? rej(e): res(db));
+              });
+              return { ok:true, engine };
+            } else if (engine === "pg") {
+              pg.client = new PG({ connectionString: pg_dsn });
+              await pg.client.connect();
+              return { ok:true, engine };
+            } else {
+              throw new Error("Unsupported engine");
+            }
           }
 
-          function listTools() {
-            return {
-              tools: [
-                { name: "db.setup", description: "Open or create a SQLite DB file", input_schema: { type: "object", properties: { path: { type: "string" }}, required: ["path"] } },
-                { name: "sql.exec", description: "Execute SQL (optionally with params)", input_schema: { type: "object", properties: { sql: { type: "string" }, params: { type: "array" }}, required: ["sql"] } }
-              ]
-            };
-          }
-
-          function openDb(path) {
-            return new Promise((resolve, reject) => {
-              db = new sqlite3.Database(path, (err) => err ? reject(err) : resolve(true));
-            });
-          }
-
-          function runSql(sql, params=[]) {
-            return new Promise((resolve, reject) => {
-              const trimmed = sql.trim().toLowerCase();
-              if (trimmed.startsWith("select")) {
-                db.all(sql, params, (err, rows) => err ? reject(err) : resolve({ rows }));
+          async function runSql(sql, params=[]) {
+            if (engine === "sqlite") {
+              const q = sql.trim().toLowerCase();
+              if (q.startsWith("select")) {
+                const rows = await new Promise((res, rej)=> sqlite.db.all(sql, params, (e, r)=> e? rej(e): res(r)));
+                return { rows };
               } else {
-                db.run(sql, params, function(err){
-                  if (err) reject(err);
-                  else resolve({ changes: this.changes, lastID: this.lastID });
-                });
+                const info = await new Promise((res, rej)=> sqlite.db.run(sql, params, function(e){ e? rej(e): res({ changes:this.changes, lastID:this.lastID }); }));
+                return info;
               }
-            });
+            } else if (engine === "pg") {
+              const r = await pg.client.query(sql, params);
+              return { rows: r.rows, rowCount: r.rowCount };
+            }
+            throw new Error("DB not initialized");
+          }
+
+          async function txBegin(){
+            if (engine === "sqlite") return runSql("BEGIN");
+            if (engine === "pg") { await pg.client.query("BEGIN"); pg.tx = true; return { ok:true }; }
+          }
+          async function txCommit(){
+            if (engine === "sqlite") return runSql("COMMIT");
+            if (engine === "pg" && pg.tx) { await pg.client.query("COMMIT"); pg.tx = false; return { ok:true }; }
+          }
+          async function txRollback(){
+            if (engine === "sqlite") return runSql("ROLLBACK");
+            if (engine === "pg" && pg.tx) { await pg.client.query("ROLLBACK"); pg.tx = false; return { ok:true }; }
+          }
+
+          async function migrateApply(dir){
+            const files = fs.readdirSync(dir).filter(f=>f.endsWith(".sql")).sort();
+            for (const f of files){
+              const sql = fs.readFileSync(path.join(dir,f), "utf8");
+              await runSql(sql);
+            }
+            return { ok:true, applied: files };
+          }
+
+          // 매우 단순한 CSV 파서(쉼표 포함 필드는 미지원) — 데모/테스트 용도
+          function parseCSV(line){ return line.split(","); }
+
+          async function bulkLoadCsv(csv_path){
+            const content = fs.readFileSync(csv_path, "utf8").split(/\r?\n/);
+            const header = content.shift();
+            const cols = header.split(",");
+            const idx = Object.fromEntries(cols.map((c,i)=>[c,i]));
+
+            await txBegin();
+            try{
+              for (const line of content){
+                if (!line.trim()) continue;
+                const cells = parseCSV(line);
+                const account_id  = Number(cells[idx["account_id"]]);
+                const merchant_id = Number(cells[idx["merchant_id"]]);
+                const ts          = cells[idx["ts"]];
+                const memo        = cells[idx["memo"]];
+                const amount      = Number(cells[idx["amount"]]);
+
+                if (engine === "sqlite") {
+                  await runSql(`INSERT OR IGNORE INTO accounts(id,name) VALUES(?, ?)`, [account_id, `acc-${account_id}`]);
+                  await runSql(`INSERT OR IGNORE INTO merchants(id,name) VALUES(?, ?)`, [merchant_id, `mer-${merchant_id}`]);
+                  await runSql(`INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES(?,?,?,?,?)`,
+                               [account_id, merchant_id, ts, memo, amount]);
+                } else {
+                  await runSql(`INSERT INTO accounts(id,name) VALUES($1,$2) ON CONFLICT (id) DO NOTHING`, [account_id, `acc-${account_id}`]);
+                  await runSql(`INSERT INTO merchants(id,name) VALUES($1,$2) ON CONFLICT (id) DO NOTHING`, [merchant_id, `mer-${merchant_id}`]);
+                  await runSql(`INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES($1,$2,$3,$4,$5)`,
+                               [account_id, merchant_id, ts, memo, amount]);
+                }
+              }
+              await txCommit();
+              return { ok:true, loaded: content.length };
+            } catch(e){
+              await txRollback();
+              throw e;
+            }
           }
 
           let buffer = "";
@@ -152,31 +329,22 @@ jobs:
             buffer = lines.pop();
             for (const line of lines) {
               if (!line.trim()) continue;
-              let msg;
-              try { msg = JSON.parse(line); } catch (e) {
-                send(null, null, { code: -32700, message: "Parse error" });
-                continue;
-              }
+              let msg; try { msg = JSON.parse(line); } catch { send(null, null, { code: -32700, message: "Parse error" }); continue; }
               const { id=null, method, params={} } = msg;
-
               try {
-                if (method === "tools/list") {
-                  return send(listTools(), id);
-                }
+                if (method === "tools/list") return send(listTools(), id);
                 if (method === "tools/call") {
                   const { name, arguments: args={} } = params;
-                  if (name === "db.setup") {
-                    await openDb(args.path);
-                    return send({ ok: true, path: args.path }, id);
-                  }
-                  if (name === "sql.exec") {
-                    const r = await runSql(args.sql, args.params || []);
-                    return send({ ok: true, ...r }, id);
-                  }
+                  if (name === "db.setup")       return send(await openDb(args), id);
+                  if (name === "sql.exec")       return send(await runSql(args.sql, args.params||[]), id);
+                  if (name === "tx.begin")       return send(await txBegin(), id);
+                  if (name === "tx.commit")      return send(await txCommit(), id);
+                  if (name === "tx.rollback")    return send(await txRollback(), id);
+                  if (name === "bulk.load.csv")  return send(await bulkLoadCsv(args.csv_path), id);
+                  if (name === "migrate.apply")  return send(await migrateApply(args.dir), id);
                   return send(null, id, { code: -32601, message: "Unknown tool" });
                 }
-                if (method === "ping") return send({ pong: true }, id);
-
+                if (method === "ping") return send({ pong:true }, id);
                 return send(null, id, { code: -32601, message: "Method not found" });
               } catch (err) {
                 return send(null, id, { code: -32000, message: String(err) });
@@ -185,25 +353,23 @@ jobs:
           });
           JS
 
-          # test_client.js — 서버를 child_process로 띄워 호출 시퀀스 수행
-          cat > .github/mcp_demo/test_client.js <<'JS'
+          # test_client.js — SQLite & PG를 순차 테스트, Tx/롤백, 마이그레이션, CSV 대량 로딩
+          cat > "$MCP_DIR/test_client.js" <<'JS'
           import { spawn } from "node:child_process";
           import { EOL } from "node:os";
+          import process from "node:process";
 
+          const mode = process.argv[2] || "sqlite"; // sqlite | pg
           const DB_PATH = process.env.DB_PATH || ".github/echo_artifacts/mcp_demo.sqlite";
           const TABLE = process.env.TABLE_NAME || "transactions";
           const SEED = parseInt(process.env.SEED_ROWS || "5", 10);
+          const CSV = process.env.CSV_FILE || ".github/echo_artifacts/transactions_bulk.csv";
+          const MIG_DIR = process.env.MIG_DIR || ".github/mcp_demo/migrations";
+          const PG_DSN = process.env.PG_DSN;
 
           let id = 1;
-          function req(method, params) {
-            return JSON.stringify({ jsonrpc: "2.0", id: id++, method, params }) + EOL;
-          }
-
-          const proc = spawn("node", ["server.js"], {
-            cwd: ".github/mcp_demo",
-            stdio: ["pipe", "pipe", "pipe"]
-          });
-
+          const req = (method, params) => JSON.stringify({ jsonrpc: "2.0", id: id++, method, params }) + EOL;
+          const proc = spawn("node", ["server.js"], { cwd: ".github/mcp_demo", stdio: ["pipe", "pipe", "pipe"] });
           proc.stderr.on("data", d => process.stderr.write(String(d)));
 
           const pending = new Map();
@@ -211,113 +377,154 @@ jobs:
             const lines = String(chunk).split(/\r?\n/);
             for (const line of lines) {
               if (!line.trim()) continue;
-              let msg;
-              try { msg = JSON.parse(line); } catch { continue; }
-              if (msg.id && pending.has(msg.id)) {
-                pending.get(msg.id)(msg);
-                pending.delete(msg.id);
-              } else {
-                console.log("EVT", msg);
-              }
+              let msg; try { msg = JSON.parse(line); } catch { continue; }
+              if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+              else { console.log("EVT", msg); }
             }
           });
 
-          function call(method, params) {
-            return new Promise((resolve) => {
-              const myId = id;
-              pending.set(myId, resolve);
-              proc.stdin.write(req(method, params));
-            });
-          }
+          const call = (method, params) => new Promise((resolve) => { const myId=id; pending.set(myId, resolve); proc.stdin.write(req(method, params)); });
 
           (async () => {
-            function log(label, obj){ console.log(`--- ${label} ---`); console.log(JSON.stringify(obj, null, 2)); }
+            const log = (label, obj) => { console.log(`--- ${mode} :: ${label} ---`); console.log(JSON.stringify(obj, null, 2)); };
 
+            // 1) DB 연결
             let r;
-
-            r = await call("tools/list", {});
-            log("tools/list", r);
-
-            r = await call("tools/call", { name: "db.setup", arguments: { path: DB_PATH }});
+            if (mode === "sqlite") {
+              r = await call("tools/call", { name:"db.setup", arguments:{ engine:"sqlite", sqlite_path: DB_PATH }});
+            } else {
+              r = await call("tools/call", { name:"db.setup", arguments:{ engine:"pg", pg_dsn: PG_DSN }});
+            }
             log("db.setup", r);
 
-            const createSQL = `
-              CREATE TABLE IF NOT EXISTS ${TABLE}(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts TEXT NOT NULL,
-                memo TEXT,
-                amount INTEGER NOT NULL
-              );
-            `;
-            r = await call("tools/call", { name: "sql.exec", arguments: { sql: createSQL }});
-            log("sql.exec(create)", r);
+            // 2) 마이그레이션 적용
+            r = await call("tools/call", { name:"migrate.apply", arguments:{ dir: MIG_DIR }});
+            log("migrate.apply", r);
 
+            // 3) 단건 INSERT 시드
             for (let i=0; i<SEED; i++){
-              const amt = 1000 + i*137;
-              const mem = `seed-${i}`;
-              const sql = `INSERT INTO ${TABLE}(ts,memo,amount) VALUES(datetime('now'), ?, ?)`;
-              r = await call("tools/call", { name: "sql.exec", arguments: { sql, params: [mem, amt] }});
-              log(`sql.exec(insert:${i})`, r);
+              const acc = (i%3)+1, mer=(i%5)+1, amt = 1000+i*17;
+              const sql = `INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES( ${acc}, ${mer}, NOW()::text, 'seed-${i}', ${amt})`;
+              // SQLite 호환: NOW() 대체
+              const sql2 = (mode==="sqlite")
+                ? `INSERT INTO transactions(account_id,merchant_id,ts,memo,amount) VALUES( ${acc}, ${mer}, datetime('now'), 'seed-${i}', ${amt})`
+                : sql;
+              r = await call("tools/call", { name:"sql.exec", arguments:{ sql: sql2 }});
+              log(`sql.exec(seed:${i})`, r);
             }
 
-            const selectSQL = `SELECT id, ts, memo, amount FROM ${TABLE} ORDER BY id DESC LIMIT 3`;
-            r = await call("tools/call", { name: "sql.exec", arguments: { sql: selectSQL }});
-            log("sql.exec(select)", r);
+            // 4) 트랜잭션·롤백 시나리오
+            await call("tools/call", { name:"tx.begin" });
+            const before = await call("tools/call", { name:"sql.exec", arguments:{ sql:`SELECT COUNT(*) AS c FROM transactions` }});
+            log("tx.beforeCount", before);
+            // 고의 에러 유발(없는 칼럼)
+            let errHappened = false;
+            try {
+              await call("tools/call", { name:"sql.exec", arguments:{ sql:`INSERT INTO transactions(account_id,merchant_id,ts,memo,amount,nope) VALUES(1,1,datetime('now'),'bad',123,0)` }});
+            } catch(e) { errHappened = true; }
+            await call("tools/call", { name:"tx.rollback" });
+            const after = await call("tools/call", { name:"sql.exec", arguments:{ sql:`SELECT COUNT(*) AS c FROM transactions` }});
+            log("tx.afterCount", after);
+            log("tx.rollbackTriggered", { err: errHappened });
 
-            setTimeout(() => { proc.kill("SIGTERM"); }, 200);
-          })().catch(e => {
-            console.error("CLIENT ERROR:", e);
-            process.exit(0); // 실패해도 성공 종료
-          });
+            // 5) CSV 대량 로딩
+            r = await call("tools/call", { name:"bulk.load.csv", arguments:{ csv_path: CSV }});
+            log("bulk.load.csv", r);
+
+            // 6) SELECT 검증
+            const sel = await call("tools/call", { name:"sql.exec", arguments:{ sql:`SELECT account_id, COUNT(*) AS cnt, SUM(amount) AS sum FROM transactions GROUP BY account_id ORDER BY account_id LIMIT 5` }});
+            log("select.group", sel);
+
+            setTimeout(()=>proc.kill("SIGTERM"), 200);
+          })().catch(e => { console.error("CLIENT ERROR:", e); process.exit(0); });
           JS
 
+          # MCP 설정 (클로드 코드에서 바로 쓸 수 있도록)
+          cat > "$MCP_DIR/mcp.config.json" <<JSON
+          {
+            "mcpServers": {
+              "db-mega": {
+                "command": "node",
+                "args": ["server.js"],
+                "cwd": "${MCP_DIR}"
+              }
+            }
+          }
+          JSON
+
+          # 의존성 설치 & 확인
+          pushd "$MCP_DIR" >/dev/null
+          runlog "npm.install" bash -lc '(npm ci || npm install)'
+          runlog "npm.check.deps" bash -lc 'npm run -s check:deps'
+          popd >/dev/null
+
+          # 메타파일
           echo "${{ inputs.db_path }}" > "$ARTIFACT_DIR/db_path.txt"
           echo "${{ inputs.table_name }}" > "$ARTIFACT_DIR/table.txt"
 
-      - name: Install Node deps
+      - name: Ensure DB parent dir (SQLite)
         shell: bash
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
-          ( cd .github/mcp_demo && npm ci || npm install ) >"$LOG_DIR/npm_install.log" 2>&1 || true
-          OK "Node dependencies installed (or attempted)"
+          mkdir -p "$(dirname "${{ inputs.db_path }}")"
+          OK "SQLite DB parent dir ensured"
 
-      - name: Run MCP server test (DB setup + table create + seed + select)
+      - name: Run SQLite scenario (migrations + seed + tx/rollback + CSV bulk)
         shell: bash
         continue-on-error: true
         env:
           DB_PATH: ${{ inputs.db_path }}
           TABLE_NAME: ${{ inputs.table_name }}
           SEED_ROWS: ${{ inputs.seed_rows }}
+          CSV_FILE: ${{ env.ARTIFACT_DIR }}/transactions_bulk.csv
+          MIG_DIR: ${{ env.MCP_DIR }}/migrations
         run: |
           source /tmp/echo_helpers.sh
-          pushd .github/mcp_demo >/dev/null
+          pushd "$MCP_DIR" >/dev/null
           set +e
-          node test_client.js >"../.."/$LOG_DIR/mcp_test_client.log 2>&1
+          node test_client.js sqlite >"../.."/$LOG_DIR/sqlite_client.log 2>&1
           ec=$?
           if [ $ec -ne 0 ]; then
-            FAIL "mcp.test: FAILED (exit=$ec)"
+            FAIL "sqlite.client: FAILED (exit=$ec)"
+            tail -n 200 "../.."/$LOG_DIR/sqlite_client.log || true
           else
-            OK "mcp.test: completed (exit=0)"
+            OK "sqlite.client: completed (exit=0)"
           fi
           set -e
           popd >/dev/null
+          # CLI 검증
+          sqlite3 "${{ inputs.db_path }}" ".tables" > "$LOG_DIR/sqlite_tables.log" 2>&1 || true
+          sqlite3 "${{ inputs.db_path }}" "SELECT COUNT(*) FROM transactions;" > "$LOG_DIR/sqlite_count.log" 2>&1 || true
 
-      - name: SQLite CLI sanity (optional)
+      - name: Run PostgreSQL scenario (migrations + seed + tx/rollback + CSV bulk)
         shell: bash
         continue-on-error: true
+        env:
+          PG_DSN: ${{ env.PG_DSN }}
+          TABLE_NAME: ${{ inputs.table_name }}
+          SEED_ROWS: ${{ inputs.seed_rows }}
+          CSV_FILE: ${{ env.ARTIFACT_DIR }}/transactions_bulk.csv
+          MIG_DIR: ${{ env.MCP_DIR }}/migrations
         run: |
           source /tmp/echo_helpers.sh
-          safe "apt.sqlite3" sudo apt-get update -y && sudo apt-get install -y sqlite3
-          if command -v sqlite3 >/dev/null 2>&1; then
-            sqlite3 "${{ inputs.db_path }}" ".tables" > "$LOG_DIR/sqlite_tables.log" 2>&1 || true
-            sqlite3 "${{ inputs.db_path }}" "SELECT COUNT(*) FROM ${{ inputs.table_name }};" > "$LOG_DIR/sqlite_count.log" 2>&1 || true
-            OK "sqlite3 sanity executed"
+          pushd "$MCP_DIR" >/dev/null
+          set +e
+          node test_client.js pg >"../.."/$LOG_DIR/pg_client.log 2>&1
+          ec=$?
+          if [ $ec -ne 0 ]; then
+            FAIL "pg.client: FAILED (exit=$ec)"
+            tail -n 200 "../.."/$LOG_DIR/pg_client.log || true
           else
-            WARN "sqlite3 not available; skipped CLI sanity"
+            OK "pg.client: completed (exit=0)"
           fi
+          set -e
+          popd >/dev/null
+          # 간단 검증 (컨테이너 내부)
+          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "\dt" > "$LOG_DIR/pg_tables.log" 2>&1 || true
+          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "SELECT COUNT(*) FROM transactions;" > "$LOG_DIR/pg_count.log" 2>&1 || true
 
-      - name: Summaries & gather
+      - name: Summaries
         if: always()
         shell: bash
         continue-on-error: true
@@ -326,24 +533,24 @@ jobs:
           {
             echo "=== RUN SUMMARY ($(date)) ==="
             echo "mode=${{ inputs.mode }}"
-            echo "db_path=${{ inputs.db_path }}"
-            echo "table=${{ inputs.table_name }}"
-            echo "seed_rows=${{ inputs.seed_rows }}"
+            echo "sqlite_db=${{ inputs.db_path }}"
+            echo "pg_dsn=${PG_DSN}"
+            echo "tables=accounts, merchants, transactions"
+            echo "migrations=001_init.sql, 010_core_tables.sql, 020_indexes.sql"
+            echo "csv_rows=${{ inputs.csv_rows }}"
           } | tee "$LOG_DIR/summary.txt"
           OK "Summary generated"
 
-      - name: Upload artifacts (logs, db)
+      - name: Upload artifacts (logs, db, sources, configs)
         if: always()
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: mcp-db-test-artifacts
+          name: mcp-mega-artifacts
           path: |
             .github/echo_logs/**
             .github/echo_artifacts/**
-            .github/mcp_demo/package.json
-            .github/mcp_demo/server.js
-            .github/mcp_demo/test_client.js
+            .github/mcp_demo/**
           if-no-files-found: warn
           retention-days: 7
 
@@ -351,5 +558,5 @@ jobs:
         if: always()
         shell: bash
         run: |
-          echo "✅ DONE — All steps attempted. Failures (if any) are captured in logs, but workflow exits SUCCESS by design."
+          echo "✅ DONE — All steps attempted. Any failures are logged above. Exiting SUCCESS by design."
           exit 0
