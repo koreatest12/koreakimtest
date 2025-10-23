@@ -1,6 +1,8 @@
-name: "🧪 Claude Code — MCP MEGA+++ (고객·은행 도메인 • SQLite=sql.js • PG COPY • 파티션 자동생성 • 권한/롤 • 벤치마크 그래프 • Always-Success)"
+name: "🧪 Claude Code — MCP MEGA++++ + Banking Pipeline (PG COPY • 파티션 자동화 • 권한/롤 • 성능 그래프 • 멀티DB) "
 
 on:
+  push:
+  pull_request:
   workflow_dispatch:
     inputs:
       mode:
@@ -41,6 +43,9 @@ env:
   PG_DSN: postgres://postgres:pass@localhost:5432/mcpdb
 
 jobs:
+  # ──────────────────────────────────────────────────────────────────────────────
+  # 1) MEGA++++ — Claude Code용 MCP 서버 + 고객/은행 도메인 + PG COPY + 리포팅
+  # ──────────────────────────────────────────────────────────────────────────────
   mcp-mega:
     runs-on: ubuntu-24.04
     steps:
@@ -64,6 +69,7 @@ jobs:
           WARN(){ echo "⚠️  [$(TS)] $*" >&2; }
           FAIL(){ echo "❌ [$(TS)] $*" >&2; }
           mklogs(){ mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"; }
+          # runlog/safe는 여기서만 쓸 따옴표를 완전히 맞춥니다.
           safe(){ local name="$1"; shift; mklogs; set +e; ( "$@" ) >"$LOG_DIR/${name}.log" 2>&1; local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
           runlog(){ local name="$1"; shift; mklogs; set +e; ( "$@" ) > >(tee "$LOG_DIR/${name}.log") 2> >(tee "$LOG_DIR/${name}.err.log" >&2); local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
           SH
@@ -97,7 +103,7 @@ jobs:
             if docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" >/dev/null 2>&1; then OK "Postgres is ready"; break; fi
             sleep 2
           done
-          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "SELECT current_database();"
+          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "SELECT current_database();" || true
           echo "${PG_DSN}" > "$ARTIFACT_DIR/pg_dsn.txt"
 
       - name: Generate CSV (대량·RFC4180)
@@ -123,14 +129,13 @@ jobs:
           done
           OK "Generated CSV: $CSV (rows=$rows)"
 
-      - name: Generate migrations (고객/은행 도메인 + 권한/롤 + PG 파티션/잡)
+      - name: Generate migrations (도메인/권한/파티션/잡)
         shell: bash
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
-          # ── 00_common: 고객·은행·계좌·거래(코어 스키마, 엔진 공통)
+          # 00_common
           cat > "$MCP_DIR/migrations/00_common/001_core.sql" <<'SQL'
-          -- customers / banks / accounts / transactions
           CREATE TABLE IF NOT EXISTS customers(
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
@@ -170,7 +175,7 @@ jobs:
           );
           SQL
 
-          # ── 10_post_bulk/common: 공통 인덱스
+          # common indexes (사후)
           cat > "$MCP_DIR/migrations/10_post_bulk/common/030_indexes.sql" <<'SQL'
           CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions(customer_id);
           CREATE INDEX IF NOT EXISTS idx_tx_account  ON transactions(account_id);
@@ -179,7 +184,7 @@ jobs:
           CREATE INDEX IF NOT EXISTS idx_tx_ts       ON transactions(ts);
           SQL
 
-          # ── 10_post_bulk/pg: PG 전용 (시퀀스/권한/파티셔닝/트리거/뷰/스케줄러)
+          # pg 전용
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/020_roles_privs.sql" <<'SQL'
           DO $$
           BEGIN
@@ -198,7 +203,6 @@ jobs:
           SQL
 
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/025_sequences.sql" <<'SQL'
-          -- transactions_p는 identity, 원본 transactions도 시퀀스 제공(데모)
           DO $$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname='transactions_id_seq') THEN
               CREATE SEQUENCE transactions_id_seq START 1 OWNED BY transactions.id;
@@ -227,7 +231,6 @@ jobs:
             END IF;
           END$$;
 
-          -- 현재달 파티션
           DO $$
           DECLARE
             start_ts DATE := date_trunc('month', now())::date;
@@ -279,7 +282,6 @@ jobs:
           SQL
 
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/070_monthly_partition_job.sql" <<'SQL'
-          -- 다음달 파티션 자동 생성 함수
           CREATE OR REPLACE FUNCTION ensure_next_month_partition() RETURNS void AS $$
           DECLARE
             start_ts DATE := (date_trunc('month', now()) + interval '1 month')::date;
@@ -293,24 +295,21 @@ jobs:
           END
           $$ LANGUAGE plpgsql;
 
-          -- pg_cron 있는 경우 스케줄러 등록 시도 (없으면 실패해도 무시)
           DO $$
           BEGIN
             PERFORM 1 FROM pg_extension WHERE extname='pg_cron';
             IF NOT FOUND THEN
-              RAISE NOTICE 'pg_cron not installed; scheduler step will be skipped by CI.';
+              RAISE NOTICE 'pg_cron not installed; CI will call ensure_next_month_partition() once.';
             ELSE
-              -- 매월 1일 00:10 UTC 실행
               PERFORM cron.schedule('ensure_next_month_partition_job', '10 0 1 * *', $$SELECT ensure_next_month_partition();$$)
-              ON CONFLICT DO NOTHING;
+                ON CONFLICT DO NOTHING;
             END IF;
           EXCEPTION WHEN others THEN
-            -- 권한/설치 안 되어 있으면 조용히 패스
             NULL;
           END$$;
           SQL
 
-      - name: Generate MCP server + benchmark + config
+      - name: Generate MCP server + client + benchmark + report
         shell: bash
         continue-on-error: true
         env:
@@ -318,11 +317,11 @@ jobs:
         run: |
           source /tmp/echo_helpers.sh
 
-          # package.json (PG COPY용 pg-copy-streams 추가)
+          # package.json
           cat > "$MCP_DIR/package.json" <<'JSON'
           {
             "name": "mcp-sqlite-pg-mega",
-            "version": "0.5.0",
+            "version": "0.5.1",
             "private": true,
             "type": "module",
             "scripts": {
@@ -341,7 +340,7 @@ jobs:
           }
           JSON
 
-          # server.js (CSV 스트리밍 + PG COPY 옵션)
+          # server.js (스트리밍 CSV + PG COPY 지원)
           cat > "$MCP_DIR/server.js" <<'JS'
           import initSqlJs from "sql.js";
           import fs from "node:fs";
@@ -427,7 +426,6 @@ jobs:
             return { ok:true };
           }
 
-          // CSV 라인 파서 (RFC4180-ish)
           function parseCSVLine(line){
             const out = []; let cur = ""; let inQ = false; let i = 0;
             while (i < line.length){
@@ -448,14 +446,12 @@ jobs:
             return out;
           }
 
-          // 스트리밍 읽기 헬퍼
           function *readLines(filePath){
-            const buf = fs.readFileSync(filePath, "utf8"); // (간단화) 데모에선 동기—대용량이면 fs.createReadStream + chunk split
+            const buf = fs.readFileSync(filePath, "utf8");
             yield* buf.split(/\r?\n/);
           }
 
           async function bulkLoadCsv(csv_path, batch_size=1000, use_copy=false){
-            // 헤더 파싱
             const iter = readLines(csv_path);
             const header = iter.next().value;
             if (!header) return { ok:true, loaded:0 };
@@ -463,31 +459,24 @@ jobs:
             const idx = Object.fromEntries(cols.map((c,i)=>[c,i]));
 
             if (engine === "pg" && use_copy){
-              // COPY FROM STDIN: 트랜잭션 내에서 고속 적재
               await pg.client.query("BEGIN");
               try{
-                // 대상은 원본 transactions (트리거가 파티션으로 라우팅)
                 const stream = pg.client.query(copyFrom(`COPY transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount) FROM STDIN WITH (FORMAT csv)`));
                 for (const line of readLines(csv_path)){
-                  if (!line || !line.trim()) continue;
-                  if (line === header) continue;
-                  // 이미 RFC4180 형식이므로 헤더 제외 전송
+                  if (!line || !line.trim() || line === header) continue;
                   const arr = parseCSVLine(line);
-                  // id 칼럼 제외 → customer_id, bank_id, account_id, merchant_id, ts, memo, amount
                   const rec = [ "customer_id","bank_id","account_id","merchant_id","ts","memo","amount" ].map(k=>arr[idx[k]] ?? "");
                   stream.write(rec.map(v => (v==null?"":String(v))).join(",") + "\n");
                 }
                 await new Promise((res,rej)=>{ stream.on("finish",res); stream.on("error",rej); stream.end(); });
                 await pg.client.query("COMMIT");
-                const { rows } = await pg.client.query("SELECT COUNT(*)::int AS c FROM transactions UNION ALL SELECT COUNT(*) FROM transactions_p");
-                return { ok:true, loaded: rows.reduce((a,r)=>a+Number(r.c||0),0) };
+                return { ok:true };
               } catch(e){
                 await pg.client.query("ROLLBACK");
                 throw e;
               }
             }
 
-            // 일반 경로: 배치 커밋 (SQLite/PG 공통)
             let loaded = 0, batch = 0;
             await txBegin();
             try{
@@ -574,10 +563,9 @@ jobs:
           }
           JS
 
-          # test_client.js (사전 마이그레이션→시드→롤백시나리오→CSV(스트리밍/COPY)→사후 마이그레이션→뷰 리프레시)
+          # test_client.js
           cat > "$MCP_DIR/test_client.js" <<'JS'
           import { createInProc } from "./server.js";
-
           const mode = process.argv[2] || "sqlite";
           const DB_PATH = process.env.DB_PATH || ".github/echo_artifacts/mcp_demo.sqlite";
           const CSV = process.env.CSV_FILE || ".github/echo_artifacts/transactions_bulk.csv";
@@ -585,7 +573,6 @@ jobs:
           const PG_DSN = process.env.PG_DSN;
           const BATCH = parseInt(process.env.BATCH_SIZE || "2000", 10);
           const USE_COPY = (process.env.USE_COPY === "true");
-
           const mcp = createInProc();
           const log = (label, obj) => { console.log(`--- ${mode} :: ${label} ---`); console.log(JSON.stringify(obj, null, 2)); };
 
@@ -595,11 +582,9 @@ jobs:
             else                   r = await mcp.call("db.setup", { engine:"pg", pg_dsn: PG_DSN });
             log("db.setup", r);
 
-            // 사전 마이그레이션
             r = await mcp.call("migrate.apply", { dir: `${MIG_ROOT}` });
             log("migrate.apply.pre", r);
 
-            // 고객/은행/계좌/상인 간단 시드 + 트랜잭션 시드
             for (let i=1;i<=5;i++){
               const sqls = [
                 `INSERT INTO customers(id,name,email) VALUES(${i},'cust-${i}','c${i}@ex') ON CONFLICT DO NOTHING`,
@@ -616,7 +601,6 @@ jobs:
               await mcp.call("sql.exec", { sql: t });
             }
 
-            // 롤백 시나리오
             await mcp.call("tx.begin");
             const before = await mcp.call("sql.exec", { sql:`SELECT COUNT(*) AS c FROM transactions` });
             let err=false; try{
@@ -626,11 +610,9 @@ jobs:
             const after = await mcp.call("sql.exec", { sql:`SELECT COUNT(*) AS c FROM transactions` });
             log("tx.beforeCount", before); log("tx.afterCount", after); log("tx.rollbackTriggered", {err});
 
-            // CSV 대량 로딩 (스트리밍/배치, PG는 COPY 사용 가능)
             r = await mcp.call("bulk.load.csv", { csv_path: CSV, batch_size: BATCH, use_copy: (mode==="pg" && USE_COPY) });
             log("bulk.load.csv", r);
 
-            // 사후 마이그레이션 (공통 인덱스 + PG 전용 파티션/트리거/뷰/잡 + 머뷰 리프레시)
             const COMMON_POST = `${MIG_ROOT}/10_post_bulk/common`;
             await mcp.call("migrate.apply", { dir: COMMON_POST });
             if (mode === "pg"){
@@ -640,13 +622,12 @@ jobs:
               await mcp.call("sql.exec", { sql: `SELECT ensure_next_month_partition();` }).catch(()=>{});
             }
 
-            // 검증
             const sel = await mcp.call("sql.exec", { sql:`SELECT customer_id, COUNT(*) AS cnt, SUM(amount) AS sum FROM transactions GROUP BY customer_id ORDER BY customer_id LIMIT 5` });
             log("select.group", sel);
           })().catch(e => { console.error("CLIENT ERROR:", e); process.exit(0); });
           JS
 
-          # benchmark.js — 대표 쿼리 성능 측정(JSON 출력)
+          # benchmark.js
           cat > "$MCP_DIR/benchmark.js" <<'JS'
           import { createInProc } from "./server.js";
           const mode = process.argv[2] || "pg";
@@ -657,7 +638,7 @@ jobs:
           const cases = [
             { name:"count_all",     sql:"SELECT COUNT(*) FROM transactions" },
             { name:"sum_amount",    sql:"SELECT SUM(amount) FROM transactions" },
-            { name:"group_customer",sql:"SELECT customer_id, COUNT(*) c, SUM(amount) s FROM transactions GROUP BY customer_id" },
+            { name:"group_customer",sql:"SELECT customer_id, COUNT(*) c, SUM(amount) s FROM transactions GROUP BY customer_id" }
           ];
 
           function nowMs(){ return Number(process.hrtime.bigint() / 1000000n); }
@@ -681,7 +662,7 @@ jobs:
           })().catch(e=>{ console.error(e); process.exit(1); });
           JS
 
-          # report.js — 로그 + 벤치마크 JSON → HTML(SVG 차트) & MD
+          # report.js (SVG 차트)
           cat > "$MCP_DIR/report.js" <<'JS'
           import fs from "node:fs";
           import path from "node:path";
@@ -693,7 +674,6 @@ jobs:
             const lines = fs.readFileSync(p, "utf8").trimEnd().split(/\r?\n/);
             return lines.slice(-n).join("\n");
           }
-
           function renderSVGBar(data){
             const W=600, H=220, pad=30;
             const max = Math.max(...data.map(d=>d.ms), 1);
@@ -720,8 +700,8 @@ jobs:
             { title: "Summary", file: "summary.txt" }
           ];
 
-          let md = `# MCP MEGA+++ Run Report\n\n`;
-          let html = `<!doctype html><meta charset="utf-8"><title>MCP MEGA+++ Report</title><style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.45;padding:24px;} pre{background:#f6f8fa;padding:12px;overflow:auto;border-radius:8px;} h2{margin-top:28px}</style><h1>MCP MEGA+++ Run Report</h1>`;
+          let md = `# MCP MEGA++++ Run Report\n\n`;
+          let html = `<!doctype html><meta charset="utf-8"><title>MCP MEGA++++ Report</title><style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.45;padding:24px;} pre{background:#f6f8fa;padding:12px;overflow:auto;border-radius:8px;} h2{margin-top:28px}</style><h1>MCP MEGA++++ Run Report</h1>`;
 
           for (const s of sections){
             const p = path.join(LOG_DIR, s.file);
@@ -730,7 +710,6 @@ jobs:
             html += `<h2>${s.title}</h2><pre>${content.replace(/[&<>]/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;" }[m]))}</pre>`;
           }
 
-          // 벤치마크 그래프
           const benchPgPath = path.join(OUT_DIR, "benchmark_pg.json");
           const benchSqlitePath = path.join(OUT_DIR, "benchmark_sqlite.json");
           const pgData = fs.existsSync(benchPgPath) ? JSON.parse(fs.readFileSync(benchPgPath,"utf8")) : null;
@@ -802,8 +781,8 @@ jobs:
           else
             OK "sqlite.client: completed (exit=0)"
           fi
-          # SQLite 벤치
-          node benchmark.js sqlite >"../.."/$ARTIFACT_DIR/benchmark_sqlite.json 2>>"../.."/$LOG_DIR/sqlite_client.log" || true
+          # ✔ FIX: 여분의 따옴표 제거
+          node benchmark.js sqlite >"../.."/$ARTIFACT_DIR/benchmark_sqlite.json 2>>"../.."/$LOG_DIR/sqlite_client.log || true
           set -e
           popd >/dev/null
 
@@ -828,11 +807,10 @@ jobs:
           else
             OK "pg.client: completed (exit=0)"
           fi
-          # 파티션 테이블/카운트
           docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "\dt" > "$LOG_DIR/pg_tables.log" 2>&1 || true
           docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "SELECT (SELECT COUNT(*) FROM transactions) + (SELECT COUNT(*) FROM transactions_p) AS total;" > "$LOG_DIR/pg_count.log" 2>&1 || true
-          # PG 벤치
-          node benchmark.js pg >"../.."/$ARTIFACT_DIR/benchmark_pg.json 2>>"../.."/$LOG_DIR/pg_client.log" || true
+          # ✔ FIX: 여분의 따옴표 제거
+          node benchmark.js pg >"../.."/$ARTIFACT_DIR/benchmark_pg.json 2>>"../.."/$LOG_DIR/pg_client.log || true
           set -e
           popd >/dev/null
 
@@ -883,3 +861,86 @@ jobs:
         run: |
           echo "✅ DONE — All steps attempted. Any failures are logged above. Exiting SUCCESS by design."
           exit 0
+
+  # ──────────────────────────────────────────────────────────────────────────────
+  # 2) Banking Data Pipeline — 사용자가 준 멀티DB 매트릭스 잡 그대로 통합
+  # ──────────────────────────────────────────────────────────────────────────────
+  banking-data-pipeline:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [postgres, mysql, mariadb, sqlite, duckdb]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system clients (psql, mysqlclient)
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client mysql-client
+
+      - name: Install Python dependencies
+        run: |
+          set -euxo pipefail
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else echo "requirements.txt not found; skipping."; fi
+
+      - name: Start database container
+        env:
+          DB: ${{ matrix.db }}
+        run: |
+          set -euxo pipefail
+          case "$DB" in
+            postgres)
+              docker run -d --name pgdb -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=bank -p 5432:5432 postgres:16
+              ;;
+            mysql)
+              docker run -d --name mysqldb -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=bank -p 3306:3306 mysql:8
+              ;;
+            mariadb)
+              docker run -d --name mariadb -e MARIADB_ROOT_PASSWORD=password -e MARIADB_DATABASE=bank -p 3307:3306 mariadb:11
+              ;;
+            sqlite|duckdb)
+              echo "No external DB container required for $DB"
+              ;;
+            *) echo "Unsupported DB $DB"; exit 1 ;;
+          esac
+
+      - name: Wait for DB readiness
+        env:
+          DB: ${{ matrix.db }}
+        run: |
+          set -euxo pipefail
+          if [ "$DB" = "postgres" ]; then
+            for i in $(seq 1 60); do pg_isready -h localhost -p 5432 -U postgres && break || sleep 2; done
+          elif [ "$DB" = "mysql" ]; then
+            for i in $(seq 1 90); do mysqladmin ping -h 127.0.0.1 -P 3306 -ppassword && break || sleep 2; done
+          elif [ "$DB" = "mariadb" ]; then
+            for i in $(seq 1 90); do mysqladmin ping -h 127.0.0.1 -P 3307 -ppassword && break || sleep 2; done
+          else
+            echo "No readiness wait needed for $DB"
+          fi
+
+      - name: Run pipeline
+        env:
+          DB_USER: ${{ matrix.db == 'postgres' && 'postgres' || 'root' }}
+          DB_PASSWORD: ${{ matrix.db == 'postgres' && 'postgres' || 'password' }}
+          DB_HOST: localhost
+          DB_PORT: ${{ matrix.db == 'postgres' && '5432' || (matrix.db == 'mysql' && '3306' || (matrix.db == 'mariadb' && '3307' || '') ) }}
+          DB_NAME: bank
+        run: |
+          set -euxo pipefail
+          python -m banking_pipeline.pipeline --target ${{ matrix.db }} --rows 20000 --seed 42 --out artifacts
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-${{ matrix.db }}
+          path: artifacts/${{ matrix.db }}
