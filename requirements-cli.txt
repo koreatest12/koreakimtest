@@ -1,0 +1,15 @@
+# CLI Tools Requirements
+
+# Core dependencies
+# (No external dependencies for basic file operations)
+
+# Optional: For image conversion
+Pillow>=10.0.0
+
+# Optional: For data conversion
+pandas>=2.0.0
+openpyxl>=3.1.0
+PyYAML>=6.0.1
+
+# Optional: For markdown conversion
+markdown>=3.5.0

@@ -1,0 +1,54 @@
+{
+  "mcpServers": {
+    "hello-mcp-js": {
+      "command": "node",
+      "args": ["C:\\Users\\kwonn\\mcp-hello-js\\index.js"],
+      "env": {}
+    },
+    "hello-mcp-py": {
+      "command": "C:\\Users\\kwonn\\mcp-hello-py\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\kwonn\\mcp-hello-py\\server.py"],
+      "env": { "PYTHONUNBUFFERED": "1" }
+    },
+    "filesystem-home": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:\\Users\\kwonn"
+      ]
+    },
+    "filesystem-documents": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:\\Users\\kwonn\\Documents"
+      ]
+    },
+    "filesystem-downloads": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:\\Users\\kwonn\\Downloads"
+      ]
+    },
+    "python-utils": {
+      "command": "C:\\Users\\kwonn\\mcp-python-server\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\kwonn\\mcp-python-server\\server.py"],
+      "env": { "PYTHONUNBUFFERED": "1" }
+    },
+    "apache-manager": {
+      "command": "C:\\Users\\kwonn\\mcp-apache-server\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\kwonn\\mcp-apache-server\\server.py"],
+      "env": { "PYTHONUNBUFFERED": "1" }
+    }
+  }
+}

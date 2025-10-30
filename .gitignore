@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 *.pyd
 .env
+.env.local
 .venv/
 .cache/
 artifacts/
@@ -15,3 +16,26 @@ build/
 dist/
 .coverage
 .pytest_cache/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# API Keys and sensitive files
+*.key
+*.pem
+.mcp.json.encrypted
+.mcp.json.backup
+.claude.json.backup
+
+# OS files
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log

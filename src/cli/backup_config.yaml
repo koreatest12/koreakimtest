@@ -1,0 +1,126 @@
+# 보안 백업 설정 파일
+# backup_config.yaml
+
+# 백업 대상 디렉토리
+backup_targets:
+  - name: "중요 문서"
+    source: "C:/Users/kwonn/Documents"
+    enabled: true
+    exclude_patterns:
+      - "*.tmp"
+      - "*.cache"
+      - "~$*"  # Office 임시 파일
+
+  - name: "프로젝트 코드"
+    source: "C:/Users/kwonn/IdeaProjects"
+    enabled: true
+    exclude_patterns:
+      - "node_modules/"
+      - ".venv/"
+      - "__pycache__/"
+      - "*.pyc"
+      - ".git/"
+      - "target/"
+      - "build/"
+      - "dist/"
+
+  - name: "설정 파일"
+    source: "C:/Users/kwonn/.config"
+    enabled: true
+    exclude_patterns: []
+
+  - name: "데이터베이스 백업"
+    source: "C:/Users/kwonn/databases"
+    enabled: false
+    exclude_patterns:
+      - "*.log"
+
+# 백업 저장 위치
+backup_destination: "C:/Users/kwonn/backups"
+
+# 암호화 설정
+encryption:
+  enabled: true
+  # 비밀번호는 환경 변수 BACKUP_PASSWORD에서 읽음
+  # 또는 실행 시 프롬프트로 입력
+  use_keyring: false  # (선택) 시스템 키링 사용
+
+# 압축 설정
+compression:
+  enabled: true
+  format: "gzip"  # gzip, zip
+
+# 백업 보관 정책
+retention:
+  # 최근 백업 유지 개수
+  keep_recent: 7
+
+  # 일별 백업 유지 (최근 N일)
+  keep_daily: 30
+
+  # 주별 백업 유지 (최근 N주)
+  keep_weekly: 12
+
+  # 월별 백업 유지 (최근 N개월)
+  keep_monthly: 12
+
+# 증분 백업 설정
+incremental_backup:
+  enabled: true
+  # 전체 백업 주기 (일)
+  full_backup_interval_days: 7
+
+# 알림 설정
+notifications:
+  email:
+    enabled: false
+    smtp_server: "smtp.gmail.com"
+    smtp_port: 587
+    from_email: "backup@example.com"
+    to_email: "admin@example.com"
+
+  slack:
+    enabled: false
+    webhook_url: ""
+
+# 로그 설정
+logging:
+  enabled: true
+  log_dir: "C:/Users/kwonn/logs/backups"
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  keep_logs_days: 30
+
+# 스케줄 설정 (참고용 - 실제 스케줄은 task_scheduler.py 사용)
+schedule:
+  # cron 형식: "0 2 * * *" (매일 오전 2시)
+  daily_backup: "0 2 * * *"
+
+  # Windows Task Scheduler 설정
+  windows:
+    task_name: "SecureBackup"
+    run_time: "02:00"
+    interval: "daily"
+
+# 성능 설정
+performance:
+  # 멀티스레딩 사용
+  use_multithreading: true
+  max_threads: 4
+
+  # 큰 파일 청크 크기 (MB)
+  chunk_size_mb: 8
+
+# 검증 설정
+verification:
+  # 백업 후 자동 검증
+  auto_verify: true
+
+  # 무결성 해시 알고리즘
+  hash_algorithm: "sha256"  # sha256, sha512
+
+# 클라우드 동기화 (향후 확장)
+cloud_sync:
+  enabled: false
+  provider: ""  # aws-s3, google-drive, azure-blob
+  bucket: ""
+  credentials_file: ""

@@ -1,9 +1,46 @@
 {
-  "name": "koreakimtest",
-  "version": "0.1.0",
-  "private": true,
+  "name": "mcp-security",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Secure MCP configuration management with encryption",
   "scripts": {
-    "lint": "echo no-lint && exit 0",
-    "test": "node -e \"console.log('ok')\""
+    "mcp-encrypt": "tsx src/utils/mcpConfigEncryption.ts encrypt",
+    "mcp-decrypt": "tsx src/utils/mcpConfigEncryption.ts decrypt",
+    "mcp-load": "tsx src/utils/mcpConfigEncryption.ts load",
+    "mcp-restore": "tsx src/utils/mcpConfigEncryption.ts restore",
+    "mcp-status": "tsx src/utils/mcpConfigEncryption.ts status",
+    "mcp-loader": "tsx src/utils/secureMcpLoader.ts",
+    "update-check": "tsx src/utils/updateCli.ts check",
+    "update-install": "tsx src/utils/updateCli.ts update",
+    "update-auto": "tsx src/utils/updateCli.ts auto",
+    "update-config": "tsx src/utils/updateCli.ts config",
+    "update-status": "tsx src/utils/updateCli.ts status",
+    "update-enable": "tsx src/utils/updateCli.ts enable",
+    "update-disable": "tsx src/utils/updateCli.ts disable",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\""
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.19.24",
+    "@typescript-eslint/eslint-plugin": "^8.46.2",
+    "@typescript-eslint/parser": "^8.46.2",
+    "dotenv": "^17.2.3",
+    "eslint": "^9.38.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.4",
+    "jest": "^30.2.0",
+    "nodemon": "^3.1.10",
+    "prettier": "^3.6.2",
+    "ts-jest": "^29.4.5",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "axios": "^1.13.1"
   }
 }
