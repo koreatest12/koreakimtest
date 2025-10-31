@@ -1,4 +1,4 @@
-name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev4)"
+name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev5)"
 
 on:
   push:
@@ -25,14 +25,14 @@ on:
 permissions:
   contents: read
   packages: write      # GHCR push
-  id-token: write      # OIDC (미래 확장용 자리만)
+  id-token: write      # OIDC (향후 확장 자리)
   security-events: write
 
 env:
   TZ: Asia/Seoul
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
-  AZURE_WEBAPP_NAME: your-app-name            # 실제 Azure Web App 이름으로 변경
+  AZURE_WEBAPP_NAME: your-app-name            # 실제 Azure Web App 이름으로 교체 필수
   DOCKER_REGISTRY: ghcr.io
   IMAGE_REPO_RAW: ${{ github.repository }}    # ex) koreatest12/koreakimtest
   GIT_SHA: ${{ github.sha }}
@@ -69,7 +69,7 @@ jobs:
             else
               log_err "${step} FAILED (exit=${rc}) — continue anyway"
             fi
-            return 0  # 항상 0으로 반환해서 step 자체는 안죽음
+            return 0  # 항상 0으로 반환 → 이 step은 실패로 안 죽음
           }
           EOF
           chmod +x /tmp/echo_helpers.sh
@@ -85,7 +85,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           . /tmp/echo_helpers.sh
+
           repo_lc="$(echo "${IMAGE_REPO_RAW}" | tr '[:upper:]' '[:lower:]')"
+
           echo "REPO_LC=${repo_lc}"                                  >> $GITHUB_ENV
           echo "SHA_TAG=${GIT_SHA}"                                  >> $GITHUB_ENV
           echo "LATEST_TAG=latest"                                   >> $GITHUB_ENV
@@ -95,6 +97,7 @@ jobs:
           echo "IMG_BASE=${DOCKER_REGISTRY}/${repo_lc}"              >> $GITHUB_ENV
 
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+
           log_ok "Repo lowercased: ${repo_lc}"
           log_ok "Image base: ${DOCKER_REGISTRY}/${repo_lc}"
           log_ok "Tags -> sha:${GIT_SHA}, run:${TS_NOW}, latest:latest, extra:${{ github.event.inputs.extra_tag }}"
@@ -154,7 +157,7 @@ jobs:
           docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${LATEST_TAG}" 2>/dev/null
           safe_run "docker.push.latest" docker push "${IMG_BASE}:${LATEST_TAG}"
 
-          # extra tag
+          # extra tag (수동지정 태그)
           if [ -n "${INPUT_TAG}" ]; then
             docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${INPUT_TAG}" 2>/dev/null
             safe_run "docker.push.extra" docker push "${IMG_BASE}:${INPUT_TAG}"
@@ -170,7 +173,9 @@ jobs:
           set +e
           . /tmp/echo_helpers.sh
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+
           log_ok "Security scan placeholder for ${IMG_BASE}:${SHA_TAG}" > "${LOG_DIR}/security_scan.log"
+
           exit 0
 
       - name: Upload build logs
@@ -189,7 +194,7 @@ jobs:
     needs: build-and-push
     environment:
       name: "Development"
-      # url은 steps.deploy-webapp.outputs.webapp-url 를 직접 참조하지 않음 (정적 검증 충돌 방지)
+      # url은 동적 step output 참조 안 함 (검증 에러 방지)
 
     steps:
       - name: Init dirs + helpers
@@ -235,12 +240,35 @@ jobs:
           log_ok "Target WebApp: ${AZURE_WEBAPP_NAME}"
 
       #################################################################
-      # 로그인 단계(azure/login)는 완전히 제거.
-      # 우리는 publish-profile 모드만 사용해서 배포합니다.
-      # 이렇게 하면 secrets.* 비교식 if도 사라져서 YAML 검증 에러가 없어집니다.
+      # Gate: Publish Profile 있는지 체크해서 배포 여부 결정
+      # - 시크릿을 env로 주입받고, 그 길이를 보고 DEPLOY_ENABLED=true/false를 기록
+      # - 이 단계 자체는 절대 시크릿 내용을 echo 하지 않음
       #################################################################
+      - name: Check publish profile availability
+        id: gate
+        env:
+          AZURE_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          . /tmp/echo_helpers.sh
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
+          if [ -z "${AZURE_PUBLISH_PROFILE}" ]; then
+            log_warn "No AZURE_WEBAPP_PUBLISH_PROFILE secret found. Deployment will be SKIPPED."
+            echo "DEPLOY_ENABLED=false" >> $GITHUB_ENV
+          else
+            log_ok "AZURE_WEBAPP_PUBLISH_PROFILE detected. Deployment will PROCEED."
+            echo "DEPLOY_ENABLED=true" >> $GITHUB_ENV
+          fi
+
+      #################################################################
+      # 실제 컨테이너 이미지 배포 (publish-profile 방식)
+      # slot-name / package 제거해서 예전 동작 강제로 끊음
+      # -> 이 단계는 DEPLOY_ENABLED=true 일 때만 실행
+      #################################################################
       - name: Deploy to Azure Web App (publish-profile mode)
+        if: env.DEPLOY_ENABLED == 'true'
         id: deploy-webapp
         uses: azure/webapps-deploy@v2
         with:
@@ -249,6 +277,7 @@ jobs:
           images: '${{ env.DOCKER_REGISTRY }}/${{ env.REPO_LC }}:${{ env.SHA_TAG }}'
 
       - name: Record deploy output
+        if: env.DEPLOY_ENABLED == 'true'
         shell: bash
         run: |
           set +e
@@ -263,10 +292,11 @@ jobs:
           fi
 
           echo "$DEPLOY_URL" > "${LOG_DIR}/deploy_url.txt"
+
           exit 0
 
       - name: Healthcheck (optional)
-        if: ${{ github.event.inputs.run_healthcheck == 'true' || github.event.inputs.run_healthcheck == '' }}
+        if: env.DEPLOY_ENABLED == 'true' && (github.event.inputs.run_healthcheck == 'true' || github.event.inputs.run_healthcheck == '')
         shell: bash
         run: |
           set +e
@@ -298,13 +328,14 @@ jobs:
           exit 0
 
       - name: Azure runtime info placeholder
+        if: env.DEPLOY_ENABLED == 'true'
         shell: bash
         run: |
           set +e
           . /tmp/echo_helpers.sh
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
-          # 실제 운영이라면 여기서 az webapp show 등으로 현재 컨테이너 이미지/설정 덤프 가능
+          # 운영이면 여기서 az webapp show 등으로 현재 컨테이너/환경변수 상태를 수집 가능
           log_ok "Runtime inspect placeholder for ${AZURE_WEBAPP_NAME}" \
             | tee "${LOG_DIR}/azure_runtime.log"
 
@@ -328,7 +359,14 @@ jobs:
           . /tmp/echo_helpers.sh
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
+          if [ "${DEPLOY_ENABLED}" = "true" ]; then
+            STATUS_MSG="Deployment attempted (publish-profile mode)."
+          else
+            STATUS_MSG="Deployment SKIPPED (no publish profile secret)."
+          fi
+
           log_ok "🎉 SAFE-CONTINUE COMPLETE"
+          log_ok "Status: ${STATUS_MSG}"
           log_ok "App: ${AZURE_WEBAPP_NAME}"
           log_ok "Image: ${DOCKER_REGISTRY}/${REPO_LC}:${SHA_TAG}"
           log_ok "Env tag: ${{ github.event.inputs.deploy_env || 'dev' }}"
