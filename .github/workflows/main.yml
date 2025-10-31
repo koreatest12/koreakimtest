@@ -1,0 +1,33 @@
+name: Concurrency Control Example
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  # 그룹 이름은 repository 이름과 브랜치 이름을 조합하여 사용합니다.
+  # 이렇게 하면 동일한 브랜치에 대한 워크플로우만 그룹화됩니다.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  
+  # 'cancel-in-progress: true'가 핵심입니다.
+  # 동일한 'group'에 속하는 현재 '진행 중'이거나 '대기 중'인 실행이 있으면
+  # 현재 새롭게 시작된 실행을 위해 자동으로 취소됩니다.
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run a script
+        run: |
+          echo "This job is running for the latest push/PR on ${{ github.ref }}"
+          # 작업을 수행하는 단계
+          sleep 60  # 러너가 작업을 수행 중임을 시뮬레이션
