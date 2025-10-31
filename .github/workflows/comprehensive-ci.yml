@@ -28,7 +28,7 @@ jobs:
         uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
-      - name: Autobuild (CodeQL)
+      - name: Autobuild (CodeCodeQL)
         uses: github/codeql-action/autobuild@v3
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
@@ -60,8 +60,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ⭐️ [추가된 기능] 요청하신 파일, 폴더, 이미지 디렉토리 생성 단계
-      # 이 단계에서 생성된 파일/폴더는 이후 단계(Maven, Python)에서 사용할 수 있습니다.
       - name: "📄 임시 파일, 디렉토리 및 더미 이미지 생성"
         run: |
           echo "임시 폴더 및 파일을 생성합니다..."
@@ -109,12 +107,11 @@ jobs:
           DB_PASSWORD: password
         run: |
           mvn -B package --file pom.xml
-          # (예시) Java 테스트가 'build-info.txt' 파일을 읽는다고 가정
-          echo "Maven 테스트 실행..."
           mvn test
 
       - name: Submit Java Dependency Graph
-        uses: actions/dependency-submission-action@v1
+        # 🚨 [오류 수정] 'actions/' -> 'github/'로 변경
+        uses: github/dependency-submission-action@v1 
         with:
           build-root-directory: ${{ github.workspace }}
           manifest-path: ${{ github.workspace }}/target/dependency-submission.json
@@ -149,12 +146,12 @@ jobs:
           DB_PASSWORD: password
         run: |
           echo "파이썬 스크립트 실행..."
-          # (예시) 파이썬 스크립트가 'tmp/temp-logs/app.log'를 처리한다고 가정
           # python ./your_python_script.py
           echo "파이썬 스크립트 실행 완료 (시뮬레이션)"
 
       - name: Submit Python Dependency Graph
-        uses: actions/dependency-submission-action@v1
+        # 🚨 [오류 수정] 'actions/' -> 'github/'로 변경
+        uses: github/dependency-submission-action@v1
         with:
           build-root-directory: ${{ github.workspace }}
           manifest-path: ${{ github.workspace }}/requirements.txt
