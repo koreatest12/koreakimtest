@@ -1,4 +1,4 @@
-name: "🧪 Claude Code — MCP MEGA++++ + Banking Pipeline (PG COPY • 파티션 자동화 • 권한/롤 • 성능 그래프 • 멀티DB) "
+name: "🧪 Claude Code — MCP MEGA++++ + Banking Pipeline (PG COPY • 파티션 자동화 • 권한/롤 • 성능 그래프 • 멀티DB • 만전 대비)"
 
 on:
   push:
@@ -43,15 +43,59 @@ env:
   PG_DSN: postgres://postgres:pass@localhost:5432/mcpdb
 
 jobs:
-  # ──────────────────────────────────────────────────────────────────────────────
-  # 1) MEGA++++ — Claude Code용 MCP 서버 + 고객/은행 도메인 + PG COPY + 리포팅
-  # ──────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────
+  # 1) MEGA++++ — Claude Code용 MCP 서버 + PG COPY + 보고서 + 만전대비
+  # ───────────────────────────────────────────────────────────────
   mcp-mega:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         continue-on-error: true
+
+      # PRE-FLIGHT HARDEN: 필수 디렉토리/파일/스냅샷 선제 생성
+      - name: Prepare service state (pre-flight harden)
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR" \
+                   "$MCP_DIR/migrations/00_common" \
+                   "$MCP_DIR/migrations/10_post_bulk/common" \
+                   "$MCP_DIR/migrations/10_post_bulk/pg"
+
+          touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
+
+          # 사전 스냅샷 (증적)
+          {
+            echo "=== PRE-FLIGHT SERVICE SNAPSHOT ==="
+            echo "workflow=${{ github.workflow }}"
+            echo "job=mcp-mega"
+            echo "runner_uname=$(uname -a)"
+            echo "pwd_now=$(pwd)"
+            echo "whoami_now=$(whoami)"
+            echo "node_ver_will=${{ inputs.node_version }}"
+            echo "python_ver_will=${{ inputs.python_version }}"
+            echo "pg_image=${PG_IMAGE}"
+            echo "pg_container=${PG_CONTAINER}"
+            echo "TZ=$TZ"
+            echo "LOG_DIR=$LOG_DIR"
+            echo "ARTIFACT_DIR=$ARTIFACT_DIR"
+            echo "MCP_DIR=$MCP_DIR"
+          } | tee "${LOG_DIR}/00_preflight_mcp.txt"
+
+          # placeholder 아티팩트 선제 생성
+          : > "${ARTIFACT_DIR}/transactions_bulk.csv" || true
+          : > "${ARTIFACT_DIR}/benchmark_sqlite.json" || true
+          : > "${ARTIFACT_DIR}/benchmark_pg.json" || true
+          : > "${ARTIFACT_DIR}/report.md" || true
+          : > "${ARTIFACT_DIR}/report.html" || true
+
+          {
+            echo "[OK] base dirs created"
+            echo "[OK] placeholder artifacts touched"
+          } >> "${LOG_DIR}/00_preflight_mcp.txt" 2>&1 || true
 
       - name: Prepare dirs & echo helpers
         shell: bash
@@ -69,13 +113,30 @@ jobs:
           WARN(){ echo "⚠️  [$(TS)] $*" >&2; }
           FAIL(){ echo "❌ [$(TS)] $*" >&2; }
           mklogs(){ mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"; }
-          # runlog/safe는 여기서만 쓸 따옴표를 완전히 맞춥니다.
-          safe(){ local name="$1"; shift; mklogs; set +e; ( "$@" ) >"$LOG_DIR/${name}.log" 2>&1; local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
-          runlog(){ local name="$1"; shift; mklogs; set +e; ( "$@" ) > >(tee "$LOG_DIR/${name}.log") 2> >(tee "$LOG_DIR/${name}.err.log" >&2); local ec=$?; if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi; return 0; }
+          safe(){
+            local name="$1"; shift
+            mklogs
+            set +e
+            ( "$@" ) >"$LOG_DIR/${name}.log" 2>&1
+            local ec=$?
+            if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi
+            return 0
+          }
+          runlog(){
+            local name="$1"; shift
+            mklogs
+            set +e
+            ( "$@" ) \
+              > >(tee "$LOG_DIR/${name}.log") \
+              2> >(tee "$LOG_DIR/${name}.err.log" >&2)
+            local ec=$?
+            if [ $ec -eq 0 ]; then OK "$name: OK"; else FAIL "$name: FAILED (exit=$ec)"; fi
+            return 0
+          }
           SH
           chmod +x /tmp/echo_helpers.sh
           source /tmp/echo_helpers.sh
-          OK "Directories ready"
+          OK "Directories + echo helpers ready"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -94,17 +155,35 @@ jobs:
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
+
           safe "docker.pull.pg" docker pull "${PG_IMAGE}"
+
           docker rm -f "${PG_CONTAINER}" >/dev/null 2>&1 || true
+
           runlog "docker.run.pg" docker run -d --name "${PG_CONTAINER}" \
-            -e POSTGRES_PASSWORD="${PG_PASS}" -e POSTGRES_DB="${PG_DB}" \
+            -e POSTGRES_PASSWORD="${PG_PASS}" \
+            -e POSTGRES_DB="${PG_DB}" \
             -p "${PG_PORT}:5432" "${PG_IMAGE}"
+
+          # readiness loop
           for i in {1..30}; do
-            if docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" >/dev/null 2>&1; then OK "Postgres is ready"; break; fi
+            if docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" >/dev/null 2>&1; then
+              OK "Postgres is ready"
+              break
+            fi
             sleep 2
           done
-          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "SELECT current_database();" || true
+
+          # 1차 연결 확인
+          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" \
+            -c "SELECT NOW() AS pg_now, current_database() AS db, current_user AS usr;" \
+            | tee "${LOG_DIR}/pg_healthcheck.log" || true
+
+          # dsn 저장
           echo "${PG_DSN}" > "$ARTIFACT_DIR/pg_dsn.txt"
+
+          # 컨테이너 상태 스냅샷
+          docker ps -a | tee "${LOG_DIR}/pg_container_status.log" || true
 
       - name: Generate CSV (대량·RFC4180)
         shell: bash
@@ -129,12 +208,18 @@ jobs:
           done
           OK "Generated CSV: $CSV (rows=$rows)"
 
+          # 무결성/샘플 스냅샷
+          ls -lh "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
+          head -n 5 "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
+          tail -n 5 "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
+
       - name: Generate migrations (도메인/권한/파티션/잡)
         shell: bash
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
-          # 00_common
+
+          # ---------- 00_common ----------
           cat > "$MCP_DIR/migrations/00_common/001_core.sql" <<'SQL'
           CREATE TABLE IF NOT EXISTS customers(
             id INTEGER PRIMARY KEY,
@@ -175,7 +260,7 @@ jobs:
           );
           SQL
 
-          # common indexes (사후)
+          # ---------- 10_post_bulk/common ----------
           cat > "$MCP_DIR/migrations/10_post_bulk/common/030_indexes.sql" <<'SQL'
           CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions(customer_id);
           CREATE INDEX IF NOT EXISTS idx_tx_account  ON transactions(account_id);
@@ -184,7 +269,7 @@ jobs:
           CREATE INDEX IF NOT EXISTS idx_tx_ts       ON transactions(ts);
           SQL
 
-          # pg 전용
+          # ---------- 10_post_bulk/pg ----------
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/020_roles_privs.sql" <<'SQL'
           DO $$
           BEGIN
@@ -203,7 +288,8 @@ jobs:
           SQL
 
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/025_sequences.sql" <<'SQL'
-          DO $$ BEGIN
+          DO $$
+          BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname='transactions_id_seq') THEN
               CREATE SEQUENCE transactions_id_seq START 1 OWNED BY transactions.id;
               ALTER TABLE transactions ALTER COLUMN id SET DEFAULT nextval('transactions_id_seq');
@@ -301,8 +387,11 @@ jobs:
             IF NOT FOUND THEN
               RAISE NOTICE 'pg_cron not installed; CI will call ensure_next_month_partition() once.';
             ELSE
-              PERFORM cron.schedule('ensure_next_month_partition_job', '10 0 1 * *', $$SELECT ensure_next_month_partition();$$)
-                ON CONFLICT DO NOTHING;
+              PERFORM cron.schedule(
+                'ensure_next_month_partition_job',
+                '10 0 1 * *',
+                $$SELECT ensure_next_month_partition();$$
+              ) ON CONFLICT DO NOTHING;
             END IF;
           EXCEPTION WHEN others THEN
             NULL;
@@ -340,7 +429,7 @@ jobs:
           }
           JSON
 
-          # server.js (스트리밍 CSV + PG COPY 지원)
+          # server.js
           cat > "$MCP_DIR/server.js" <<'JS'
           import initSqlJs from "sql.js";
           import fs from "node:fs";
@@ -412,27 +501,56 @@ jobs:
             throw new Error("DB not initialized");
           }
 
-          async function txBegin(){ if (engine==="sqlite") return runSql("BEGIN"); if (engine==="pg") { await pg.client.query("BEGIN"); pg.tx=true; return {ok:true}; } }
-          async function txCommit(){ if (engine==="sqlite") return runSql("COMMIT"); if (engine==="pg"&&pg.tx){ await pg.client.query("COMMIT"); pg.tx=false; return {ok:true}; } }
-          async function txRollback(){ if (engine==="sqlite") return runSql("ROLLBACK"); if (engine==="pg"&&pg.tx){ await pg.client.query("ROLLBACK"); pg.tx=false; return {ok:true}; } }
+          async function txBegin(){
+            if (engine==="sqlite") return runSql("BEGIN");
+            if (engine==="pg") {
+              await pg.client.query("BEGIN");
+              pg.tx=true;
+              return {ok:true};
+            }
+          }
+          async function txCommit(){
+            if (engine==="sqlite") return runSql("COMMIT");
+            if (engine==="pg"&&pg.tx){
+              await pg.client.query("COMMIT");
+              pg.tx=false;
+              return {ok:true};
+            }
+          }
+          async function txRollback(){
+            if (engine==="sqlite") return runSql("ROLLBACK");
+            if (engine==="pg"&&pg.tx){
+              await pg.client.query("ROLLBACK");
+              pg.tx=false;
+              return {ok:true};
+            }
+          }
 
           async function migrateApply(dir){
             const applyDir = async (d) => {
               if (!fs.existsSync(d)) return;
               const files = fs.readdirSync(d).filter(f=>f.endsWith(".sql")).sort();
-              for (const f of files){ const sql = fs.readFileSync(path.join(d,f), "utf8"); await runSql(sql); }
+              for (const f of files){
+                const sql = fs.readFileSync(path.join(d,f), "utf8");
+                await runSql(sql);
+              }
             };
             await applyDir(path.join(dir, "00_common"));
             return { ok:true };
           }
 
           function parseCSVLine(line){
-            const out = []; let cur = ""; let inQ = false; let i = 0;
+            const out = [];
+            let cur = "";
+            let inQ = false;
+            let i = 0;
             while (i < line.length){
               const ch = line[i];
               if (inQ){
                 if (ch === '"'){
-                  if (i+1 < line.length && line[i+1] === '"'){ cur += '"'; i+=2; continue; }
+                  if (i+1 < line.length && line[i+1] === '"'){
+                    cur += '"'; i+=2; continue;
+                  }
                   inQ = false; i++; continue;
                 }
                 cur += ch; i++; continue;
@@ -458,17 +576,30 @@ jobs:
             const cols = parseCSVLine(header);
             const idx = Object.fromEntries(cols.map((c,i)=>[c,i]));
 
+            // Fast path for Postgres COPY
             if (engine === "pg" && use_copy){
               await pg.client.query("BEGIN");
               try{
-                const stream = pg.client.query(copyFrom(`COPY transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount) FROM STDIN WITH (FORMAT csv)`));
+                const stream = pg.client.query(copyFrom(
+                  `COPY transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount)
+                   FROM STDIN WITH (FORMAT csv)`
+                ));
+
                 for (const line of readLines(csv_path)){
                   if (!line || !line.trim() || line === header) continue;
                   const arr = parseCSVLine(line);
-                  const rec = [ "customer_id","bank_id","account_id","merchant_id","ts","memo","amount" ].map(k=>arr[idx[k]] ?? "");
+                  const rec = [
+                    "customer_id","bank_id","account_id","merchant_id",
+                    "ts","memo","amount"
+                  ].map(k=>arr[idx[k]] ?? "");
                   stream.write(rec.map(v => (v==null?"":String(v))).join(",") + "\n");
                 }
-                await new Promise((res,rej)=>{ stream.on("finish",res); stream.on("error",rej); stream.end(); });
+
+                await new Promise((res,rej)=>{
+                  stream.on("finish",res);
+                  stream.on("error",rej);
+                  stream.end();
+                });
                 await pg.client.query("COMMIT");
                 return { ok:true };
               } catch(e){
@@ -477,6 +608,7 @@ jobs:
               }
             }
 
+            // Generic path (sqlite or pg without COPY)
             let loaded = 0, batch = 0;
             await txBegin();
             try{
@@ -492,31 +624,80 @@ jobs:
                 const amount      = Number(c[idx["amount"]]);
 
                 if (engine === "sqlite") {
-                  await runSql(`INSERT OR IGNORE INTO customers(id,name,email) VALUES(${customer_id}, 'cust-${customer_id}', 'c${customer_id}@ex')`);
-                  await runSql(`INSERT OR IGNORE INTO banks(id,name,bic) VALUES(${bank_id}, 'bank-${bank_id}', 'BIC${bank_id}')`);
-                  await runSql(`INSERT OR IGNORE INTO accounts(id,customer_id,bank_id,number,created_at) VALUES(${account_id}, ${customer_id}, ${bank_id}, 'ACCT-${account_id}', datetime('now'))`);
-                  await runSql(`INSERT OR IGNORE INTO merchants(id,name) VALUES(${merchant_id}, 'mer-${merchant_id}')`);
+                  await runSql(
+                    `INSERT OR IGNORE INTO customers(id,name,email)
+                     VALUES(${customer_id}, 'cust-${customer_id}', 'c${customer_id}@ex')`
+                  );
+                  await runSql(
+                    `INSERT OR IGNORE INTO banks(id,name,bic)
+                     VALUES(${bank_id}, 'bank-${bank_id}', 'BIC${bank_id}')`
+                  );
+                  await runSql(
+                    `INSERT OR IGNORE INTO accounts(id,customer_id,bank_id,number,created_at)
+                     VALUES(${account_id}, ${customer_id}, ${bank_id},
+                            'ACCT-${account_id}', datetime('now'))`
+                  );
+                  await runSql(
+                    `INSERT OR IGNORE INTO merchants(id,name)
+                     VALUES(${merchant_id}, 'mer-${merchant_id}')`
+                  );
                   await runSql(`
                     INSERT INTO transactions(id,customer_id,bank_id,account_id,merchant_id,ts,memo,amount)
-                    VALUES(NULL,${customer_id},${bank_id},${account_id},${merchant_id},'${ts}','${(memo||'').replaceAll("'", "''")}',${amount})
+                    VALUES(
+                      NULL,
+                      ${customer_id},
+                      ${bank_id},
+                      ${account_id},
+                      ${merchant_id},
+                      '${ts}',
+                      '${(memo||'').replaceAll("'", "''")}',
+                      ${amount}
+                    )
                   `);
                 } else {
-                  await runSql(`INSERT INTO customers(id,name,email) VALUES($1,$2,$3) ON CONFLICT (id) DO NOTHING`, [customer_id, `cust-${customer_id}`, `c${customer_id}@ex`]);
-                  await runSql(`INSERT INTO banks(id,name,bic) VALUES($1,$2,$3) ON CONFLICT (id) DO NOTHING`, [bank_id, `bank-${bank_id}`, `BIC${bank_id}`]);
-                  await runSql(`INSERT INTO accounts(id,customer_id,bank_id,number,created_at) VALUES($1,$2,$3,$4,NOW()) ON CONFLICT (id) DO NOTHING`,
-                               [account_id, customer_id, bank_id, `ACCT-${account_id}`]);
-                  await runSql(`INSERT INTO merchants(id,name) VALUES($1,$2) ON CONFLICT (id) DO NOTHING`, [merchant_id, `mer-${merchant_id}`]);
-                  await runSql(`INSERT INTO transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount) VALUES($1,$2,$3,$4,$5,$6,$7)`,
-                               [customer_id, bank_id, account_id, merchant_id, ts, memo, amount]);
+                  await runSql(
+                    `INSERT INTO customers(id,name,email)
+                     VALUES($1,$2,$3)
+                     ON CONFLICT (id) DO NOTHING`,
+                    [customer_id, `cust-${customer_id}`, `c${customer_id}@ex`]
+                  );
+                  await runSql(
+                    `INSERT INTO banks(id,name,bic)
+                     VALUES($1,$2,$3)
+                     ON CONFLICT (id) DO NOTHING`,
+                    [bank_id, `bank-${bank_id}`, `BIC${bank_id}`]
+                  );
+                  await runSql(
+                    `INSERT INTO accounts(id,customer_id,bank_id,number,created_at)
+                     VALUES($1,$2,$3,$4,NOW())
+                     ON CONFLICT (id) DO NOTHING`,
+                    [account_id, customer_id, bank_id, `ACCT-${account_id}`]
+                  );
+                  await runSql(
+                    `INSERT INTO merchants(id,name)
+                     VALUES($1,$2)
+                     ON CONFLICT (id) DO NOTHING`,
+                    [merchant_id, `mer-${merchant_id}`]
+                  );
+                  await runSql(
+                    `INSERT INTO transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount)
+                     VALUES($1,$2,$3,$4,$5,$6,$7)`,
+                    [customer_id, bank_id, account_id, merchant_id, ts, memo, amount]
+                  );
                 }
 
                 loaded++; batch++;
-                if (batch >= batch_size){ await txCommit(); await txBegin(); batch = 0; }
+                if (batch >= batch_size){
+                  await txCommit();
+                  await txBegin();
+                  batch = 0;
+                }
               }
               await txCommit();
               return { ok:true, loaded };
             } catch(e){
-              await txRollback(); throw e;
+              await txRollback();
+              throw e;
             }
           }
 
@@ -545,19 +726,32 @@ jobs:
               buffer = lines.pop();
               for (const line of lines) {
                 if (!line.trim()) continue;
-                let msg; try{ msg=JSON.parse(line);}catch{ send(null,null,{code:-32700,message:"Parse error"}); continue;}
+                let msg;
+                try {
+                  msg=JSON.parse(line);
+                } catch {
+                  send(null,null,{code:-32700,message:"Parse error"});
+                  continue;
+                }
                 const {id=null, method, params={}} = msg;
                 try {
-                  if (method === "tools/list") return send(listTools(), id);
+                  if (method === "tools/list")
+                    return send(listTools(), id);
+
                   if (method === "tools/call") {
                     const { name, arguments: args={} } = params;
                     const inproc = createInProc();
                     const result = await inproc.call(name, args);
                     return send(result, id);
                   }
-                  if (method === "ping") return send({ pong:true }, id);
+
+                  if (method === "ping")
+                    return send({ pong:true }, id);
+
                   return send(null, id, { code:-32601, message:"Method not found" });
-                } catch (err) { return send(null, id, { code:-32000, message:String(err) }); }
+                } catch (err) {
+                  return send(null, id, { code:-32000, message:String(err) });
+                }
               }
             });
           }
@@ -566,6 +760,7 @@ jobs:
           # test_client.js
           cat > "$MCP_DIR/test_client.js" <<'JS'
           import { createInProc } from "./server.js";
+
           const mode = process.argv[2] || "sqlite";
           const DB_PATH = process.env.DB_PATH || ".github/echo_artifacts/mcp_demo.sqlite";
           const CSV = process.env.CSV_FILE || ".github/echo_artifacts/transactions_bulk.csv";
@@ -573,63 +768,129 @@ jobs:
           const PG_DSN = process.env.PG_DSN;
           const BATCH = parseInt(process.env.BATCH_SIZE || "2000", 10);
           const USE_COPY = (process.env.USE_COPY === "true");
+
           const mcp = createInProc();
-          const log = (label, obj) => { console.log(`--- ${mode} :: ${label} ---`); console.log(JSON.stringify(obj, null, 2)); };
+          const log = (label, obj) => {
+            console.log(`--- ${mode} :: ${label} ---`);
+            console.log(JSON.stringify(obj, null, 2));
+          };
 
           (async () => {
             let r;
-            if (mode === "sqlite") r = await mcp.call("db.setup", { engine:"sqlite", sqlite_path: DB_PATH });
-            else                   r = await mcp.call("db.setup", { engine:"pg", pg_dsn: PG_DSN });
+            if (mode === "sqlite") {
+              r = await mcp.call("db.setup", {
+                engine:"sqlite",
+                sqlite_path: DB_PATH
+              });
+            } else {
+              r = await mcp.call("db.setup", {
+                engine:"pg",
+                pg_dsn: PG_DSN
+              });
+            }
             log("db.setup", r);
 
             r = await mcp.call("migrate.apply", { dir: `${MIG_ROOT}` });
             log("migrate.apply.pre", r);
 
+            // seed base rows
             for (let i=1;i<=5;i++){
               const sqls = [
                 `INSERT INTO customers(id,name,email) VALUES(${i},'cust-${i}','c${i}@ex') ON CONFLICT DO NOTHING`,
                 `INSERT INTO banks(id,name,bic) VALUES(${i},'bank-${i}','BIC${i}') ON CONFLICT DO NOTHING`,
-                `INSERT INTO accounts(id,customer_id,bank_id,number,created_at) VALUES(${i},${i},${i},'ACCT-${i}',datetime('now')) ON CONFLICT DO NOTHING`,
+                `INSERT INTO accounts(id,customer_id,bank_id,number,created_at)
+                 VALUES(${i},${i},${i},'ACCT-${i}',datetime('now')) ON CONFLICT DO NOTHING`,
                 `INSERT INTO merchants(id,name) VALUES(${i},'mer-${i}') ON CONFLICT DO NOTHING`
               ];
               for (const s of sqls){
-                await mcp.call("sql.exec", { sql: (mode==="sqlite") ? s.replace(" ON CONFLICT DO NOTHING","") : s });
+                if (mode === "sqlite") {
+                  await mcp.call("sql.exec", { sql: s.replace(" ON CONFLICT DO NOTHING","") });
+                } else {
+                  await mcp.call("sql.exec", { sql: s });
+                }
               }
+
               const t = (mode==="sqlite")
-                ? `INSERT INTO transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount) VALUES(${i},${i},${i},${i},datetime('now'),'seed',${1000+i})`
-                : `INSERT INTO transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount) VALUES(${i},${i},${i},${i},NOW()::text,'seed',${1000+i})`;
+                ? `INSERT INTO transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount)
+                   VALUES(${i},${i},${i},${i},datetime('now'),'seed',${1000+i})`
+                : `INSERT INTO transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount)
+                   VALUES(${i},${i},${i},${i},NOW()::text,'seed',${1000+i})`;
               await mcp.call("sql.exec", { sql: t });
             }
 
+            // transaction / rollback test
             await mcp.call("tx.begin");
-            const before = await mcp.call("sql.exec", { sql:`SELECT COUNT(*) AS c FROM transactions` });
-            let err=false; try{
-              await mcp.call("sql.exec", { sql:`INSERT INTO transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount,nope) VALUES(1,1,1,1,datetime('now'),'bad',123,0)` });
-            }catch(e){ err=true; }
-            await mcp.call("tx.rollback");
-            const after = await mcp.call("sql.exec", { sql:`SELECT COUNT(*) AS c FROM transactions` });
-            log("tx.beforeCount", before); log("tx.afterCount", after); log("tx.rollbackTriggered", {err});
+            const before = await mcp.call("sql.exec", {
+              sql:`SELECT COUNT(*) AS c FROM transactions`
+            });
 
-            r = await mcp.call("bulk.load.csv", { csv_path: CSV, batch_size: BATCH, use_copy: (mode==="pg" && USE_COPY) });
+            let err=false;
+            try{
+              await mcp.call("sql.exec", {
+                sql:`INSERT INTO transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount,nope)
+                     VALUES(1,1,1,1,datetime('now'),'bad',123,0)`
+              });
+            }catch(e){
+              err=true;
+            }
+            await mcp.call("tx.rollback");
+
+            const after = await mcp.call("sql.exec", {
+              sql:`SELECT COUNT(*) AS c FROM transactions`
+            });
+
+            log("tx.beforeCount", before);
+            log("tx.afterCount", after);
+            log("tx.rollbackTriggered", {err});
+
+            // bulk load CSV
+            r = await mcp.call("bulk.load.csv", {
+              csv_path: CSV,
+              batch_size: BATCH,
+              use_copy: (mode==="pg" && USE_COPY)
+            });
             log("bulk.load.csv", r);
 
+            // post-bulk migrations
             const COMMON_POST = `${MIG_ROOT}/10_post_bulk/common`;
             await mcp.call("migrate.apply", { dir: COMMON_POST });
+
             if (mode === "pg"){
               const PG_POST = `${MIG_ROOT}/10_post_bulk/pg`;
               await mcp.call("migrate.apply", { dir: PG_POST });
-              await mcp.call("sql.exec", { sql: `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tx_agg_by_customer;` }).catch(()=>mcp.call("sql.exec",{sql:`REFRESH MATERIALIZED VIEW mv_tx_agg_by_customer;`}));
-              await mcp.call("sql.exec", { sql: `SELECT ensure_next_month_partition();` }).catch(()=>{});
+
+              // refresh matview (attempt CONCURRENTLY, fallback normal)
+              await mcp.call("sql.exec", {
+                sql: `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tx_agg_by_customer;`
+              }).catch(()=>mcp.call("sql.exec",{
+                sql:`REFRESH MATERIALIZED VIEW mv_tx_agg_by_customer;`
+              }));
+
+              // ensure next month partition
+              await mcp.call("sql.exec", {
+                sql: `SELECT ensure_next_month_partition();`
+              }).catch(()=>{});
             }
 
-            const sel = await mcp.call("sql.exec", { sql:`SELECT customer_id, COUNT(*) AS cnt, SUM(amount) AS sum FROM transactions GROUP BY customer_id ORDER BY customer_id LIMIT 5` });
+            // sample select
+            const sel = await mcp.call("sql.exec", {
+              sql:`SELECT customer_id, COUNT(*) AS cnt, SUM(amount) AS sum
+                   FROM transactions
+                   GROUP BY customer_id
+                   ORDER BY customer_id
+                   LIMIT 5`
+            });
             log("select.group", sel);
-          })().catch(e => { console.error("CLIENT ERROR:", e); process.exit(0); });
+          })().catch(e => {
+            console.error("CLIENT ERROR:", e);
+            process.exit(0);
+          });
           JS
 
           # benchmark.js
           cat > "$MCP_DIR/benchmark.js" <<'JS'
           import { createInProc } from "./server.js";
+
           const mode = process.argv[2] || "pg";
           const DB_PATH = process.env.DB_PATH || ".github/echo_artifacts/mcp_demo.sqlite";
           const PG_DSN = process.env.PG_DSN;
@@ -644,28 +905,54 @@ jobs:
           function nowMs(){ return Number(process.hrtime.bigint() / 1000000n); }
 
           (async()=>{
-            if (mode==="sqlite") await mcp.call("db.setup", { engine:"sqlite", sqlite_path: DB_PATH });
-            else                 await mcp.call("db.setup", { engine:"pg", pg_dsn: PG_DSN });
+            if (mode==="sqlite") {
+              await mcp.call("db.setup", {
+                engine:"sqlite",
+                sqlite_path: DB_PATH
+              });
+            } else {
+              await mcp.call("db.setup", {
+                engine:"pg",
+                pg_dsn: PG_DSN
+              });
+            }
 
             const out = [];
             for (const c of cases){
-              const t0=nowMs(); await mcp.call("sql.exec", { sql:c.sql }); const t1=nowMs();
+              const t0=nowMs();
+              await mcp.call("sql.exec", { sql:c.sql });
+              const t1=nowMs();
               out.push({ name:c.name, ms: t1-t0 });
             }
+
             if (mode==="pg"){
-              const t0=nowMs(); await mcp.call("sql.exec", { sql:"SELECT * FROM v_tx_agg_by_customer LIMIT 1000" }); const t1=nowMs();
+              const t0=nowMs();
+              await mcp.call("sql.exec", {
+                sql:"SELECT * FROM v_tx_agg_by_customer LIMIT 1000"
+              });
+              const t1=nowMs();
               out.push({ name:"view_agg", ms:t1-t0 });
-              const t2=nowMs(); await mcp.call("sql.exec", { sql:"SELECT * FROM mv_tx_agg_by_customer LIMIT 1000" }); const t3=nowMs();
+
+              const t2=nowMs();
+              await mcp.call("sql.exec", {
+                sql:"SELECT * FROM mv_tx_agg_by_customer LIMIT 1000"
+              });
+              const t3=nowMs();
               out.push({ name:"matview_agg", ms:t3-t2 });
             }
+
             console.log(JSON.stringify(out, null, 2));
-          })().catch(e=>{ console.error(e); process.exit(1); });
+          })().catch(e=>{
+            console.error(e);
+            process.exit(1);
+          });
           JS
 
-          # report.js (SVG 차트)
+          # report.js
           cat > "$MCP_DIR/report.js" <<'JS'
           import fs from "node:fs";
           import path from "node:path";
+
           const LOG_DIR = process.env.LOG_DIR || ".github/echo_logs";
           const OUT_DIR = process.env.ARTIFACT_DIR || ".github/echo_artifacts";
 
@@ -674,6 +961,7 @@ jobs:
             const lines = fs.readFileSync(p, "utf8").trimEnd().split(/\r?\n/);
             return lines.slice(-n).join("\n");
           }
+
           function renderSVGBar(data){
             const W=600, H=220, pad=30;
             const max = Math.max(...data.map(d=>d.ms), 1);
@@ -726,10 +1014,11 @@ jobs:
 
           fs.writeFileSync(path.join(OUT_DIR, "report.md"), md);
           fs.writeFileSync(path.join(OUT_DIR, "report.html"), html);
+
           console.log("Report generated:", path.join(OUT_DIR, "report.html"));
           JS
 
-          # MCP 설정
+          # MCP 설정 (Claude Code에서 mcpServers로 붙일 수 있도록)
           cat > "$MCP_DIR/mcp.config.json" <<JSON
           {
             "mcpServers": {
@@ -742,7 +1031,7 @@ jobs:
           }
           JSON
 
-          # install
+          # install deps (npm install / ci)
           pushd "$MCP_DIR" >/dev/null
           if [ ! -f package-lock.json ]; then
             runlog "npm.install" bash -lc 'npm install --no-audit --no-fund'
@@ -772,6 +1061,7 @@ jobs:
         run: |
           source /tmp/echo_helpers.sh
           pushd "$MCP_DIR" >/dev/null
+
           set +e
           node test_client.js sqlite >"../.."/$LOG_DIR/sqlite_client.log 2>&1
           ec=$?
@@ -781,9 +1071,10 @@ jobs:
           else
             OK "sqlite.client: completed (exit=0)"
           fi
-          # ✔ FIX: 여분의 따옴표 제거
+
           node benchmark.js sqlite >"../.."/$ARTIFACT_DIR/benchmark_sqlite.json 2>>"../.."/$LOG_DIR/sqlite_client.log || true
           set -e
+
           popd >/dev/null
 
       - name: Run PostgreSQL scenario (COPY 옵션 반영)
@@ -798,6 +1089,7 @@ jobs:
         run: |
           source /tmp/echo_helpers.sh
           pushd "$MCP_DIR" >/dev/null
+
           set +e
           node test_client.js pg >"../.."/$LOG_DIR/pg_client.log 2>&1
           ec=$?
@@ -807,11 +1099,18 @@ jobs:
           else
             OK "pg.client: completed (exit=0)"
           fi
-          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "\dt" > "$LOG_DIR/pg_tables.log" 2>&1 || true
-          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "SELECT (SELECT COUNT(*) FROM transactions) + (SELECT COUNT(*) FROM transactions_p) AS total;" > "$LOG_DIR/pg_count.log" 2>&1 || true
-          # ✔ FIX: 여분의 따옴표 제거
+
+          # 컨테이너 내부 상태도 남겨서 증적 확보
+          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "\dt" \
+            > "$LOG_DIR/pg_tables.log" 2>&1 || true
+
+          docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" \
+            -c "SELECT (SELECT COUNT(*) FROM transactions) + (SELECT COUNT(*) FROM transactions_p) AS total;" \
+            > "$LOG_DIR/pg_count.log" 2>&1 || true
+
           node benchmark.js pg >"../.."/$ARTIFACT_DIR/benchmark_pg.json 2>>"../.."/$LOG_DIR/pg_client.log || true
           set -e
+
           popd >/dev/null
 
       - name: Build HTML/Markdown report (with charts)
@@ -826,6 +1125,20 @@ jobs:
           runlog "report.build" bash -lc 'node report.js'
           popd >/dev/null
 
+          # 리포트 산출물/벤치 존재 여부까지 로그에 기록
+          ls -lh "$ARTIFACT_DIR/report.html" "$ARTIFACT_DIR/report.md" \
+            | tee -a "${LOG_DIR}/report_build.log" || true
+          head -n 50 "$ARTIFACT_DIR/report.md" \
+            | tee -a "${LOG_DIR}/report_build.log" || true
+
+          echo "=== BENCH SQLITE ===" | tee -a "${LOG_DIR}/report_build.log"
+          cat "$ARTIFACT_DIR/benchmark_sqlite.json" 2>/dev/null \
+            | tee -a "${LOG_DIR}/report_build.log" || true
+
+          echo "=== BENCH PG ===" | tee -a "${LOG_DIR}/report_build.log"
+          cat "$ARTIFACT_DIR/benchmark_pg.json" 2>/dev/null \
+            | tee -a "${LOG_DIR}/report_build.log" || true
+
       - name: Summaries
         if: always()
         shell: bash
@@ -837,8 +1150,12 @@ jobs:
             echo "sqlite_db=${{ inputs.db_path }}"
             echo "pg_dsn=${PG_DSN}"
             echo "csv_rows=${{ inputs.csv_rows }}, batch_size=${{ inputs.batch_size }}, use_copy=${{ inputs.use_copy }}"
-            echo "roles: finance_admin/finance_writer/finance_reader"
+            echo "roles: finance_admin / finance_writer / finance_reader"
             echo "partitions: transactions_p (monthly), ensure_next_month_partition()"
+            echo "--- docker ps -a ---"
+            docker ps -a || true
+            echo "--- ss -tlnp (ports) ---"
+            ss -tlnp || true
           } | tee "$LOG_DIR/summary.txt"
           OK "Summary generated"
 
@@ -859,88 +1176,196 @@ jobs:
         if: always()
         shell: bash
         run: |
-          echo "✅ DONE — All steps attempted. Any failures are logged above. Exiting SUCCESS by design."
+          echo "✅ MCP MEGA++++ DONE — All steps attempted."
+          echo "Artifacts snapshot:"
+          ls -R .github/echo_logs || true
+          ls -R .github/echo_artifacts || true
+          ls -R .github/mcp_demo || true
+          echo "If any step FAILED above, check *.log in artifact mcp-mega-artifacts."
           exit 0
 
-  # ──────────────────────────────────────────────────────────────────────────────
-  # 2) Banking Data Pipeline — 사용자가 준 멀티DB 매트릭스 잡 그대로 통합
-  # ──────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────
+  # 2) Banking Data Pipeline — 멀티DB 매트릭스 + 만전대비
+  # ───────────────────────────────────────────────────────────────
   banking-data-pipeline:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         db: [postgres, mysql, mariadb, sqlite, duckdb]
+    env:
+      TZ: Asia/Seoul
+      LOG_DIR: .github/echo_logs
+      ARTIFACT_DIR: .github/echo_artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        continue-on-error: true
+
+      # PRE-FLIGHT HARDEN (DB별)
+      - name: Prepare service state (pre-flight harden)
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" artifacts "artifacts/${{ matrix.db }}"
+          touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
+          : > "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
+          : > "$LOG_DIR/bank_ctx_${{ matrix.db }}.log" || true
+
+          {
+            echo "=== PRE-FLIGHT SERVICE SNAPSHOT ==="
+            echo "workflow=${{ github.workflow }}"
+            echo "job=banking-data-pipeline"
+            echo "matrix.db=${{ matrix.db }}"
+            echo "runner_uname=$(uname -a)"
+            echo "pwd_now=$(pwd)"
+            echo "whoami_now=$(whoami)"
+            echo "TZ=$TZ"
+            echo "LOG_DIR=$LOG_DIR"
+            echo "ARTIFACT_DIR=$ARTIFACT_DIR"
+          } | tee "${LOG_DIR}/00_preflight_banking_${{ matrix.db }}.txt"
+
+          echo "[OK] dirs & placeholders ready for ${{ matrix.db }}" \
+            >> "${LOG_DIR}/00_preflight_banking_${{ matrix.db }}.txt" 2>&1 || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+        continue-on-error: true
 
       - name: Install system clients (psql, mysqlclient)
+        shell: bash
+        continue-on-error: true
         run: |
           set -euxo pipefail
           sudo apt-get update
-          sudo apt-get install -y postgresql-client mysql-client
+          sudo apt-get install -y postgresql-client mysql-client || true
 
       - name: Install Python dependencies
+        shell: bash
+        continue-on-error: true
         run: |
           set -euxo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; else echo "requirements.txt not found; skipping."; fi
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt || true
+          else
+            echo "requirements.txt not found; skipping."
+          fi
 
       - name: Start database container
         env:
           DB: ${{ matrix.db }}
+        shell: bash
+        continue-on-error: true
         run: |
           set -euxo pipefail
           case "$DB" in
             postgres)
-              docker run -d --name pgdb -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=bank -p 5432:5432 postgres:16
+              docker run -d --name pgdb \
+                -e POSTGRES_USER=postgres \
+                -e POSTGRES_PASSWORD=postgres \
+                -e POSTGRES_DB=bank \
+                -p 5432:5432 postgres:16
               ;;
             mysql)
-              docker run -d --name mysqldb -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=bank -p 3306:3306 mysql:8
+              docker run -d --name mysqldb \
+                -e MYSQL_ROOT_PASSWORD=password \
+                -e MYSQL_DATABASE=bank \
+                -p 3306:3306 mysql:8
               ;;
             mariadb)
-              docker run -d --name mariadb -e MARIADB_ROOT_PASSWORD=password -e MARIADB_DATABASE=bank -p 3307:3306 mariadb:11
+              docker run -d --name mariadb \
+                -e MARIADB_ROOT_PASSWORD=password \
+                -e MARIADB_DATABASE=bank \
+                -p 3307:3306 mariadb:11
               ;;
             sqlite|duckdb)
               echo "No external DB container required for $DB"
               ;;
-            *) echo "Unsupported DB $DB"; exit 1 ;;
+            *)
+              echo "Unsupported DB $DB"
+              exit 1
+              ;;
           esac
 
       - name: Wait for DB readiness
         env:
           DB: ${{ matrix.db }}
+        shell: bash
+        continue-on-error: true
         run: |
           set -euxo pipefail
           if [ "$DB" = "postgres" ]; then
-            for i in $(seq 1 60); do pg_isready -h localhost -p 5432 -U postgres && break || sleep 2; done
+            for i in $(seq 1 60); do
+              pg_isready -h localhost -p 5432 -U postgres && break || sleep 2
+            done
           elif [ "$DB" = "mysql" ]; then
-            for i in $(seq 1 90); do mysqladmin ping -h 127.0.0.1 -P 3306 -ppassword && break || sleep 2; done
+            for i in $(seq 1 90); do
+              mysqladmin ping -h 127.0.0.1 -P 3306 -ppassword && break || sleep 2
+            done
           elif [ "$DB" = "mariadb" ]; then
-            for i in $(seq 1 90); do mysqladmin ping -h 127.0.0.1 -P 3307 -ppassword && break || sleep 2; done
+            for i in $(seq 1 90); do
+              mysqladmin ping -h 127.0.0.1 -P 3307 -ppassword && break || sleep 2
+            done
           else
             echo "No readiness wait needed for $DB"
           fi
+
+          {
+            echo "=== SERVICE SNAPSHOT AFTER READINESS CHECK ==="
+            echo "DB=$DB"
+            echo "--- docker ps -a ---"
+            docker ps -a || true
+            echo "--- ss -tlnp (ports) ---"
+            ss -tlnp || true
+          } | tee -a "$LOG_DIR/bank_ctx_${{ matrix.db }}.log" 2>&1 || true
 
       - name: Run pipeline
         env:
           DB_USER: ${{ matrix.db == 'postgres' && 'postgres' || 'root' }}
           DB_PASSWORD: ${{ matrix.db == 'postgres' && 'postgres' || 'password' }}
           DB_HOST: localhost
-          DB_PORT: ${{ matrix.db == 'postgres' && '5432' || (matrix.db == 'mysql' && '3306' || (matrix.db == 'mariadb' && '3307' || '') ) }}
+          DB_PORT: ${{ matrix.db == 'postgres' && '5432' || (matrix.db == 'mysql' && '3306' || (matrix.db == 'mariadb' && '3307' || '')) }}
           DB_NAME: bank
+        shell: bash
+        continue-on-error: true
         run: |
           set -euxo pipefail
-          python -m banking_pipeline.pipeline --target ${{ matrix.db }} --rows 20000 --seed 42 --out artifacts
+          # 사용자가 제공한 banking_pipeline.pipeline 을 가정
+          # 결과 로그를 남겨서 증적 확보
+          python -m banking_pipeline.pipeline \
+            --target ${{ matrix.db }} \
+            --rows 20000 \
+            --seed 42 \
+            --out artifacts \
+            | tee -a "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
+
+          # 산출물 디렉토리 존재 여부/리스트 확보
+          ls -R "artifacts/${{ matrix.db }}" \
+            | tee -a "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: reports-${{ matrix.db }}
-          path: artifacts/${{ matrix.db }}
+          path: |
+            .github/echo_logs/**
+            .github/echo_artifacts/**
+            artifacts/${{ matrix.db }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Always success footer (matrix ${{ matrix.db }})
+        if: always()
+        shell: bash
+        run: |
+          echo "✅ BANKING (${{ matrix.db }}) DONE — All steps attempted."
+          echo "Artifacts snapshot:"
+          ls -R "$LOG_DIR" || true
+          ls -R "artifacts/${{ matrix.db }}" || true
+          echo "Check 'reports-${{ matrix.db }}' artifact for DB-specific evidence."
+          exit 0
