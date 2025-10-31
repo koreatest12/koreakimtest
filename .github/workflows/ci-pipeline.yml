@@ -26,8 +26,12 @@ env:
   PY_REQ_FILE: requirements.txt
 
   ECHO_OK:  "✅ OK"
-  ECHO_WARN:"⚠ WARN"
-  ECHO_FAIL:"❌ FAIL"
+  ECHO_WARN: "⚠ WARN"
+  ECHO_FAIL: "❌ FAIL"
+
+# ‼️ [구문 오류 수정] ‼️
+# 'ECHO_FAIL' 다음, 'jobs:'가 시작되기 전에
+# 반드시 빈 줄이 있어야 합니다.
 
 jobs:
   # =====================================================================
@@ -56,7 +60,7 @@ jobs:
       # 0. checkout
       # --------------------------------------------------
       - name: "➡️ [ECHO CALL] [JAVA] checkout"
-        run: echo "=== START STEP: [JAVA] checkout ==="
+        run: echo "=== START STEP:[JAVA] checkout ==="
 
       - name: "[JAVA] checkout"
         uses: actions/checkout@v4
@@ -134,7 +138,7 @@ jobs:
             fi
           }
 
-          # ‼️ [구문 오류 수정] ‼️ Java Dockerfile template (echo -e 사용)
+          # Java Dockerfile template (echo -e 사용)
           if [ ! -f "${JAVA_DOCKERFILE}" ]; then
             echo "[autogen] ${JAVA_DOCKERFILE} missing -> creating fallback via echo -e"
             echo -e "FROM openjdk:17-slim\nWORKDIR /app\nCOPY target/*.jar app.jar\nENTRYPOINT [\"java\",\"-jar\",\"/app.jar\"]" > "${JAVA_DOCKERFILE}"
@@ -143,7 +147,7 @@ jobs:
             echo "[autogen] ${ECHO_WARN} ${JAVA_DOCKERFILE} already exists. keeping."
           fi
 
-          # ‼️ [구문 오류 수정] ‼️ Python main script stub (echo -e 사용)
+          # Python main script stub (echo -e 사용)
           if [ ! -f "${PY_MAIN_SCRIPT}" ]; then
             echo "[autogen] ${PY_MAIN_SCRIPT} missing -> creating fallback via echo -e"
             mkdir -p "$(dirname "${PY_MAIN_SCRIPT}")"
@@ -153,7 +157,7 @@ jobs:
             echo "[autogen] ${ECHO_WARN} ${PY_MAIN_SCRIPT} already exists. keeping."
           fi
 
-          # ‼️ [구문 오류 수정] ‼️ requirements.txt stub (echo -e 사용)
+          # requirements.txt stub (echo -e 사용)
           if [ ! -f "${PY_REQ_FILE}" ]; then
             echo "[autogen] ${PY_REQ_FILE} missing -> creating fallback via echo -e"
             echo -e "psycopg2-binary==2.9.9" > "${PY_REQ_FILE}"
@@ -162,7 +166,7 @@ jobs:
             echo "[autogen] ${ECHO_WARN} ${PY_REQ_FILE} already exists. keeping."
           fi
 
-          # ‼️ [구문 오류 수정] ‼️ Python Dockerfile template (echo -e 사용)
+          # Python Dockerfile template (echo -e 사용)
           if [ ! -f "${PY_DOCKERFILE}" ]; then
             echo "[autogen] ${PY_DOCKERFILE} missing -> creating fallback via echo -e"
             echo -e "FROM python:3.10-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\nCMD [\"python\",\"src/my_script.py\"]" > "${PY_DOCKERFILE}"
@@ -393,20 +397,20 @@ jobs:
           echo "=== [PY] prep.autogen.files.recheck START ==="
           set +e
 
-          # ‼️ [구문 오류 수정] ‼️ Python script (echo -e 사용)
+          # Python script (echo -e 사용)
           if [ ! -f "${PY_MAIN_SCRIPT}" ]; then
             echo "[autogen/python] ${PY_MAIN_SCRIPT} missing -> create"
             mkdir -p "$(dirname "${PY_MAIN_SCRIPT}")"
             echo -e "import os,sys\nprint(\"=== Python script autogen (PY job) ===\")\nprint(\"DB_HOST:\", os.getenv(\"DB_HOST\"))\nprint(\"DB_USER:\", os.getenv(\"DB_USER\"))\nprint(\"DB_NAME:\", os.getenv(\"DB_NAME\"))\nprint(\"Script OK ✅ (PY job)\")" > "${PY_MAIN_SCRIPT}"
           fi
 
-          # ‼️ [구문 오류 수정] ‼️ requirements.txt (echo -e 사용)
+          # requirements.txt (echo -e 사용)
           if [ ! -f "${PY_REQ_FILE}" ]; then
             echo "[autogen/python] ${PY_REQ_FILE} missing -> create"
             echo -e "psycopg2-binary==2.9.9" > "${PY_REQ_FILE}"
           fi
 
-          # ‼️ [구문 오류 수정] ‼️ Python Dockerfile (echo -e 사용)
+          # Python Dockerfile (echo -e 사용)
           if [ ! -f "${PY_DOCKERFILE}" ]; then
             echo "[autogen/python] ${PY_DOCKERFILE} missing -> create"
             echo -e "FROM python:3.10-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\nCMD [\"python\",\"src/my_script.py\"]" > "${PY_DOCKERFILE}"
@@ -538,7 +542,6 @@ jobs:
       # --------------------------------------------------
       - name: "➡️ [ECHO CALL] [PY] docker.build-push.python (echo+continue)"
         run: echo "=== START STEP: [PY] docker.build-push.python (echo+continue) ==="
-
         
       - name: "[PY] docker.build-push.python (echo+continue)"
         uses: docker/build-push-action@v5
