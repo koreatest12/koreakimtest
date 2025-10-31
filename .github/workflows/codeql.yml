@@ -1,100 +1,4 @@
 name: "🛡 CodeQL Advanced SecureScan (Enterprise-Grade, No-Skip, AutoUpgrade, Caching, SARIF Archive)"
-
-################################################################################
-# ARCHITECTURE OVERVIEW
-# ------------------------------------------------------------------------------
-# This workflow is the "Advanced Setup" model for CodeQL.
-# It assumes we WANT:
-#  - Full control over language selection
-#  - Custom build logic for compiled languages
-#  - Strict, reviewable query policy (security + quality)
-#  - Reproducible audit logs (SARIF, build logs, upgrade logs)
-#  - Always-run behavior: never silently skip, always collect artifacts
-#  - Infra awareness: large codebases may require high-spec self-hosted runners
-#
-# Key design principles baked into this workflow:
-#
-# 1. MULTI-TRIGGER COVERAGE:
-#    - push, pull_request: fast developer feedback (PR gate)
-#    - merge_group: merge queue / merge train scanning before landing to main
-#    - schedule (cron, UTC): deep/off-peak scans with same policies
-#
-# 2. RESOURCE STRATEGY:
-#    - For most repos: ubuntu-latest / macos-latest runners are fine
-#    - For >1M LoC / heavy monorepos: GitHub recommends 64GB RAM / 8 cores /
-#      SSD ≥14GB for reliable full CodeQL query evaluation. Large orgs should
-#      map `runs-on:` to high-spec self-hosted runners that meet those specs.
-#      (See GitHub’s published guidance on CodeQL hardware requirements.¹)
-#
-#    HOW TO SCALE UP:
-#    - Replace below `runs-on:` condition with a label such as:
-#        runs-on: [self-hosted, codeql-large-runner-64gb]
-#      for languages that are huge / memory-bound.
-#
-# 3. BUILD MODES:
-#    - Interpreted (python, js/ts, actions): build-mode=none
-#      -> Source extraction only, fast, no compile.
-#    - Compiled (java-kotlin): build-mode=autobuild first
-#      -> CodeQL tries mvn/gradle. If it fails OR is incomplete, we fall back
-#         to MANUAL BUILD. Manual is most accurate for enterprise pipelines.²
-#
-#    We do BOTH:
-#      - autobuild (for convenience in normal cases)
-#      - manual fallback (for completeness in complex builds)
-#
-#    During manual fallback we explicitly call mvn/gradle/make/etc. and
-#    capture full build logs so we can prove what got compiled.³
-#
-# 4. QUERY POLICY ENFORCEMENT:
-#    - We explicitly request both GitHub security and quality query packs:
-#        queries: +security-extended,security-and-quality
-#      This is equivalent to “treat these as mandatory security baselines”.
-#    - You MAY pin packs by version, e.g.
-#        queries: github/security-extended@1.2.3,github/security-and-quality@4.5.6
-#      if you need auditable/locked query suites for compliance.⁴
-#
-# 5. REPRODUCIBLE EVIDENCE (AUDIT TRAIL):
-#    - We store:
-#        * CodeQL DB                              (database as tarball)
-#        * SARIF results                          (results-<lang>.sarif)
-#        * Upgrade logs (OS pkg upgrade attempt)
-#        * Manual build logs (if executed)
-#        * CodeQL DB tree listing
-#    - We upload them all as workflow artifacts, even if steps fail.
-#      This supports audit, triage, and security review outside GitHub UI.
-#
-# 6. PERFORMANCE:
-#    - We add dependency caches (Maven, Gradle, npm, pip).
-#      This drastically reduces autobuild/manual build time, which speeds
-#      CodeQL DB extraction, especially for compiled languages.⁵
-#
-# 7. AUTO-UPGRADE (BEST EFFORT / SAFE-CONTINUE):
-#    - Before scanning, we attempt to:
-#        * update package lists
-#        * capture upgradable packages
-#        * run upgrade (Linux)
-#      The goal is to keep runner environment patched.
-#      macOS runners are read-only for system packages, but we still log.
-#
-# 8. GLOBAL ALWAYS-CONTINUE PHILOSOPHY:
-#    - `continue-on-error: true` for the job
-#    - `if: always()` for artifact upload steps
-#    - no silent skip: even failures produce evidence
-#
-# TIME / CRON / UTC:
-#  - ALL GitHub cron schedules run in UTC, *not* local timezones.
-#    For Asia/Seoul (+09:00), 19:39 UTC = 04:39 KST (next day).
-#    Adjust cron if you want true local off-peak scanning.
-#
-# REFERENCES (must remain in comments for audit traceability):
-# ¹ GitHub “Recommended hardware resources for running CodeQL” and
-#   “Supported runners and hardware resources” (CodeQL docs).
-# ² GitHub “CodeQL code scanning for compiled languages,” build-mode guidance.
-# ³ GitHub “Customizing your advanced setup for code scanning.”
-# ⁴ GitHub Docs on “Using custom queries with CodeQL” and CodeQL packs.
-# ⁵ GitHub Actions docs on caching language ecosystems for faster builds.
-################################################################################
-
 on:
   push:
     branches: [ "main" ]
@@ -112,12 +16,10 @@ on:
     # 39 19 * * 3  == Wed 19:39 UTC
     # Asia/Seoul (+09:00) => Thu 04:39 KST
     - cron: "39 19 * * 3"
-
 concurrency:
   # Prevent concurrent scans on the same ref from stepping on artifacts
   group: codeql-secure-scan-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
@@ -131,10 +33,8 @@ jobs:
     # runs-on: [self-hosted, codeql-large-runner-64gb]
     #
     runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
-
     # We REFUSE hard-fail. We always collect evidence.
     continue-on-error: true
-
     # Permissions:
     # - security-events: write   -> upload SARIF to Code Scanning
     # - packages: read           -> pull private CodeQL packs or internal deps
@@ -146,19 +46,16 @@ jobs:
       actions: read
       contents: read
       id-token: write
-
     env:
       TZ: Asia/Seoul
       LOG_DIR: .github/echo_logs
       ARTIFACT_DIR: .github/echo_artifacts
       UPGRADE_LOG_DIR: .github/echo_upgrade
-      CODEQL_DB_DIR: ${{ runner.temp }}/codeql_db_${{ matrix.language }}
-
+      # CODEQL_DB_DIR definition moved to steps below, as 'runner.temp' is not valid here.
       # These environment toggles document intent:
       # Use MANUAL_BUILD_ENFORCE=true if you want to always run manual build,
       # even if autobuild "succeeds". Default is false.
       MANUAL_BUILD_ENFORCE: "false"
-
     strategy:
       fail-fast: false
       matrix:
@@ -166,20 +63,16 @@ jobs:
           # GitHub Actions workflow logic / composite actions
           - language: actions
             build-mode: none
-
           # Java / Kotlin (compiled). We start with autobuild for convenience.
           # If autobuild fails OR MANUAL_BUILD_ENFORCE=true -> manual fallback.
           - language: java-kotlin
             build-mode: autobuild
-
           # JS/TS (interpreted)
           - language: javascript-typescript
             build-mode: none
-
           # Python (interpreted)
           - language: python
             build-mode: none
-
           # Add more here if needed:
           # - language: c-cpp
           #   build-mode: manual
@@ -187,14 +80,12 @@ jobs:
           #   build-mode: manual
           # - language: swift
           #   build-mode: autobuild
-
     steps:
       ##########################################################################
       # 0. CHECKOUT SOURCE
       ##########################################################################
       - name: Checkout repository
         uses: actions/checkout@v4
-
       ##########################################################################
       # 1. PREP: DIRECTORIES, LOG HELPERS, HOST UPGRADE SNAPSHOT
       #    - We gather runner OS info
@@ -206,25 +97,19 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${UPGRADE_LOG_DIR}"
-
           cat > /tmp/echo_helpers.sh << 'EOF'
           TS() { date "+%Y-%m-%d %H:%M:%S%z"; }
           LOG() { lvl="$1"; shift; echo "[$(TS)] [$lvl] $*"; }
           EOF
           source /tmp/echo_helpers.sh || true
-
           LOG INFO "===== RUNTIME INTROSPECTION START ====="
-
           uname -a  || true
           lsb_release -a 2>/dev/null || true
           sw_vers 2>/dev/null || true
           df -h || true
           free -m 2>/dev/null || true
-
           LOG INFO "Capturing upgradable package list and attempting upgrade (Linux runners)."
-
           {
             echo "===== UPGRADE SESSION START $(date) ====="
             echo "Runner OS info:"
@@ -232,16 +117,13 @@ jobs:
             lsb_release -a 2>/dev/null || true
             sw_vers 2>/dev/null || true
             echo
-
             if command -v apt-get >/dev/null 2>&1; then
               echo ">>> apt-get update / upgrade attempt"
               sudo apt-get update -y || true
               echo ">>> pre-upgrade upgradable list"
               apt list --upgradable 2>/dev/null || true > "${UPGRADE_LOG_DIR}/upgradable.pre.txt"
-
               # Patch runner packages (best effort)
               sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade || true
-
               echo ">>> post-upgrade upgradable list"
               apt list --upgradable 2>/dev/null || true > "${UPGRADE_LOG_DIR}/upgradable.post.txt"
             else
@@ -251,12 +133,9 @@ jobs:
                 softwareupdate --list || true
               fi
             fi
-
             echo "===== UPGRADE SESSION END $(date) ====="
           } | tee "${UPGRADE_LOG_DIR}/upgrade_${{ matrix.language }}.log"
-
           LOG INFO "===== RUNTIME INTROSPECTION END ====="
-
       ##########################################################################
       # 2. DEPENDENCY CACHES (PER LANGUAGE ECOSYSTEM)
       #    We do lightweight unconditional caches so autobuild/manual build
@@ -266,7 +145,6 @@ jobs:
       #    - We don't 'npm install' or 'pip install' here. We just prep caches.
       #    - CodeQL's autobuild/manual steps will use these caches.
       ##########################################################################
-
       # Maven cache (Java/Kotlin)
       - name: Cache Maven local repo
         if: contains(matrix.language, 'java')
@@ -276,7 +154,6 @@ jobs:
           key: m2-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
           restore-keys: |
             m2-${{ runner.os }}-
-
       # Gradle cache (Java/Kotlin)
       - name: Cache Gradle
         if: contains(matrix.language, 'java')
@@ -288,7 +165,6 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
             gradle-${{ runner.os }}-
-
       # Node cache (JS/TS)
       - name: Cache Node.js deps
         if: contains(matrix.language, 'javascript') || contains(matrix.language, 'typescript')
@@ -299,7 +175,6 @@ jobs:
           key: node-${{ runner.os }}-${{ hashFiles('**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml') }}
           restore-keys: |
             node-${{ runner.os }}-
-
       # Python cache (pip)
       - name: Cache pip
         if: contains(matrix.language, 'python')
@@ -309,7 +184,6 @@ jobs:
           key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/pyproject.toml', '**/setup.py') }}
           restore-keys: |
             pip-${{ runner.os }}-
-
       ##########################################################################
       # 3. CODEQL INIT
       #
@@ -330,9 +204,9 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix['build-mode'] }}
-          db-location: ${{ env.CODEQL_DB_DIR }}
+          # FIX: use runner.temp directly here, where context is valid
+          db-location: ${{ runner.temp }}/codeql_db_${{ matrix.language }}
           queries: +security-extended,security-and-quality
-
       ##########################################################################
       # 4. AUTOBUILD (compiled languages only)
       #
@@ -344,7 +218,6 @@ jobs:
       - name: Autobuild (for compiled languages)
         if: ${{ matrix.build-mode == 'autobuild' }}
         uses: github/codeql-action/autobuild@v4
-
       ##########################################################################
       # 5. MANUAL BUILD FALLBACK (NO-SKIP, ALWAYS LOG)
       #
@@ -368,10 +241,8 @@ jobs:
           set -Eeuo pipefail
           source /tmp/echo_helpers.sh || true
           LOG WARN "Autobuild failed OR manual mode enforced -> running manual fallback build"
-
           {
             echo "===== MANUAL BUILD START $(date) ====="
-
             if [ -f "mvnw" ] || [ -f "pom.xml" ]; then
               echo "[manual] mvn -B -q -DskipTests package"
               mvn -B -q -DskipTests package || true
@@ -388,12 +259,9 @@ jobs:
             else
               echo "[manual] No known build system found. Skipping compile."
             fi
-
             echo "===== MANUAL BUILD END $(date) ====="
           } | tee "${LOG_DIR}/manual_build_${{ matrix.language }}.log"
-
           LOG INFO "Manual fallback build finished (all errors ignored, continuing)"
-
       ##########################################################################
       # 6. CODEQL ANALYZE
       #
@@ -411,8 +279,8 @@ jobs:
         with:
           category: "/language:${{ matrix.language }}"
           upload: true
-          output: ${{ env.CODEQL_DB_DIR }}/results-${{ matrix.language }}.sarif
-
+          # FIX: use runner.temp directly here, where context is valid
+          output: ${{ runner.temp }}/codeql_db_${{ matrix.language }}/results-${{ matrix.language }}.sarif
       ##########################################################################
       # 7. EVIDENCE PACKAGING / AUDIT TRAIL
       #
@@ -432,34 +300,31 @@ jobs:
       - name: Collect and package CodeQL DB + logs + SARIF
         if: always()
         shell: bash
+        # FIX: Define CODEQL_DB_DIR as a shell variable here for the run script
+        # where it is needed, using the GitHub Actions context.
+        env:
+          CODEQL_DB_DIR: ${{ runner.temp }}/codeql_db_${{ matrix.language }}
         run: |
           set -Eeuo pipefail
           source /tmp/echo_helpers.sh || true
           LOG INFO "Collecting CodeQL artifacts, SARIF, upgrade logs for audit trail"
-
           mkdir -p "${ARTIFACT_DIR}"
-
           # Package full CodeQL DB
           if [ -d "${CODEQL_DB_DIR}" ]; then
             tar -czf "${ARTIFACT_DIR}/codeql_db_${{ matrix.language }}.tgz" \
               -C "${CODEQL_DB_DIR}" . || true
-
             ls -R "${CODEQL_DB_DIR}" \
               > "${LOG_DIR}/codeql_db_tree_${{ matrix.language }}.log" 2>&1 || true
           fi
-
           # Copy SARIF (analysis output)
           if [ -f "${CODEQL_DB_DIR}/results-${{ matrix.language }}.sarif" ]; then
             cp "${CODEQL_DB_DIR}/results-${{ matrix.language }}.sarif" \
                "${ARTIFACT_DIR}/results-${{ matrix.language }}.sarif" || true
           fi
-
           # Bundle upgrade logs snapshot for infra audit
           tar -czf "${ARTIFACT_DIR}/upgrade_logs_${{ matrix.language }}.tgz" \
             "${UPGRADE_LOG_DIR}" || true
-
           LOG INFO "Packaging complete"
-
       ##########################################################################
       # 8. UPLOAD EVERYTHING AS ARTIFACT
       #
