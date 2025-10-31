@@ -7,7 +7,6 @@ on:
 
 jobs:
   run-pipeline:
-    # Use different databases in parallel
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,16 +41,12 @@ jobs:
           set -euxo pipefail
           case "$DB" in
             postgres)
-              # Use port 5432
               docker run -d --name pgdb -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=bank -p 5432:5432 postgres:16
               ;;
             mysql)
-              # Use port 3306
               docker run -d --name mysqldb -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=bank -p 3306:3306 mysql:8
               ;;
             mariadb)
-              # Use port 3307 to avoid collision with MySQL if both were run (though they aren't here)
-              # We map the host port 3307 to the container's internal port 3306
               docker run -d --name mariadb -e MARIADB_ROOT_PASSWORD=password -e MARIADB_DATABASE=bank -p 3307:3306 mariadb:11
               ;;
             sqlite|duckdb)
@@ -69,10 +64,8 @@ jobs:
           if [ "$DB" = "postgres" ]; then
             for i in $(seq 1 60); do pg_isready -h localhost -p 5432 -U postgres && break || sleep 2; done
           elif [ "$DB" = "mysql" ]; then
-            # Note: MySQL uses 3306
             for i in $(seq 1 90); do mysqladmin ping -h 127.0.0.1 -P 3306 -ppassword && break || sleep 2; done
           elif [ "$DB" = "mariadb" ]; then
-            # Note: MariaDB uses 3307 (host port)
             for i in $(seq 1 90); do mysqladmin ping -h 127.0.0.1 -P 3307 -ppassword && break || sleep 2; done
           else
             echo "No readiness wait needed for $DB"
@@ -81,15 +74,14 @@ jobs:
       # Run the core Python pipeline script
       - name: Run banking pipeline
         env:
-          # Configuration for remote databases (used by db_connector.py)
           DB_USER: ${{ matrix.db == 'postgres' && 'postgres' || 'root' }}
           DB_PASSWORD: ${{ matrix.db == 'postgres' && 'postgres' || 'password' }}
           DB_HOST: localhost
-          DB_PORT: ${{ matrix.db == 'postgres' && '5432' || (matrix.db == 'mysql' && '3306' || (matrix.db == 'mariadb' && '3307' || '') ) }}
+          # CRITICAL FIX: Set port to '0' for file-based DBs instead of an empty string
+          DB_PORT: ${{ matrix.db == 'postgres' && '5432' || (matrix.db == 'mysql' && '3306' || (matrix.db == 'mariadb' && '3307' || '0') ) }}
           DB_NAME: bank
         run: |
           set -euxo pipefail
-          # The Python script will handle all connection logic based on the --target argument
           python -m banking_pipeline.pipeline \
             --target ${{ matrix.db }} \
             --rows 20000 \
