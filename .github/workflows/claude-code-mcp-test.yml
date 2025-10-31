@@ -25,6 +25,17 @@ on:
         description: "PG COPY FROM STDIN 사용"
         type: boolean
         default: true
+  
+  # 💡 추가된 상주 배치 기능: 매일 3:30 AM KST에 실행 (UTC 기준 18:30)
+  schedule:
+    # 0 0 * * * (매일 자정 UTC)
+    # 30 18 * * * (매일 18:30 UTC = KST 03:30)
+    - cron: '30 18 * * *'
+
+# 💡 러너 풀이 찼을 때 대기열/진행 중인 이전 실행을 자동으로 비웁니다.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -49,7 +60,6 @@ jobs:
   mcp-mega:
     runs-on: ubuntu-24.04
     env:
-      # inputs.* 는 push/pull_request 에서는 비어 있음 → fallback 준비
       NODE_VERSION_FALLBACK: "20"
       PY_VERSION_FALLBACK: "3.12"
       NODE_VERSION_INPUT: ${{ inputs.node_version }}
@@ -68,19 +78,16 @@ jobs:
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-
           mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR" \
                    "$MCP_DIR/migrations/00_common" \
                    "$MCP_DIR/migrations/10_post_bulk/common" \
                    "$MCP_DIR/migrations/10_post_bulk/pg"
           touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
-
           : > "${ARTIFACT_DIR}/transactions_bulk.csv" || true
           : > "${ARTIFACT_DIR}/benchmark_sqlite.json" || true
           : > "${ARTIFACT_DIR}/benchmark_pg.json" || true
           : > "${ARTIFACT_DIR}/report.md" || true
           : > "${ARTIFACT_DIR}/report.html" || true
-
           {
             echo "=== PRE-FLIGHT SERVICE SNAPSHOT ==="
             echo "workflow=${GITHUB_WORKFLOW}"
@@ -95,21 +102,17 @@ jobs:
             echo "PG_IMAGE=${PG_IMAGE}"
             echo "PG_CONTAINER=${PG_CONTAINER}"
             echo "PG_DSN=${PG_DSN}"
-
             echo "RAW_NODE_VERSION_INPUT='${{ env.NODE_VERSION_INPUT }}'"
             echo "RAW_PY_VERSION_INPUT='${{ env.PY_VERSION_INPUT }}'"
             echo "NODE_VERSION_EFFECTIVE='${{ inputs.node_version != '' && inputs.node_version || env.NODE_VERSION_FALLBACK }}'"
             echo "PY_VERSION_EFFECTIVE='${{ inputs.python_version != '' && inputs.python_version || env.PY_VERSION_FALLBACK }}'"
-
             echo "DB_PATH_INPUT='${{ env.DB_PATH_INPUT }}'"
             echo "CSV_ROWS_INPUT='${{ env.CSV_ROWS_INPUT }}'"
             echo "BATCH_SIZE_INPUT='${{ env.BATCH_SIZE_INPUT }}'"
             echo "USE_COPY_INPUT='${{ env.USE_COPY_INPUT }}'"
-
             echo "--- INITIAL ENV PATH ---"
             echo "$PATH"
           } | tee "${LOG_DIR}/00_preflight_mcp.txt"
-
       - name: Prepare dirs & echo helpers
         shell: bash
         continue-on-error: true
@@ -119,7 +122,6 @@ jobs:
                    "$MCP_DIR/migrations/00_common" \
                    "$MCP_DIR/migrations/10_post_bulk/common" \
                    "$MCP_DIR/migrations/10_post_bulk/pg"
-
           cat > /tmp/echo_helpers.sh <<'SH'
           #!/usr/bin/env bash
           TS(){ date "+%Y-%m-%d %H:%M:%S%z"; }
@@ -151,7 +153,6 @@ jobs:
           chmod +x /tmp/echo_helpers.sh
           source /tmp/echo_helpers.sh
           OK "Directories + echo helpers ready"
-
       - name: Setup Node.js (with fallback)
         uses: actions/setup-node@v4
         with:
@@ -189,22 +190,17 @@ jobs:
             echo "NODE_VERSION_EFFECTIVE=${{ inputs.node_version != '' && inputs.node_version || env.NODE_VERSION_FALLBACK }}"
             echo "PY_VERSION_EFFECTIVE=${{ inputs.python_version != '' && inputs.python_version || env.PY_VERSION_FALLBACK }}"
           } | tee "${LOG_DIR}/01_runtime_snapshot.txt"
-
       - name: Start PostgreSQL container
         shell: bash
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
-
           safe "docker.pull.pg" docker pull "${PG_IMAGE}"
-
           docker rm -f "${PG_CONTAINER}" >/dev/null 2>&1 || true
-
           runlog "docker.run.pg" docker run -d --name "${PG_CONTAINER}" \
             -e POSTGRES_PASSWORD="${PG_PASS}" \
             -e POSTGRES_DB="${PG_DB}" \
             -p "${PG_PORT}:5432" "${PG_IMAGE}"
-
           for i in {1..30}; do
             if docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" >/dev/null 2>&1; then
               OK "Postgres is ready"
@@ -212,15 +208,11 @@ jobs:
             fi
             sleep 2
           done
-
           docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" \
             -c "SELECT NOW() AS pg_now, current_database() AS db, current_user AS usr;" \
             | tee "${LOG_DIR}/pg_healthcheck.log" || true
-
           echo "${PG_DSN}" > "$ARTIFACT_DIR/pg_dsn.txt"
-
           docker ps -a | tee "${LOG_DIR}/pg_container_status.log" || true
-
       - name: Generate CSV (대량·RFC4180)
         shell: bash
         continue-on-error: true
@@ -230,7 +222,6 @@ jobs:
           source /tmp/echo_helpers.sh
           CSV="$ARTIFACT_DIR/transactions_bulk.csv"
           echo "id,customer_id,bank_id,account_id,merchant_id,ts,memo,amount" > "$CSV"
-
           rows=${CSV_ROWS_EFF:-20000}
           for i in $(seq 1 $rows); do
             cust=$(( (i % 100) + 1 ))
@@ -241,21 +232,17 @@ jobs:
             memo="seed-${i}"
             if (( i % 200 == 0 )); then memo="\"memo, with, commas ${i}\""; fi
             if (( i % 333 == 0 )); then memo="\"quote \"\"inside\"\" ${i}\""; fi
-
             echo "$i,$cust,$bank,$acc,$mer,$(date -u +%Y-%m-%dT%H:%M:%SZ),$memo,$amt" >> "$CSV"
           done
-
           OK "Generated CSV: $CSV (rows=$rows)"
           ls -lh "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
           head -n 5 "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
           tail -n 5 "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
-
       - name: Generate migrations (도메인/권한/파티션/잡)
         shell: bash
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
-
           # 00_common schema
           cat > "$MCP_DIR/migrations/00_common/001_core.sql" <<'SQL'
           CREATE TABLE IF NOT EXISTS customers(
@@ -296,7 +283,6 @@ jobs:
             FOREIGN KEY(merchant_id) REFERENCES merchants(id)
           );
           SQL
-
           # post bulk common indexes
           cat > "$MCP_DIR/migrations/10_post_bulk/common/030_indexes.sql" <<'SQL'
           CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions(customer_id);
@@ -305,7 +291,6 @@ jobs:
           CREATE INDEX IF NOT EXISTS idx_tx_amount   ON transactions(amount);
           CREATE INDEX IF NOT EXISTS idx_tx_ts       ON transactions(ts);
           SQL
-
           # pg-specific roles, partitions, matviews, cron
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/020_roles_privs.sql" <<'SQL'
           DO $$
@@ -314,19 +299,15 @@ jobs:
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='finance_writer') THEN CREATE ROLE finance_writer; END IF;
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='finance_reader') THEN CREATE ROLE finance_reader; END IF;
           END$$;
-
           GRANT CONNECT ON DATABASE mcpdb TO finance_reader, finance_writer, finance_admin;
           GRANT USAGE ON SCHEMA public TO finance_reader, finance_writer, finance_admin;
-
           GRANT SELECT ON ALL TABLES IN SCHEMA public TO finance_reader;
           GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO finance_writer;
           GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO finance_admin;
-
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO finance_reader;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO finance_writer;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO finance_admin;
           SQL
-
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/025_sequences.sql" <<'SQL'
           DO $$
           BEGIN
@@ -336,7 +317,6 @@ jobs:
             END IF;
           END $$;
           SQL
-
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/040_partitioning.sql" <<'SQL'
           DO $$
           BEGIN
@@ -356,7 +336,6 @@ jobs:
               ) PARTITION BY RANGE (ts);
             END IF;
           END$$;
-
           DO $$
           DECLARE
             start_ts DATE := date_trunc('month', now())::date;
@@ -369,7 +348,6 @@ jobs:
             END IF;
           END$$;
           SQL
-
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/050_trigger_route.sql" <<'SQL'
           CREATE OR REPLACE FUNCTION trg_route_transactions() RETURNS trigger AS $$
           BEGIN
@@ -386,13 +364,11 @@ jobs:
             RETURN NULL;
           END
           $$ LANGUAGE plpgsql;
-
           DROP TRIGGER IF EXISTS route_transactions ON transactions;
           CREATE TRIGGER route_transactions
             BEFORE INSERT ON transactions
             FOR EACH ROW EXECUTE FUNCTION trg_route_transactions();
           SQL
-
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/060_views.sql" <<'SQL'
           CREATE OR REPLACE VIEW v_tx_agg_by_customer AS
           SELECT customer_id, COUNT(*) AS cnt, SUM(amount) AS sum
@@ -403,7 +379,6 @@ jobs:
           ) t
           GROUP BY customer_id
           ORDER BY customer_id;
-
           CREATE MATERIALIZED VIEW IF NOT EXISTS mv_tx_agg_by_customer AS
           SELECT customer_id, COUNT(*) AS cnt, SUM(amount) AS sum
           FROM (
@@ -414,7 +389,6 @@ jobs:
           GROUP BY customer_id
           WITH NO DATA;
           SQL
-
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/070_monthly_partition_job.sql" <<'SQL'
           CREATE OR REPLACE FUNCTION ensure_next_month_partition() RETURNS void AS $$
           DECLARE
@@ -428,7 +402,6 @@ jobs:
             END IF;
           END
           $$ LANGUAGE plpgsql;
-
           DO $$
           BEGIN
             PERFORM 1 FROM pg_extension WHERE extname='pg_cron';
@@ -445,7 +418,6 @@ jobs:
             NULL;
           END$$;
           SQL
-
       - name: Generate MCP server/client/benchmark/report code
         shell: bash
         continue-on-error: true
@@ -453,7 +425,6 @@ jobs:
           BATCH_SIZE_ENV: ${{ inputs.batch_size != '' && inputs.batch_size || env.BATCH_SIZE_INPUT || '2000' }}
         run: |
           source /tmp/echo_helpers.sh
-
           # package.json
           cat > "$MCP_DIR/package.json" <<'JSON'
           {
@@ -476,7 +447,6 @@ jobs:
             }
           }
           JSON
-
           # server.js
           cat > "$MCP_DIR/server.js" <<'JS'
           import initSqlJs from "sql.js";
@@ -485,16 +455,13 @@ jobs:
           import path from "node:path";
           import { Client as PG } from "pg";
           import { from as copyFrom } from "pg-copy-streams";
-
           let engine = null;
           let sqlite = { SQL: null, db: null, path: null };
           let pg = { client: null, tx: false };
-
           const send = (result, id=null, error=null) => {
             const payload = { jsonrpc:"2.0", ...(id!==null?{id}:{}) , ...(error?{error}:{result}) };
             process.stdout.write(JSON.stringify(payload)+EOL);
           };
-
           const listTools = () => ({
             tools: [
               { name:"db.setup",        description:"Open DB (engine='sqlite'|'pg')", input_schema:{ type:"object", properties:{ engine:{type:"string"}, sqlite_path:{type:"string"}, pg_dsn:{type:"string"} }, required:["engine"] } },
@@ -506,7 +473,6 @@ jobs:
               { name:"migrate.apply",   description:"Apply .sql migrations (pre/post separated)", input_schema:{ type:"object", properties:{ dir:{type:"string"} }, required:["dir"] } }
             ]
           });
-
           async function openDb({engine:eng, sqlite_path, pg_dsn}) {
             engine = eng;
             if (engine === "sqlite") {
@@ -524,7 +490,6 @@ jobs:
               throw new Error("Unsupported engine");
             }
           }
-
           async function runSql(sql, params=[]) {
             if (engine === "sqlite") {
               const q = sql.trim().toLowerCase();
@@ -548,7 +513,6 @@ jobs:
             }
             throw new Error("DB not initialized");
           }
-
           async function txBegin(){
             if (engine==="sqlite") return runSql("BEGIN");
             if (engine==="pg") {
@@ -557,7 +521,6 @@ jobs:
               return {ok:true};
             }
           }
-
           async function txCommit(){
             if (engine==="sqlite") return runSql("COMMIT");
             if (engine==="pg"&&pg.tx){
@@ -566,7 +529,6 @@ jobs:
               return {ok:true};
             }
           }
-
           async function txRollback(){
             if (engine==="sqlite") return runSql("ROLLBACK");
             if (engine==="pg"&&pg.tx){
@@ -575,7 +537,6 @@ jobs:
               return {ok:true};
             }
           }
-
           async function migrateApply(dir){
             const applyDir = async (d) => {
               if (!fs.existsSync(d)) return;
@@ -588,7 +549,6 @@ jobs:
             await applyDir(path.join(dir, "00_common"));
             return { ok:true };
           }
-
           function parseCSVLine(line){
             const out = [];
             let cur = "";
@@ -613,19 +573,16 @@ jobs:
             out.push(cur);
             return out;
           }
-
           function *readLines(filePath){
             const buf = fs.readFileSync(filePath, "utf8");
             yield* buf.split(/\r?\n/);
           }
-
           async function bulkLoadCsv(csv_path, batch_size=1000, use_copy=false){
             const iter = readLines(csv_path);
             const header = iter.next().value;
             if (!header) return { ok:true, loaded:0 };
             const cols = parseCSVLine(header);
             const idx = Object.fromEntries(cols.map((c,i)=>[c,i]));
-
             if (engine === "pg" && use_copy){
               await pg.client.query("BEGIN");
               try{
@@ -654,7 +611,6 @@ jobs:
                 throw e;
               }
             }
-
             let loaded = 0, batch = 0;
             await txBegin();
             try{
@@ -668,7 +624,6 @@ jobs:
                 const ts          = c[idx["ts"]];
                 const memo        = c[idx["memo"]];
                 const amount      = Number(c[idx["amount"]]);
-
                 if (engine === "sqlite") {
                   await runSql(
                     `INSERT OR IGNORE INTO customers(id,name,email)
@@ -731,7 +686,6 @@ jobs:
                     [customer_id, bank_id, account_id, merchant_id, ts, memo, amount]
                   );
                 }
-
                 loaded++; batch++;
                 if (batch >= batch_size){
                   await txCommit();
@@ -746,7 +700,6 @@ jobs:
               throw e;
             }
           }
-
           export function createInProc(){
             return {
               call: async (name, args={}) => {
@@ -762,7 +715,6 @@ jobs:
               }
             };
           }
-
           if (import.meta.url === `file://${process.argv[1]}`) {
             let buffer = "";
             process.stdin.setEncoding("utf8");
@@ -783,17 +735,14 @@ jobs:
                 try {
                   if (method === "tools/list")
                     return send(listTools(), id);
-
                   if (method === "tools/call") {
                     const { name, arguments: args={} } = params;
                     const inproc = createInProc();
                     const result = await inproc.call(name, args);
                     return send(result, id);
                   }
-
                   if (method === "ping")
                     return send({ pong:true }, id);
-
                   return send(null, id, { code:-32601, message:"Method not found" });
                 } catch (err) {
                   return send(null, id, { code:-32000, message:String(err) });
@@ -802,11 +751,9 @@ jobs:
             });
           }
           JS
-
           # test_client.js
           cat > "$MCP_DIR/test_client.js" <<'JS'
           import { createInProc } from "./server.js";
-
           const mode = process.argv[2] || "sqlite";
           const DB_PATH = process.env.DB_PATH || ".github/echo_artifacts/mcp_demo.sqlite";
           const CSV = process.env.CSV_FILE || ".github/echo_artifacts/transactions_bulk.csv";
@@ -814,13 +761,11 @@ jobs:
           const PG_DSN = process.env.PG_DSN;
           const BATCH = parseInt(process.env.BATCH_SIZE || "2000", 10);
           const USE_COPY = (process.env.USE_COPY === "true");
-
           const mcp = createInProc();
           const log = (label, obj) => {
             console.log(`--- ${mode} :: ${label} ---`);
             console.log(JSON.stringify(obj, null, 2));
           };
-
           (async () => {
             let r;
             if (mode === "sqlite") {
@@ -835,10 +780,8 @@ jobs:
               });
             }
             log("db.setup", r);
-
             r = await mcp.call("migrate.apply", { dir: `${MIG_ROOT}` });
             log("migrate.apply.pre", r);
-
             // seed rows
             for (let i=1;i<=5;i++){
               const sqls = [
@@ -855,7 +798,6 @@ jobs:
                   await mcp.call("sql.exec", { sql: s });
                 }
               }
-
               const t = (mode==="sqlite")
                 ? `INSERT INTO transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount)
                    VALUES(${i},${i},${i},${i},datetime('now'),'seed',${1000+i})`
@@ -863,13 +805,11 @@ jobs:
                    VALUES(${i},${i},${i},${i},NOW()::text,'seed',${1000+i})`;
               await mcp.call("sql.exec", { sql: t });
             }
-
             // tx + rollback test
             await mcp.call("tx.begin");
             const before = await mcp.call("sql.exec", {
               sql:`SELECT COUNT(*) AS c FROM transactions`
             });
-
             let err=false;
             try{
               await mcp.call("sql.exec", {
@@ -880,15 +820,12 @@ jobs:
               err=true;
             }
             await mcp.call("tx.rollback");
-
             const after = await mcp.call("sql.exec", {
               sql:`SELECT COUNT(*) AS c FROM transactions`
             });
-
             log("tx.beforeCount", before);
             log("tx.afterCount", after);
             log("tx.rollbackTriggered", {err});
-
             // bulk load CSV
             r = await mcp.call("bulk.load.csv", {
               csv_path: CSV,
@@ -896,26 +833,21 @@ jobs:
               use_copy: (mode==="pg" && USE_COPY)
             });
             log("bulk.load.csv", r);
-
             // post bulk migrations
             const COMMON_POST = `${MIG_ROOT}/10_post_bulk/common`;
             await mcp.call("migrate.apply", { dir: COMMON_POST });
-
             if (mode === "pg"){
               const PG_POST = `${MIG_ROOT}/10_post_bulk/pg`;
               await mcp.call("migrate.apply", { dir: PG_POST });
-
               await mcp.call("sql.exec", {
                 sql: `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tx_agg_by_customer;`
               }).catch(()=>mcp.call("sql.exec",{
                 sql:`REFRESH MATERIALIZED VIEW mv_tx_agg_by_customer;`
               }));
-
               await mcp.call("sql.exec", {
                 sql: `SELECT ensure_next_month_partition();`
               }).catch(()=>{});
             }
-
             const sel = await mcp.call("sql.exec", {
               sql:`SELECT customer_id, COUNT(*) AS cnt, SUM(amount) AS sum
                    FROM transactions
@@ -929,24 +861,19 @@ jobs:
             process.exit(0);
           });
           JS
-
           # benchmark.js
           cat > "$MCP_DIR/benchmark.js" <<'JS'
           import { createInProc } from "./server.js";
-
           const mode = process.argv[2] || "pg";
           const DB_PATH = process.env.DB_PATH || ".github/echo_artifacts/mcp_demo.sqlite";
           const PG_DSN = process.env.PG_DSN;
           const mcp = createInProc();
-
           const cases = [
             { name:"count_all",     sql:"SELECT COUNT(*) FROM transactions" },
             { name:"sum_amount",    sql:"SELECT SUM(amount) FROM transactions" },
             { name:"group_customer",sql:"SELECT customer_id, COUNT(*) c, SUM(amount) s FROM transactions GROUP BY customer_id" }
           ];
-
           function nowMs(){ return Number(process.hrtime.bigint() / 1000000n); }
-
           (async()=>{
             if (mode==="sqlite") {
               await mcp.call("db.setup", {
@@ -959,7 +886,6 @@ jobs:
                 pg_dsn: PG_DSN
               });
             }
-
             const out = [];
             for (const c of cases){
               const t0=nowMs();
@@ -967,7 +893,6 @@ jobs:
               const t1=nowMs();
               out.push({ name:c.name, ms: t1-t0 });
             }
-
             if (mode==="pg"){
               const t0=nowMs();
               await mcp.call("sql.exec", {
@@ -975,7 +900,6 @@ jobs:
               });
               const t1=nowMs();
               out.push({ name:"view_agg", ms:t1-t0 });
-
               const t2=nowMs();
               await mcp.call("sql.exec", {
                 sql:"SELECT * FROM mv_tx_agg_by_customer LIMIT 1000"
@@ -983,28 +907,23 @@ jobs:
               const t3=nowMs();
               out.push({ name:"matview_agg", ms:t3-t2 });
             }
-
             console.log(JSON.stringify(out, null, 2));
           })().catch(e=>{
             console.error(e);
             process.exit(1);
           });
           JS
-
           # report.js
           cat > "$MCP_DIR/report.js" <<'JS'
           import fs from "node:fs";
           import path from "node:path";
-
           const LOG_DIR = process.env.LOG_DIR || ".github/echo_logs";
           const OUT_DIR = process.env.ARTIFACT_DIR || ".github/echo_artifacts";
-
           function tail(p, n=80){
             if (!fs.existsSync(p)) return "";
             const lines = fs.readFileSync(p, "utf8").trimEnd().split(/\r?\n/);
             return lines.slice(-n).join("\n");
           }
-
           function renderSVGBar(data){
             const W=600, H=220, pad=30;
             const max = Math.max(...data.map(d=>d.ms), 1);
@@ -1022,7 +941,6 @@ jobs:
             svg += `</svg>`;
             return svg;
           }
-
           const sections = [
             { title: "SQLite Client Log (tail)", file: "sqlite_client.log" },
             { title: "Postgres Client Log (tail)", file: "pg_client.log" },
@@ -1030,22 +948,18 @@ jobs:
             { title: "PG Count", file: "pg_count.log" },
             { title: "Summary", file: "summary.txt" }
           ];
-
           let md = `# MCP MEGA++++ Run Report\n\n`;
           let html = `<!doctype html><meta charset="utf-8"><title>MCP MEGA++++ Report</title><style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;line-height:1.45;padding:24px;} pre{background:#f6f8fa;padding:12px;overflow:auto;border-radius:8px;} h2{margin-top:28px}</style><h1>MCP MEGA++++ Run Report</h1>`;
-
           for (const s of sections){
             const p = path.join(LOG_DIR, s.file);
             const content = tail(p, 120);
             md += `\n## ${s.title}\n\n\`\`\`\n${content}\n\`\`\`\n`;
             html += `<h2>${s.title}</h2><pre>${content.replace(/[&<>]/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;" }[m]))}</pre>`;
           }
-
           const benchPgPath = path.join(OUT_DIR, "benchmark_pg.json");
           const benchSqlitePath = path.join(OUT_DIR, "benchmark_sqlite.json");
           const pgData = fs.existsSync(benchPgPath) ? JSON.parse(fs.readFileSync(benchPgPath,"utf8")) : null;
           const sqliteData = fs.existsSync(benchSqlitePath) ? JSON.parse(fs.readFileSync(benchSqlitePath,"utf8")) : null;
-
           if (pgData){
             html += `<h2>Benchmark (Postgres)</h2>${renderSVGBar(pgData)}`;
             md += `\n## Benchmark (Postgres)\n\n\`\`\`json\n${JSON.stringify(pgData,null,2)}\n\`\`\`\n`;
@@ -1054,13 +968,10 @@ jobs:
             html += `<h2>Benchmark (SQLite sql.js)</h2>${renderSVGBar(sqliteData)}`;
             md += `\n## Benchmark (SQLite sql.js)\n\n\`\`\`json\n${JSON.stringify(sqliteData,null,2)}\n\`\`\`\n`;
           }
-
           fs.writeFileSync(path.join(OUT_DIR, "report.md"), md);
           fs.writeFileSync(path.join(OUT_DIR, "report.html"), html);
-
           console.log("Report generated:", path.join(OUT_DIR, "report.html"));
           JS
-
           # mcp.config.json
           cat > "$MCP_DIR/mcp.config.json" <<JSON
           {
@@ -1073,7 +984,6 @@ jobs:
             }
           }
           JSON
-
           pushd "$MCP_DIR" >/dev/null
           if [ ! -f package-lock.json ]; then
             runlog "npm.install" bash -lc 'npm install --no-audit --no-fund'
@@ -1082,7 +992,6 @@ jobs:
           fi
           runlog "npm.check.deps" bash -lc 'npm run -s check:deps || true'
           popd >/dev/null
-
       - name: Ensure DB parent dir (SQLite persistence path)
         shell: bash
         continue-on-error: true
@@ -1094,7 +1003,6 @@ jobs:
           mkdir -p "$(dirname "$DB_PATH_EFF")"
           OK "SQLite DB parent dir ensured: $DB_PATH_EFF"
           echo "$DB_PATH_EFF" > "$LOG_DIR/db_path_effective.txt"
-
       - name: Run SQLite scenario
         shell: bash
         continue-on-error: true
@@ -1107,7 +1015,6 @@ jobs:
         run: |
           source /tmp/echo_helpers.sh
           pushd "$MCP_DIR" >/dev/null
-
           set +e
           node test_client.js sqlite >"../.."/$LOG_DIR/sqlite_client.log 2>&1
           ec=$?
@@ -1117,12 +1024,9 @@ jobs:
           else
             OK "sqlite.client: completed (exit=0)"
           fi
-
           node benchmark.js sqlite >"../.."/$ARTIFACT_DIR/benchmark_sqlite.json 2>>"../.."/$LOG_DIR/sqlite_client.log || true
           set -e
-
           popd >/dev/null
-
       - name: Run PostgreSQL scenario (COPY 옵션 반영)
         shell: bash
         continue-on-error: true
@@ -1135,7 +1039,6 @@ jobs:
         run: |
           source /tmp/echo_helpers.sh
           pushd "$MCP_DIR" >/dev/null
-
           set +e
           node test_client.js pg >"../.."/$LOG_DIR/pg_client.log 2>&1
           ec=$?
@@ -1145,19 +1048,14 @@ jobs:
           else
             OK "pg.client: completed (exit=0)"
           fi
-
           docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "\dt" \
             > "$LOG_DIR/pg_tables.log" 2>&1 || true
-
           docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" \
             -c "SELECT (SELECT COUNT(*) FROM transactions) + (SELECT COUNT(*) FROM transactions_p) AS total;" \
             > "$LOG_DIR/pg_count.log" 2>&1 || true
-
           node benchmark.js pg >"../.."/$ARTIFACT_DIR/benchmark_pg.json 2>>"../.."/$LOG_DIR/pg_client.log || true
           set -e
-
           popd >/dev/null
-
       - name: Build HTML/Markdown report (with charts)
         shell: bash
         continue-on-error: true
@@ -1169,20 +1067,16 @@ jobs:
           pushd "$MCP_DIR" >/dev/null
           runlog "report.build" bash -lc 'node report.js'
           popd >/dev/null
-
           ls -lh "$ARTIFACT_DIR/report.html" "$ARTIFACT_DIR/report.md" \
             | tee -a "${LOG_DIR}/report_build.log" || true
           head -n 50 "$ARTIFACT_DIR/report.md" \
             | tee -a "${LOG_DIR}/report_build.log" || true
-
           echo "=== BENCH SQLITE ===" | tee -a "${LOG_DIR}/report_build.log"
           cat "$ARTIFACT_DIR/benchmark_sqlite.json" 2>/dev/null \
             | tee -a "${LOG_DIR}/report_build.log" || true
-
           echo "=== BENCH PG ===" | tee -a "${LOG_DIR}/report_build.log"
           cat "$ARTIFACT_DIR/benchmark_pg.json" 2>/dev/null \
             | tee -a "${LOG_DIR}/report_build.log" || true
-
       - name: Summaries
         if: always()
         shell: bash
@@ -1211,7 +1105,6 @@ jobs:
             python --version || python3 --version || true
           } | tee "$LOG_DIR/summary.txt"
           OK "Summary generated"
-
       - name: Upload artifacts (logs, db, sources, configs, reports)
         if: always()
         uses: actions/upload-artifact@v4
@@ -1235,7 +1128,6 @@ jobs:
           ls -R .github/echo_artifacts || true
           ls -R .github/mcp_demo || true
           exit 0
-
   ###########################################################################
   # 2) Banking Data Pipeline — 멀티DB 매트릭스 / bad substitution fix / PATH 스냅샷
   ###########################################################################
@@ -1261,12 +1153,10 @@ jobs:
           DB_MATRIX: ${{ matrix.db }}
         run: |
           set -Eeuo pipefail
-
           mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" artifacts "artifacts/${DB_MATRIX}"
           touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
           : > "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
           : > "$LOG_DIR/bank_ctx_${DB_MATRIX}.log" || true
-
           {
             echo "=== PRE-FLIGHT SERVICE SNAPSHOT ==="
             echo "workflow=${GITHUB_WORKFLOW}"
@@ -1281,7 +1171,6 @@ jobs:
             echo "--- INITIAL PATH ---"
             echo "$PATH"
           } | tee "${LOG_DIR}/00_preflight_banking_${DB_MATRIX}.txt"
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -1308,7 +1197,6 @@ jobs:
             echo "--- pip --version ---"
             pip --version || pip3 --version || true
           } | tee -a "$LOG_DIR/bank_ctx_${DB_MATRIX}.log"
-
       - name: Install system clients (psql, mysqlclient)
         shell: bash
         continue-on-error: true
@@ -1316,7 +1204,6 @@ jobs:
           set -euxo pipefail
           sudo apt-get update
           sudo apt-get install -y postgresql-client mysql-client || true
-
       - name: Install Python dependencies
         shell: bash
         continue-on-error: true
@@ -1328,7 +1215,6 @@ jobs:
           else
             echo "requirements.txt not found; skipping."
           fi
-
       - name: Start database container
         env:
           DB_MATRIX: ${{ matrix.db }}
@@ -1364,7 +1250,6 @@ jobs:
               exit 1
               ;;
           esac
-
       - name: Wait for DB readiness
         env:
           DB_MATRIX: ${{ matrix.db }}
@@ -1387,7 +1272,6 @@ jobs:
           else
             echo "No readiness wait needed for $DB_MATRIX"
           fi
-
           {
             echo "=== SERVICE SNAPSHOT AFTER READINESS CHECK (${DB_MATRIX}) ==="
             echo "--- docker ps -a ---"
@@ -1397,7 +1281,6 @@ jobs:
             echo "--- PATH (current) ---"
             echo "$PATH"
           } | tee -a "$LOG_DIR/bank_ctx_${DB_MATRIX}.log" 2>&1 || true
-
       - name: Run pipeline
         env:
           DB_MATRIX: ${{ matrix.db }}
@@ -1410,7 +1293,6 @@ jobs:
         continue-on-error: true
         run: |
           set -euxo pipefail
-
           # 사용자가 제공한 banking_pipeline.pipeline 모듈 호출
           python -m banking_pipeline.pipeline \
             --target "${DB_MATRIX}" \
@@ -1418,10 +1300,8 @@ jobs:
             --seed 42 \
             --out artifacts \
             | tee -a "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
-
           ls -R "artifacts/${DB_MATRIX}" \
             | tee -a "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
-
           {
             echo "=== POST PIPELINE RUNTIME (${DB_MATRIX}) ==="
             echo "--- PATH ---"
@@ -1431,7 +1311,6 @@ jobs:
             echo "--- python --version ---"
             python --version || python3 --version || true
           } | tee -a "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         continue-on-error: true
