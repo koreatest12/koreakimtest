@@ -110,8 +110,8 @@ jobs:
           mvn test
 
       - name: Submit Java Dependency Graph
-        # 🚨 [오류 수정] 'actions/' -> 'github/'로 변경
-        uses: github/dependency-submission-action@v1 
+        # 🚨 [오류 수정] v1 -> v5 (최신 안정화 버전)
+        uses: github/dependency-submission-action@v5
         with:
           build-root-directory: ${{ github.workspace }}
           manifest-path: ${{ github.workspace }}/target/dependency-submission.json
@@ -150,8 +150,8 @@ jobs:
           echo "파이썬 스크립트 실행 완료 (시뮬레이션)"
 
       - name: Submit Python Dependency Graph
-        # 🚨 [오류 수정] 'actions/' -> 'github/'로 변경
-        uses: github/dependency-submission-action@v1
+        # 🚨 [오류 수정] v1 -> v5 (최신 안정화 버전)
+        uses: github/dependency-submission-action@v5
         with:
           build-root-directory: ${{ github.workspace }}
           manifest-path: ${{ github.workspace }}/requirements.txt
