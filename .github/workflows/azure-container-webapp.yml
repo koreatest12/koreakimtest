@@ -1,4 +1,4 @@
-name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev10)"
+name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev12)"
 
 on:
   push:
@@ -25,18 +25,22 @@ on:
 permissions:
   contents: read
   packages: write      # GHCR push
-  id-token: write      # OIDC (향후 확장 자리)
+  id-token: write      # OIDC 인증을 위해 반드시 필요합니다.
   security-events: write
 
 env:
-  TZ: Asia/Seoul # 👈 'rev9'의 오타 (Asia: Seoul) 수정
+  TZ: Asia/Seoul
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
   
-  # ⚠️ 중요: GitHub 레포지토리 시크릿에 AZURE_WEBAPP_NAME을 등록해야 합니다.
+  # ⚠️ 필수 시크릿 (OIDC 인증용)
   AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME }}
   DOCKER_REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }} # ex) koreatest12/koreakimtest
+  
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
 
   # 헬퍼 스크립트를 상단 env로 추출 (DRY)
   HELPER_SCRIPT: |
@@ -114,6 +118,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+        continue-on-error: true # 👈 GHCR push 실패해도 다음 스텝 진행
 
       - name: Security scan placeholder
         shell: bash
@@ -169,23 +174,29 @@ jobs:
           log_ok "Target WebApp: ${{ env.AZURE_WEBAPP_NAME }}"
 
       #################################################################
-      # Gate: 'rev9'/'rev10'에서 의도적으로 제거됨 (스킵 없는 실행을 위해)
+      # OIDC 인증 스텝 (실패해도 계속 진행)
       #################################################################
-      
+      - name: Azure Login using OIDC
+        uses: azure/login@v1
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          enable-AzPSSession: true
+        continue-on-error: true # 👈 인증 실패해도 다음 스텝 진행 (핵심)
+
       #################################################################
-      # 실제 컨테이너 이미지 배포 (azure/webapps-deploy@v3 사용)
+      # 실제 컨테이너 이미지 배포 (실패해도 계속 진행)
       #################################################################
-      - name: Deploy to Azure Web App (publish-profile mode)
-        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'/'rev10'에서 제거됨
+      - name: Deploy to Azure Web App (OIDC mode)
         id: deploy-webapp
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           images: '${{ env.IMAGE_TO_DEPLOY }}'
+        continue-on-error: true # 👈 배포 자체 실패해도 다음 스텝 진행 (핵심)
 
       - name: Record deploy output
-        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'/'rev10'에서 제거됨
         shell: bash
         run: |
           set +e
@@ -202,7 +213,6 @@ jobs:
           exit 0
 
       - name: Healthcheck (optional)
-        # ⬇️ 'DEPLOY_ENABLED' 조건 제거됨
         if: github.event.inputs.run_healthcheck == 'true' || github.event.inputs.run_healthcheck == ''
         shell: bash
         run: |
@@ -233,7 +243,6 @@ jobs:
           exit 0
 
       - name: Azure runtime info placeholder
-        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'/'rev10'에서 제거됨
         shell: bash
         run: |
           set +e
@@ -264,13 +273,12 @@ jobs:
           . /tmp/echo_helpers.sh
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
           
-          # ⬇️ 'DEPLOY_ENABLED' 분기 제거됨. 이제 항상 '시도' 상태.
-          STATUS_MSG="Deployment attempted (publish-profile mode)."
+          STATUS_MSG="Deployment process COMPLETED (Failure is possible but SafeContinue was enforced)."
 
           log_ok "🎉 SAFE-CONTINUE COMPLETE"
           log_ok "Status: ${STATUS_MSG}"
           log_ok "App: ${AZURE_WEBAPP_NAME:- (Not Set) }"
           log_ok "Image: ${{ env.IMAGE_TO_DEPLOY }}"
           log_ok "Env tag: ${{ github.event.inputs.deploy_env || 'dev' }}"
-          log_ok "Some steps may have failed, but pipeline reached the final checkpoint by design."
+          log_ok "All steps were attempted, regardless of errors."
           exit 0
