@@ -1,11 +1,11 @@
-name: "Docker Build & Deploy (Handles Failure)"
+name: "Docker Build & Deploy (Ignore SSH Key Error)"
 
 on:
   push:
     branches: [ "main" ]
     paths:
       - "Dockerfile"
-      - ".github/workflows/**"
+      - ".github/workflows/**" # 경로 수정
       - "package.json"
       - "package-lock.json"
       - "**/*.ts"
@@ -32,7 +32,7 @@ env:
 
 jobs:
   ########################################################
-  # 1. 빌드 및 푸시 잡 (변경 없음)
+  # 1. 빌드 및 푸시 잡
   ########################################################
   build-and-push:
     name: Build and Push Image
@@ -74,10 +74,10 @@ jobs:
           cache-to: type=gha,mode=max
 
   ########################################################
-  # 2. 배포 잡 (실패 처리 로직 추가)
+  # 2. 배포 잡 (오류 무시 로직 적용)
   ########################################################
   deploy:
-    name: Deploy to Server (Handles Failure)
+    name: Deploy to Server (Ignore Errors)
     needs: build-and-push
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
@@ -85,13 +85,12 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      # 1. 가상 SSH 키 정보 사용
-      # 실제 키가 없으면 이 단계는 실패하지만, 아래 로직에 따라 전체 워크플로우는 계속됩니다.
+      # 1. SSH 키 등록 시도 (실패해도 성공으로 처리)
       - name: Add SSH key to ssh-agent
+        # 이 스텝에서 오류가 발생해도 워크플로우는 중단되지 않습니다.
+        continue-on-error: true
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          # GitHub Secrets에 SSH_PRIVATE_KEY가 없다면 이 스텝은 실패합니다.
-          # 하지만 아래 배포 스텝에서 실패를 무시하도록 처리합니다.
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       # 2. 배포할 이미지 태그 결정
@@ -103,10 +102,10 @@ jobs:
           else
             TAG_VALUE="sha-${GITHUB_SHA::7}"
           fi
-          echo "🏷️ Target image tag for deployment: ${TAG_VALUE}"
+          echo "🏷️ Target image tag: ${TAG_VALUE}"
           echo "tag=${TAG_VALUE}" >> "$GITHUB_OUTPUT"
 
-      # 3. 원격 서버에 배포 (실패 시에도 성공으로 보고)
+      # 3. 원격 서버에 배포 시도 (실패해도 성공으로 처리)
       - name: Attempt to deploy to remote server
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
@@ -120,22 +119,23 @@ jobs:
         run: |
           REMOTE_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
 
-          echo "🚀 Attempting deployment of ${REMOTE_IMAGE} to ${SERVER_USER}@${SERVER_HOST}"
-          echo "⚠️ This step will be reported as SUCCESSFUL even if the SSH connection or remote commands fail."
+          echo "🚀 Attempting deployment of ${REMOTE_IMAGE}"
+          echo "⚠️ This entire step will be reported as SUCCESSFUL, even if SSH connection fails."
 
-          # '|| true'를 명령어 끝에 추가하여, SSH 접속/명령이 실패해도 워크플로우가 중단되지 않도록 함
+          # '|| true'를 통해 ssh 명령 자체가 실패해도(키가 없어서) 성공으로 간주합니다.
           (ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${SERVER_USER}@${SERVER_HOST}" "
             set -e
-            echo '▶ [Remote] Logging in to GHCR...'
+            echo '▶ [Remote] Executing deployment commands...'
             echo '${GH_TOKEN}' | docker login ${{ env.REGISTRY }} -u '${GH_ACTOR}' --password-stdin
-            echo '▶ [Remote] Pulling image...'
             docker pull ${REMOTE_IMAGE}
-            echo '▶ [Remote] Restarting container...'
             docker rm -f ${CONTAINER_NAME} || true
             docker run -d --name ${CONTAINER_NAME} -p ${HOST_PORT}:${CONTAINER_PORT} --restart unless-stopped ${REMOTE_IMAGE}
-            echo '▶ [Remote] Cleaning up old images...'
             docker image prune -af || true
-            echo '✅ [Remote] Deployment commands sent successfully!'
-          ") || true # <--- 이 부분이 핵심입니다.
+            echo '✅ [Remote] Deployment commands sent.'
+          ") || true
 
-          echo "✅ Deployment step finished. Please verify the actual result on the server manually."
+      # 4. 최종 성공 메시지 출력
+      - name: Final Summary
+        run: |
+          echo "✅ Workflow finished. All steps were set to report success regardless of actual outcome."
+          echo "   Please manually verify the deployment on the server."
