@@ -1,80 +1,485 @@
-name: Teradata Workflow with Echo Commands
+name: "🏦 Teradata FinOps Batch — EchoOps + Audit + Snapshot + Schedule (만전대비)"
 
-# 수동 실행 (workflow_dispatch) 및 main 브랜치 푸시 시 실행
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
   workflow_dispatch:
+  schedule:
+    # 매일 15:30 UTC == 한국시간(KST) 새벽 00:30 자동 야간배치
+    - cron: "30 15 * * *"
+
+permissions:
+  contents: write   # 스냅샷 tar.gz를 GitHub Release 로 올릴 수 있게 준비
 
 env:
-  # 데이터 처리를 위한 루트 디렉토리 설정
+  # 공통 루트 디렉토리 (데이터/로그/산출물 모두 저장)
   DATA_ROOT: /home/runner/td_data
+
+  # 서비스/도메인별 테이블 대상 (Staging -> Final -> Audit 식 파이프라인 가정)
+  TBL_STAGE: STG_DATA
+  TBL_FINAL: FINAL_DATA
+  TBL_AUDIT: LOAD_AUDIT_LOG
+
+  # 기본 병합 타깃
+  TARGET_TABLE: FINAL_DATA
+
+  # 품질 기대 행수 (예: 일일 적재 500,000건)
+  EXPECTED_ROWCOUNT: "500000"
 
 jobs:
   teradata_pipeline_job:
     runs-on: ubuntu-latest
-    
+
     steps:
+      #######################################################################
+      # 0. 코드 체크아웃 + 시작 알림
+      #######################################################################
       - name: 📥 코드 체크아웃
         uses: actions/checkout@v4
-        # uses 바로 아래에 run을 같은 레벨로 둘 수 없으므로, run은 별도의 step으로 분리합니다.
-        
-      # 수정된 첫 번째 Step: 시작 로깅을 위한 별도의 Step 추가
+
       - name: 📝 워크플로우 시작 로깅
-        run: echo "::notice::Teradata 통합 워크플로우를 시작합니다."
-        
-      # --- 1단계: 디렉토리 대량 생성 (echo 및 Shell Script 활용) ---
-      - name: 📂 디렉토리 생성 및 환경 설정 확인
         run: |
-          # echo를 사용하여 디버그 메시지 출력
-          echo "::debug::DATA_ROOT 환경 변수 값 확인: $DATA_ROOT"
-          
-          # mkdir 명령과 echo를 사용하여 디렉토리 생성 로깅
+          echo "::notice::Teradata 통합 워크플로우(야간배치/수동실행/Push)를 시작합니다."
+          echo "::debug::DATA_ROOT=${DATA_ROOT}, TARGET_TABLE=${TARGET_TABLE}"
+
+      #######################################################################
+      # 1. 디렉토리 준비 + 구조 생성 (logs, archive, landing_zone 등)
+      #######################################################################
+      - name: 📂 디렉토리 생성 및 환경 초기화
+        run: |
+          set -e
           echo "디렉토리 구조 생성 중..."
-          mkdir -p $DATA_ROOT/{source_files,landing_zone,logs,archive,extract_out}
-          
-          # 생성된 디렉토리 목록을 echo로 출력
+          mkdir -p "${DATA_ROOT}"/{source_files,landing_zone,logs,archive,extract_out,tmp,quality,release}
+
           echo "생성된 디렉토리 확인:"
-          ls -F $DATA_ROOT/
-          
-      # --- 2단계: Teradata 정보 생성 (DDL 실행 시뮬레이션) ---
-      - name: 📊 Teradata 테이블(정보) 및 서비스 생성 시뮬레이션
+          ls -R "${DATA_ROOT}" || true
+
+          # 배치 입력 원본(landing_zone) 시뮬레이션 CSV 더미도 생성
+          SAMPLE_SRC="${DATA_ROOT}/landing_zone/input_$(date +%Y%m%d).csv"
+          echo "COL1,COL2,LOAD_TS"          >  "$SAMPLE_SRC"
+          echo "1,Hello,$(date +%F' '%T)"   >> "$SAMPLE_SRC"
+          echo "2,World,$(date +%F' '%T)"   >> "$SAMPLE_SRC"
+          echo "샘플 적재 대상 CSV: $SAMPLE_SRC"
+
+      #######################################################################
+      # 2. 환경 스냅샷 (보안/감사용 런타임 증빙)
+      #######################################################################
+      - name: 🔍 런타임 환경 스냅샷 저장
         run: |
-          echo "::group::DDL 및 SP 생성 단계"
-          echo "Teradata 접속 및 DDL 파일 (create_schema.sql) 실행 중..."
-          # DDL 실행 성공 가정하고 로그 출력
-          echo "테이블 'STG_DATA' 및 'FINAL_DATA' 생성 완료."
-          echo "저장 프로시저 'LOAD_AND_MERGE' 서비스 생성 완료."
-          echo "::endgroup::"
-          
-          # 다음 단계에서 사용될 환경 변수 설정 (GITHUB_ENV 사용)
-          echo "TARGET_TABLE=FINAL_DATA" >> $GITHUB_ENV
-          
-      # --- 3단계: 데이터 로드 및 서비스 실행 (핵심 파이프라인) ---
-      - name: 🔄 데이터 로드 및 변환/병합 실행
+          SNAP="${DATA_ROOT}/logs/env_snapshot.txt"
+          {
+            echo "===== ENV SNAPSHOT ====="
+            date
+            uname -a
+            whoami
+            echo "--- PATH ---"
+            echo "$PATH"
+            echo "--- DISK (df -h) ---"
+            df -h
+            echo "--- MEMORY (free -m) ---"
+            free -m || true
+            echo "--- GITHUB CONTEXT ---"
+            echo "RUN_ID=$GITHUB_RUN_ID"
+            echo "RUN_NUMBER=$GITHUB_RUN_NUMBER"
+            echo "REPO=$GITHUB_REPOSITORY"
+            echo "ACTOR=$GITHUB_ACTOR"
+            echo "SHA=$GITHUB_SHA"
+            echo "BRANCH=$GITHUB_REF_NAME"
+          } > "$SNAP"
+          echo "::debug::환경 스냅샷 기록 완료 -> $SNAP"
+
+      #######################################################################
+      # 3. DDL / TPT / 서비스 로직 백업
+      #    - 서비스별 테이블 정의 (STG_DATA, FINAL_DATA, LOAD_AUDIT_LOG 등)
+      #    - 병합/적재 프로시저
+      #    - TPT Bulk Load 스크립트
+      #    - 품질검증용 SELECT 쿼리
+      #######################################################################
+      - name: 🧱 DDL/TPT/쿼리 스크립트 백업 (각 서비스별 table / query 기록)
         run: |
-          echo "원본 파일 $DATA_ROOT/landing_zone 에서 TPT 로드 시작..."
-          # TPT 로드 완료 가정 및 로깅
-          echo "TPT Bulk Load 완료. 500000 행 로드됨."
-          
-          # 저장 프로시저 호출 시뮬레이션 (서비스 실행)
-          echo "CALL Stored Procedure 'LOAD_AND_MERGE' 실행 중..."
-          
-          # 환경 변수 사용 로그 출력
-          echo "${{ env.TARGET_TABLE }} 테이블에 데이터 병합 완료."
-          
-      # --- 4단계: 결과 파일 생성 및 아카이빙 ---
-      - name: 📤 결과 파일 추출 및 아카이빙
+          set -e
+          mkdir -p "${DATA_ROOT}/source_files/sql"
+          mkdir -p "${DATA_ROOT}/source_files/tpt"
+
+          # 3-1. 스테이징(STG_DATA), 결과(FINAL_DATA), 감사로그(LOAD_AUDIT_LOG) 테이블 생성 스크립트
+          cat > "${DATA_ROOT}/source_files/sql/create_tables.sql" <<'SQL'
+          -- [STAGING TABLE] 원천 적재 (원본 그대로/최소 가공)
+          CREATE TABLE STG_DATA (
+            COL1       INTEGER,
+            COL2       VARCHAR(100),
+            LOAD_TS    TIMESTAMP,
+            BATCH_ID   VARCHAR(40)
+          );
+
+          -- [FINAL TABLE] 정제/변환/중복 제거 후 운영용 테이블
+          CREATE TABLE FINAL_DATA (
+            COL1       INTEGER,
+            COL2       VARCHAR(100),
+            LOAD_TS    TIMESTAMP,
+            ETL_TS     TIMESTAMP,
+            SRC_BATCH  VARCHAR(40)
+          );
+
+          -- [AUDIT TABLE] 적재/병합 이력, 품질, 성공/실패 상태 로그
+          CREATE TABLE LOAD_AUDIT_LOG (
+            AUDIT_TS        TIMESTAMP,
+            BATCH_ID        VARCHAR(40),
+            SRC_FILE        VARCHAR(255),
+            ROW_LOADED      INTEGER,
+            ROW_EXPECTED    INTEGER,
+            STATUS_CODE     INTEGER,
+            STATUS_MESSAGE  VARCHAR(2000),
+            OPERATOR        VARCHAR(128)
+          );
+
+          -- 인덱스 예시
+          CREATE INDEX IDX_FINAL_DATA_COL1 ON FINAL_DATA (COL1);
+          CREATE INDEX IDX_AUDIT_BATCH     ON LOAD_AUDIT_LOG (BATCH_ID);
+
+          SQL
+
+          # 3-2. 병합/정제 프로시저 (LOAD_AND_MERGE)
+          cat > "${DATA_ROOT}/source_files/sql/proc_LOAD_AND_MERGE.sql" <<'SQL'
+          REPLACE PROCEDURE LOAD_AND_MERGE (
+            IN p_batch_id VARCHAR(40),
+            IN p_src_file VARCHAR(255)
+          )
+          BEGIN
+            /* 1) STG_DATA -> FINAL_DATA 로 병합/정제 후 삽입 */
+            INSERT INTO FINAL_DATA (COL1, COL2, LOAD_TS, ETL_TS, SRC_BATCH)
+            SELECT
+              COL1,
+              TRIM(COL2),
+              LOAD_TS,
+              CURRENT_TIMESTAMP,
+              p_batch_id
+            FROM STG_DATA
+            WHERE BATCH_ID = p_batch_id;
+
+            /* 2) 감사로그 남기기 (ROW_LOADED 등은 사후 UPDATE에서 입력 가능) */
+            INSERT INTO LOAD_AUDIT_LOG (
+              AUDIT_TS, BATCH_ID, SRC_FILE, ROW_LOADED, ROW_EXPECTED,
+              STATUS_CODE, STATUS_MESSAGE, OPERATOR
+            ) VALUES (
+              CURRENT_TIMESTAMP,
+              p_batch_id,
+              p_src_file,
+              NULL,
+              NULL,
+              0,
+              'LOAD_AND_MERGE executed',
+              USER
+            );
+
+          END;
+          SQL
+
+          # 3-3. Teradata TPT (대량 적재) 예시
+          cat > "${DATA_ROOT}/source_files/tpt/load_stg_data.tpt" <<'TPT'
+          DEFINE JOB LOAD_STG_DATA
+          (
+            DEFINE SCHEMA STG_SCHEMA
+            (
+              COL1       INTEGER,
+              COL2       VARCHAR(100),
+              LOAD_TS    VARCHAR(30)
+            );
+
+            DEFINE OPERATOR FILE_READER
+            TYPE DATACONNECTOR PRODUCER
+            SCHEMA STG_SCHEMA
+            ATTRIBUTES
+            (
+              FileName = '/home/runner/td_data/landing_zone/input_YYYYMMDD.csv',
+              Format   = 'Delimited'
+            );
+
+            DEFINE OPERATOR TPT_INSERTER
+            TYPE STREAM
+            TARGET TABLE STG_DATA
+            ATTRIBUTES
+            (
+              TdpId    = 'TERADATA_SID',
+              UserName = 'ETL_USER',
+              UserPassword = 'ETL_PASS',
+              LogTable = 'ETL_LOG_TABLE'
+            );
+
+            APPLY
+            (
+              'INSERT INTO STG_DATA (COL1, COL2, LOAD_TS, BATCH_ID)
+               VALUES (:COL1, :COL2, TIMESTAMP :LOAD_TS, ''BATCH_PLACEHOLDER'');'
+            )
+            TO OPERATOR (TPT_INSERTER[1])
+            SELECT
+              COL1, COL2, LOAD_TS
+            FROM OPERATOR (FILE_READER[1]);
+          );
+          TPT
+
+          # 3-4. 품질 검증/통계용 쿼리 (서비스별 조회 예시)
+          cat > "${DATA_ROOT}/source_files/sql/quality_queries.sql" <<'SQL'
+          -- 적재된 STG_DATA 건수
+          SELECT COUNT(*) AS CNT_STG
+          FROM STG_DATA
+          WHERE BATCH_ID = :BATCH_ID;
+
+          -- 최종 반영된 FINAL_DATA 건수
+          SELECT COUNT(*) AS CNT_FINAL
+          FROM FINAL_DATA
+          WHERE SRC_BATCH = :BATCH_ID;
+
+          -- 최종 테이블에서 NULL/비어있는 COL2 존재 유무 체크
+          SELECT COUNT(*) AS NULL_COL2_ROWS
+          FROM FINAL_DATA
+          WHERE (COL2 IS NULL OR TRIM(COL2) = '');
+
+          -- 최근 적재 AUDIT LOG
+          SELECT *
+          FROM LOAD_AUDIT_LOG
+          ORDER BY AUDIT_TS DESC
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY BATCH_ID ORDER BY AUDIT_TS DESC) = 1;
+          SQL
+
+          echo "::notice::DDL/TPT/쿼리 스크립트가 ${DATA_ROOT}/source_files 에 저장되었습니다."
+          ls -R "${DATA_ROOT}/source_files" || true
+
+      #######################################################################
+      # 4. 데이터 적재 & 병합 (continue-on-error; status 기록)
+      #    - TPT Bulk Load 시뮬레이션
+      #    - SP(LOAD_AND_MERGE) 호출 시뮬레이션
+      #    - 실패해도 파이프라인은 계속
+      #######################################################################
+      - name: 🔄 데이터 로드 및 변환/병합 실행 (실패해도 계속)
+        continue-on-error: true
         run: |
-          RESULT_FILE_NAME="report_$(date +%Y%m%d).csv"
-          
-          # echo 명령으로 추출된 결과 파일을 생성
-          echo "Extracted Data, Analysis Complete" > $DATA_ROOT/extract_out/$RESULT_FILE_NAME
-          
-          # 최종 결과 파일 생성 확인
-          # 참고: $DATA_ROOT 변수를 사용해야 하며, $RESULT_ROOT는 정의되지 않은 변수이므로 $DATA_ROOT로 수정합니다.
-          echo "최종 결과 파일 생성 완료: $DATA_ROOT/extract_out/$RESULT_FILE_NAME"
-          
-          # 성공 메시지 출력
-          echo "::notice file=$RESULT_FILE_NAME::워크플로우가 성공적으로 완료되었습니다."
+          set +e
+
+          BATCH_ID="BATCH_$(date +%Y%m%d_%H%M%S)"
+          SRC_FILE="${DATA_ROOT}/landing_zone/input_$(date +%Y%m%d).csv"
+
+          PIPELINE_LOG="${DATA_ROOT}/logs/pipeline_load_merge.log"
+          STATUS_FILE="${DATA_ROOT}/logs/pipeline_status.log"
+
+          {
+            echo "=== LOAD STAGE START ==="
+            echo "BATCH_ID=$BATCH_ID"
+            echo "SRC_FILE=$SRC_FILE"
+            echo "TARGET_TABLE=${TARGET_TABLE}"
+            echo "TBL_STAGE=${TBL_STAGE}, TBL_FINAL=${TBL_FINAL}, TBL_AUDIT=${TBL_AUDIT}"
+            echo
+            echo "[1] TPT Bulk Load 시뮬레이션 → ${TBL_STAGE}"
+            echo "    (${SRC_FILE} -> ${TBL_STAGE})"
+            echo "    행 수 가정: ${EXPECTED_ROWCOUNT}행 적재"
+            echo
+            echo "[2] 저장 프로시저 LOAD_AND_MERGE('${BATCH_ID}','${SRC_FILE}') 실행 시뮬레이션"
+            echo "    ${TBL_STAGE} -> ${TBL_FINAL} 로 정제/병합"
+            echo
+            echo "[3] 감사 테이블 ${TBL_AUDIT} 에 적재 이력 insert 가정"
+            echo "=== LOAD STAGE END ==="
+          } | tee "$PIPELINE_LOG"
+
+          # 적재/병합이 '성공'했다고 가정하고 exit code = 0으로 기록
+          STATUS_CODE=0
+          STATUS_MSG="OK"
+          echo "STATUS_CODE=${STATUS_CODE}"     >  "$STATUS_FILE"
+          echo "STATUS_MSG=${STATUS_MSG}"       >> "$STATUS_FILE"
+          echo "BATCH_ID=${BATCH_ID}"           >> "$STATUS_FILE"
+          echo "SRC_FILE=${SRC_FILE}"           >> "$STATUS_FILE"
+          echo "ROW_EXPECTED=${EXPECTED_ROWCOUNT}" >> "$STATUS_FILE"
+          echo "ROW_LOADED=${EXPECTED_ROWCOUNT}"   >> "$STATUS_FILE"
+
+          echo "::notice::데이터 적재/병합 단계 수행 완료(시뮬레이트). 파이프라인은 항상 계속 진행합니다."
+          set -e
+
+      #######################################################################
+      # 5. 품질 검증 로그 (기대 행수 vs 실제 행수 등 QC 지표)
+      #    - 실제 환경에서는 DB에서 COUNT(*) 결과를 가져오지만
+      #      지금은 시뮬레이션 값(EXPECTED_ROWCOUNT)으로 기록
+      #######################################################################
+      - name: ✅ 품질 검증 및 QC 로그 생성
+        run: |
+          QUALITY_LOG="${DATA_ROOT}/quality/quality_check.log"
+          STATUS_FILE="${DATA_ROOT}/logs/pipeline_status.log"
+
+          EXPECTED="${EXPECTED_ROWCOUNT}"
+          ACTUAL="${EXPECTED_ROWCOUNT}"
+
+          ROW_COUNT_OK="false"
+          if [ "$EXPECTED" = "$ACTUAL" ]; then
+            ROW_COUNT_OK="true"
+          fi
+
+          {
+            echo "=== QUALITY CHECK ==="
+            echo "TIMESTAMP=$(date +%Y-%m-%dT%H:%M:%S%z)"
+            echo "EXPECTED_ROWCOUNT=$EXPECTED"
+            echo "ACTUAL_ROWCOUNT=$ACTUAL"
+            echo "ROW_COUNT_OK=$ROW_COUNT_OK"
+            echo
+            echo "--- PIPELINE STATUS SNAPSHOT ---"
+            cat "$STATUS_FILE" 2>/dev/null || echo "NO STATUS_FILE"
+          } > "$QUALITY_LOG"
+
+          echo "::notice::품질 검증 로그 작성 완료 -> $QUALITY_LOG"
+          cat "$QUALITY_LOG" || true
+
+      #######################################################################
+      # 6. 권한/접근제어 감사 기록 (ROLE별 권한 변화도 증빙)
+      #######################################################################
+      - name: 🔐 권한/접근제어 감사 기록 생성
+        run: |
+          ACL_LOG="${DATA_ROOT}/logs/acl_audit.sql"
+          {
+            echo "-- 권한 감사 로그 (시뮬레이션)"
+            echo "-- FINAL_DATA 조회권/쓰기권 등 역할별 권한"
+            echo "GRANT SELECT ON ${TBL_FINAL} TO ROLE ANALYST_ROLE;"
+            echo "GRANT INSERT,UPDATE ON ${TBL_FINAL} TO ROLE ETL_LOADER_ROLE;"
+            echo "REVOKE INSERT ON ${TBL_FINAL} FROM ROLE ANALYST_ROLE;"
+            echo
+            echo "-- 감사 테이블 LOAD_AUDIT_LOG 에 대한 접근 제어"
+            echo "GRANT SELECT ON ${TBL_AUDIT} TO ROLE AUDIT_READER_ROLE;"
+            echo
+            echo "-- 실행 시각 및 실행자 기록"
+            echo "-- AUDIT_TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
+            echo "-- EXEC_BY=${GITHUB_ACTOR}"
+            echo "-- COMMIT_SHA=${GITHUB_SHA}"
+            echo "-- BRANCH=${GITHUB_REF_NAME}"
+          } > "$ACL_LOG"
+
+          echo "::debug::권한 감사 로그 생성 완료 -> $ACL_LOG"
+          cat "$ACL_LOG" || true
+
+      #######################################################################
+      # 7. 릴리즈 스냅샷 & 압축본 생성 (tar.gz)
+      #    - 날짜+SHA 기반 파일 이름
+      #    - 이 tar.gz는 회계/정산본처럼 보관 가능
+      #######################################################################
+      - name: 🗜 결과물 tar.gz 스냅샷 생성
+        run: |
+          SNAP_TAG="td-snapshot-$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA:0:8}"
+          SNAP_DIR="${DATA_ROOT}/release"
+          SNAP_FILE="${SNAP_DIR}/${SNAP_TAG}.tar.gz"
+
+          echo "SNAP_TAG=$SNAP_TAG"    | tee "${DATA_ROOT}/logs/snapshot_tag.txt"
+          echo "SNAP_FILE=$SNAP_FILE"  | tee -a "${DATA_ROOT}/logs/snapshot_tag.txt"
+
+          mkdir -p "$SNAP_DIR"
+
+          tar -czf "$SNAP_FILE" \
+            -C "${DATA_ROOT}" \
+            logs \
+            quality \
+            extract_out \
+            source_files \
+            landing_zone \
+            || true
+
+          echo "::notice::스냅샷 아카이브 생성 -> $SNAP_FILE"
+          ls -lh "$SNAP_FILE" || true
+
+      #######################################################################
+      # 8. GitHub Release 업로드 (선택) - 실패해도 워크플로우는 계속
+      #    - gh CLI는 ubuntu-latest 러너에 기본 설치되어 있음
+      #    - private repo에서도 사용 가능 (permissions.contents: write 필요)
+      #    - 내부용 "재무 마감본"처럼 릴리즈로 남기고 싶을 때 사용
+      #######################################################################
+      - name: 🚀 GitHub Release(스냅샷) 업로드 시도
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SNAP_INFO="${DATA_ROOT}/logs/snapshot_tag.txt"
+          if [ -f "$SNAP_INFO" ]; then
+            SNAP_TAG=$(grep '^SNAP_TAG=' "$SNAP_INFO" | cut -d= -f2)
+            SNAP_FILE=$(grep '^SNAP_FILE=' "$SNAP_INFO" | cut -d= -f2)
+          fi
+
+          if [ -n "${SNAP_TAG:-}" ] && [ -f "${SNAP_FILE:-}" ]; then
+            echo "::notice::릴리즈 태그 $SNAP_TAG, 파일 $SNAP_FILE 업로드 시도 중"
+            gh release create "$SNAP_TAG" "$SNAP_FILE" \
+              --title "$SNAP_TAG" \
+              --notes "자동 Teradata 배치 스냅샷 (테이블정의/ACL/품질로그/환경스냅샷 포함)" \
+              || echo "::warning::gh release create 실패 (권한 또는 기존 태그 중복 가능)"
+          else
+            echo "::warning::스냅샷 정보가 없어 릴리즈 생략"
+          fi
+
+      #######################################################################
+      # 9. 감사 요약 로그 (audit_run_summary.log)
+      #    - 누가 돌렸는지 / 어떤 배치인지 / 품질결과 / 상태코드 / 스냅샷 태그
+      #######################################################################
+      - name: 🧾 감사 요약 로그 생성 (audit_run_summary.log)
+        run: |
+          AUDIT_FILE="${DATA_ROOT}/logs/audit_run_summary.log"
+          STATUS_FILE="${DATA_ROOT}/logs/pipeline_status.log"
+          SNAP_INFO="${DATA_ROOT}/logs/snapshot_tag.txt"
+          QUALITY_LOG="${DATA_ROOT}/quality/quality_check.log"
+
+          SNAP_TAG="N/A"
+          SNAP_FILE="N/A"
+          if [ -f "$SNAP_INFO" ]; then
+            SNAP_TAG=$(grep '^SNAP_TAG=' "$SNAP_INFO" | cut -d= -f2)
+            SNAP_FILE=$(grep '^SNAP_FILE=' "$SNAP_INFO" | cut -d= -f2)
+          fi
+
+          {
+            echo "=== PIPELINE AUDIT SUMMARY ==="
+            echo "TIMESTAMP=$(date +%Y-%m-%dT%H:%M:%S%z)"
+            echo "ACTOR=$GITHUB_ACTOR"
+            echo "REPO=$GITHUB_REPOSITORY"
+            echo "BRANCH=$GITHUB_REF_NAME"
+            echo "COMMIT_SHA=$GITHUB_SHA"
+            echo "TARGET_TABLE=${TARGET_TABLE}"
+            echo "TABLES_USED=${TBL_STAGE},${TBL_FINAL},${TBL_AUDIT}"
+            echo "--- STATUS_FILE ---"
+            cat "$STATUS_FILE"   2>/dev/null || echo "(no pipeline_status.log)"
+            echo
+            echo "--- QUALITY_LOG ---"
+            cat "$QUALITY_LOG"   2>/dev/null || echo "(no quality_check.log)"
+            echo
+            echo "--- SNAPSHOT INFO ---"
+            echo "SNAP_TAG=$SNAP_TAG"
+            echo "SNAP_FILE=$SNAP_FILE"
+            echo "DATA_ROOT=$DATA_ROOT"
+          } > "$AUDIT_FILE"
+
+          echo "::notice::감사 요약 로그 생성 완료 -> $AUDIT_FILE"
+          cat "$AUDIT_FILE" || true
+
+      #######################################################################
+      # 10. Artifact 업로드 (logs / quality / source_files / release)
+      #     - 규제/추적/재현 가능하도록 전체 산출물 보존
+      #######################################################################
+      - name: 📦 실행 산출물 업로드 (logs / quality / source / snapshot 등)
+        uses: actions/upload-artifact@v4
+        with:
+          name: teradata-run-${{ github.run_id }}
+          path: |
+            ${{ env.DATA_ROOT }}/logs/**
+            ${{ env.DATA_ROOT }}/quality/**
+            ${{ env.DATA_ROOT }}/source_files/**
+            ${{ env.DATA_ROOT }}/release/**
+            ${{ env.DATA_ROOT }}/landing_zone/**
+            ${{ env.DATA_ROOT }}/extract_out/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      #######################################################################
+      # 11. 최종 마무리 (항상 성공으로 종료)
+      #######################################################################
+      - name: ✅ 파이프라인 완료 (항상 성공)
+        if: always()
+        run: |
+          echo "✅ Teradata FinOps Batch 파이프라인 전체 단계 수행 완료."
+          echo "   - 디렉토리 준비"
+          echo "   - 환경 스냅샷"
+          echo "   - DDL/TPT/쿼리 백업"
+          echo "   - 적재/병합 (continue-on-error)"
+          echo "   - 품질검증 로그"
+          echo "   - 권한 감사 기록"
+          echo "   - tar.gz 스냅샷 + (옵션) Release 시도"
+          echo "   - audit_run_summary.log 생성"
+          echo "   - artifact 업로드"
+          echo "모든 산출물이 artifact teradata-run-${GITHUB_RUN_ID} 로 보관됩니다."
+          exit 0
