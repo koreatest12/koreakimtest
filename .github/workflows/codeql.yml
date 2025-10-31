@@ -2,6 +2,7 @@ name: "🛡 CodeQL Advanced SecureScan (Enterprise-Grade, No-Skip, AutoUpgrade, 
 ################################################################################# ARCHITECTURE OVERVIEW
 # ------------------------------------------------------------------------------
 # (주요 원칙: 모든 단계는 증거 수집을 위해 실패해도 계속 실행됩니다.)
+# ------------------------------------------------------------------------------
 ################################################################################
 on:
   push:
@@ -66,17 +67,21 @@ jobs:
       ##########################################################################
       # 🌟 No-Skip: if: always() 적용하여 인트로스펙션 및 디렉토리 생성을 보장합니다.
       - name: Prep dirs, env introspection, and best-effort OS upgrade
-        if: always() 
+        if: always()         
         shell: bash
         run: |
+          # 🚨 NOTE: 'set -o pipefail'은 파이프(|)에서 오류 발생 시 전체 실패로 간주.
+          # 모든 명령이 개별적으로 실패해도 계속 진행하기 위해 '|| true' 사용을 유지
           set -Eeuo pipefail
+          
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${UPGRADE_LOG_DIR}"
-          # ... (Log helpers and OS upgrade script is preserved)
+          
           cat > /tmp/echo_helpers.sh << 'EOF'
           TS() { date "+%Y-%m-%d %H:%M:%S%z"; }
           LOG() { lvl="$1"; shift; echo "[$(TS)] [$lvl] $*"; }
           EOF
           source /tmp/echo_helpers.sh || true
+          
           LOG INFO "===== RUNTIME INTROSPECTION START ====="
           uname -a  || true
           lsb_release -a 2>/dev/null || true
@@ -84,7 +89,9 @@ jobs:
           df -h || true
           free -m 2>/dev/null || true
           LOG INFO "Capturing upgradable package list and attempting upgrade (Linux runners)."
-          {
+          
+          # 🚨 강화: Upgrade 스크립트는 내부 오류를 무시하고(|| true) 로깅만 수행하도록 보장
+          {            
             echo "===== UPGRADE SESSION START $(date) ====="
             echo "Runner OS info:"
             uname -a || true
@@ -95,8 +102,9 @@ jobs:
               echo ">>> apt-get update / upgrade attempt"
               sudo apt-get update -y || true
               echo ">>> pre-upgrade upgradable list"
+              # 리다이렉트 오류 무시
               apt list --upgradable 2>/dev/null || true > "${UPGRADE_LOG_DIR}/upgradable.pre.txt"
-              # Patch runner packages (best effort)
+              # Patch runner packages (best effort, 실패해도 계속 진행)
               sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade || true
               echo ">>> post-upgrade upgradable list"
               apt list --upgradable 2>/dev/null || true > "${UPGRADE_LOG_DIR}/upgradable.post.txt"
@@ -109,12 +117,13 @@ jobs:
             fi
             echo "===== UPGRADE SESSION END $(date) ====="
           } | tee "${UPGRADE_LOG_DIR}/upgrade_${{ matrix.language }}.log"
-          LOG INFO "===== RUNTIME INTROSPECTION END ====="
           
+          LOG INFO "===== RUNTIME INTROSPECTION END ====="
+                
       ##########################################################################
       # 2. DEPENDENCY CACHES (PER LANGUAGE ECOSYSTEM)
       ##########################################################################
-      # (Dependency cache steps are preserved - no skip risk here)
+      # (Dependency cache steps are preserved - 캐시 실패는 다음 단계로 자동 진행됨)
       - name: Cache Maven local repo
         if: contains(matrix.language, 'java')
         uses: actions/cache@v4
@@ -150,6 +159,7 @@ jobs:
           key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/pyproject.toml', '**/setup.py') }}
           restore-keys: |
             pip-${{ runner.os }}-
+            
       ##########################################################################
       # 2.5 CODEQL DATABASE CACHE (NEW)
       ##########################################################################
@@ -160,9 +170,11 @@ jobs:
           key: codeql-db-${{ matrix.language }}-${{ runner.os }}-${{ hashFiles('**/*.${{ matrix.language }}', '**/pom.xml', '**/build.gradle*', '**/package*.json', '**/requirements.txt') }}
           restore-keys: |
             codeql-db-${{ matrix.language }}-${{ runner.os }}-
+            
       ##########################################################################
       # 3. CODEQL INIT
       ##########################################################################
+      # 🌟 NO-SKIP: 캐시 복원 실패와 관계없이 항상 CodeQL 초기화를 시도합니다.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
@@ -170,28 +182,31 @@ jobs:
           build-mode: ${{ matrix['build-mode'] }}
           db-location: ${{ runner.temp }}/codeql_db_${{ matrix.language }}
           queries: ${{ env.CODEQL_QUERIES }}
+          
       ##########################################################################
       # 4. AUTOBUILD (compiled languages only)
       ##########################################################################
+      # 🌟 NO-SKIP: autobuild 실패 시, job은 계속됩니다.
       - name: Autobuild (for compiled languages)
         if: ${{ matrix.build-mode == 'autobuild' }}
         uses: github/codeql-action/autobuild@v4
+        
       ##########################################################################
       # 5. MANUAL BUILD FALLBACK (NO-SKIP, ALWAYS LOG)
       ##########################################################################
-      # 🌟 NO-SKIP: autobuild 실패 여부와 관계없이 수동 빌드(manual mode) 강제 실행 가능
+      # 🌟 NO-SKIP: 이전 단계 실패(`failure()`) 시에도 반드시 실행됩니다.
       - name: Manual build fallback (enforced or on autobuild failure)
-        # failure() 조건 추가: Autobuild 단계가 실패했더라도 이 단계는 실행됨
         if: ${{ failure() || matrix.build-mode == 'manual' || env.MANUAL_BUILD_ENFORCE == 'true' }}
         shell: bash
         run: |
+          # 🚨 set -Eeuo pipefail는 유지하되, 내부 빌드 명령어는 || true로 실패를 명시적으로 무시
           set -Eeuo pipefail
           source /tmp/echo_helpers.sh || true
           LOG WARN "Autobuild failed OR manual mode enforced -> running manual fallback build"
           BUILD_LOG_FILE="${LOG_DIR}/manual_build_${{ matrix.language }}.log"
           
           # 빌드 에러를 무시하고( || true) 빌드 로그를 반드시 기록합니다.
-          {
+          {            
             echo "===== MANUAL BUILD START $(date) ====="
             if [ -f "mvnw" ] || [ -f "pom.xml" ]; then
               echo "[manual] mvn -B -q -DskipTests package"
@@ -220,6 +235,7 @@ jobs:
           echo '```bash' >> $GITHUB_STEP_SUMMARY
           tail -n 100 "${BUILD_LOG_FILE}" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+          
       ##########################################################################
       # 6. CODEQL ANALYZE
       ##########################################################################
@@ -230,6 +246,7 @@ jobs:
           category: "/language:${{ matrix.language }}"
           upload: true
           output: ${{ runner.temp }}/codeql_db_${{ matrix.language }}/results-${{ matrix.language }}.sarif
+          
       ##########################################################################
       # 7. EVIDENCE PACKAGING / AUDIT TRAIL
       ##########################################################################
@@ -244,22 +261,24 @@ jobs:
           source /tmp/echo_helpers.sh || true
           LOG INFO "Collecting CodeQL artifacts, SARIF, upgrade logs for audit trail"
           mkdir -p "${ARTIFACT_DIR}"
-          # Package full CodeQL DB (DB가 부분적으로 생성되었거나 없어도 계속 진행)
+          
+          # DB Packaging (오류 무시)
           if [ -d "${CODEQL_DB_DIR}" ]; then
             tar -czf "${ARTIFACT_DIR}/codeql_db_${{ matrix.language }}.tgz" \
               -C "${CODEQL_DB_DIR}" . || true
             ls -R "${CODEQL_DB_DIR}" \
               > "${LOG_DIR}/codeql_db_tree_${{ matrix.language }}.log" 2>&1 || true
           fi
-          # Copy SARIF (SARIF 파일이 없으면 || true로 무시하고 계속 진행)
+          # SARIF Copy (오류 무시)
           if [ -f "${CODEQL_DB_DIR}/results-${{ matrix.language }}.sarif" ]; then
             cp "${CODEQL_DB_DIR}/results-${{ matrix.language }}.sarif" \
                "${ARTIFACT_DIR}/results-${{ matrix.language }}.sarif" || true
           fi
-          # Bundle upgrade logs snapshot for infra audit
+          # Upgrade Logs (오류 무시)
           tar -czf "${ARTIFACT_DIR}/upgrade_logs_${{ matrix.language }}.tgz" \
             "${UPGRADE_LOG_DIR}" || true
           LOG INFO "Packaging complete"
+          
       ##########################################################################
       # 8. UPLOAD EVERYTHING AS ARTIFACT
       ##########################################################################
