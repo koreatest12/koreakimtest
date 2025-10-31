@@ -1,4 +1,4 @@
-name: "Docker Build & Deploy (Total EchoCall + Syntax Fix)"
+name: "Docker Build & Deploy (Total EchoCall + Tag Fix)"
 
 on:
   push:
@@ -54,8 +54,7 @@ jobs:
           set -e
           EXEC() { local L="$1"; shift; echo "▶ [${L}] $*"; "$@"; }
           EXEC "mkdir.ledger" mkdir -p ".github/ledger_out"
-          # ❗ 수정: 리디렉션(>)이 포함된 명령어는 bash -c로 감싸야 합니다.
-          EXEC "gen.ledger" bash -c "echo 'timestamp,tx_id,status\n2025-10-31T10:37:42,tx_b33f,confirmed' > .github/ledger_out/ledger.csv"
+          EXEC "gen.ledger" bash -c "echo 'timestamp,tx_id,status\n2025-10-31T10:39:36,tx_c44a,confirmed' > .github/ledger_out/ledger.csv"
           EXEC "log.simdone" echo "✅ Ledger simulation complete."
 
       - name: "[EchoCall] BEFORE: Set up QEMU"
@@ -77,7 +76,6 @@ jobs:
         run: |
           set -e
           EXEC() { local L="$1"; shift; echo "▶ [${L}] $*"; "$@" || { echo "❌ [${L}] FAILED!"; exit 1; }; }
-          # ❗ 수정: 파이프(|)가 포함된 명령어는 sh -c로 감싸야 합니다.
           EXEC "docker.login" sh -c "echo '${{ secrets.GITHUB_TOKEN }}' | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
           echo "✅ [completed] Login to GHCR"
 
@@ -100,11 +98,23 @@ jobs:
         run: |
           set -e
           EXEC() { local L="$1"; shift; echo "▶ [${L}] $*"; "$@" || { echo "❌ [${L}] FAILED!"; exit 1; }; }
+          
+          # ❗ 수정: 여러 줄의 태그를 각각의 --tag 인수로 변환하는 로직
+          TAGS="${{ steps.meta.outputs.tags }}"
+          DOCKER_TAG_ARGS=""
+          for T in $TAGS; do
+            DOCKER_TAG_ARGS="$DOCKER_TAG_ARGS --tag $T"
+          done
+          
+          echo "Applying tags: $DOCKER_TAG_ARGS"
+          
+          # 변환된 태그 인수를 명령어에 적용
           EXEC "docker.buildx.build" docker buildx build \
             --platform linux/amd64 \
-            --tag "${{ steps.meta.outputs.tags }}" \
+            $DOCKER_TAG_ARGS \
             --label "${{ steps.meta.outputs.labels }}" \
             --push .
+            
           echo "✅ [completed] Image push command executed."
 
   ########################################################
@@ -136,6 +146,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.image_tag }}" ]]; then
             TAG_VALUE="${{ inputs.image_tag }}"
           else
+            # build-and-push 잡에서 사용한 짧은 SHA와 동일한 포맷으로 수정
             TAG_VALUE="sha-${GITHUB_SHA::7}"
           fi
           echo "▶ [tag.result] Target image tag: ${TAG_VALUE}"
@@ -150,6 +161,5 @@ jobs:
         run: |
           echo "▶ [ssh.deploy] Attempting to deploy image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
           echo "⚠️ This step will succeed even if the SSH connection fails."
-          # SSH 명령은 키가 없을 경우 실패하므로, || true 처리
           (ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${SERVER_USER}@${SERVER_HOST}" "echo 'Remote deployment script would run here'") || true
           echo "✅ [completed] Deployment attempt finished."
