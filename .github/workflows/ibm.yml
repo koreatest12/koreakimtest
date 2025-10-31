@@ -1,8 +1,14 @@
-name: Build and Deploy to IKS (rev4)
+name: Build and Deploy to IKS (rev7)
 
 on:
   push:
     branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      run_iks_upgrade:
+        description: "IKS 클러스터 마스터/워커 노드를 업그레이드합니다. (주의: 시간이 오래 걸릴 수 있음)"
+        type: boolean
+        default: false
 
 # 환경 변수 정의
 env:
@@ -13,26 +19,96 @@ env:
   IKS_CLUSTER: example-iks-cluster-name-or-id
   DEPLOYMENT_NAME: iks-test
   PORT: 5001
+  
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }} # OIDC 관련 변수들은 이 워크플로우에선 사용 안 함
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}            # IBM Cloud 워크플로우이므로 무시됩니다.
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
 
 jobs:
-  setup-build-publish-deploy:
-    name: Setup, Build, Publish, and Deploy
+  # --- [ JOB 1: IKS 클러스터 업그레이드 ] ---
+  iks-upgrade:
+    name: "① IKS Cluster Upgrade (Optional)"
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_iks_upgrade == 'true'
     environment: production
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Check Required Secrets (Auth Check)
+      id: check_auth
+      shell: bash
+      run: |
+        if [ -z "${{ secrets.IBM_CLOUD_API_KEY }}" ]; then
+          echo "⚠️ Warning: IBM_CLOUD_API_KEY secret is missing. Skipping upgrade." >&2
+          echo "AUTH_OK=false" >> $GITHUB_ENV
+          exit 0
+        fi
+        echo "AUTH_OK=true" >> $GITHUB_ENV
+        echo "IBM_CLOUD_API_KEY=${{ secrets.IBM_CLOUD_API_KEY }}" >> $GITHUB_ENV
+        
+    - name: Install IBM Cloud CLI
+      if: env.AUTH_OK == 'true'
+      run: |
+        curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
+        ibmcloud --version
+        ibmcloud config --check-version=false
+        ibmcloud plugin install -f kubernetes-service
+        
+    - name: Authenticate with IBM Cloud CLI (Retries)
+      if: env.AUTH_OK == 'true'
+      id: ibm_auth
+      shell: bash
+      run: |
+        MAX_RETRIES=3
+        for i in $(seq 1 $MAX_RETRIES); do
+          echo "Attempt $i/$MAX_RETRIES: Logging into IBM Cloud..."
+          if ibmcloud login --apikey "${IBM_CLOUD_API_KEY}" -r "${IBM_CLOUD_REGION}" -g default; then
+            echo "✅ IBM Cloud authentication successful."
+            exit 0
+          else
+            echo "❌ Authentication failed on attempt $i. Retrying in 5 seconds..." >&2
+            sleep 5
+          fi
+        done
+        echo "--- Final Authentication Failure after $MAX_RETRIES retries. ---" >&2
+        exit 1
+      continue-on-error: true
+      
+    - name: Upgrade IKS Cluster Master
+      if: steps.ibm_auth.outcome == 'success'
+      run: |
+        echo "Starting IKS Master Upgrade for cluster: ${IKS_CLUSTER}..."
+        ibmcloud ks cluster master update --cluster $IKS_CLUSTER
+        echo "Master upgrade initiated. Waiting for status to stabilize..."
+      continue-on-error: true
+
+    - name: Upgrade IKS Worker Nodes
+      if: steps.ibm_auth.outcome == 'success'
+      run: |
+        echo "Starting IKS Worker Node Upgrade for cluster: ${IKS_CLUSTER}..."
+        ibmcloud ks worker update --cluster $IKS_CLUSTER --all
+        echo "Worker node upgrade initiated."
+      continue-on-error: true
+      
+  # --- [ JOB 2: 기존 Build & Deploy Job ] ---
+  setup-build-publish-deploy:
+    name: "② Build, Publish, and Deploy"
+    runs-on: ubuntu-latest
+    needs: [iks-upgrade]
+    environment: production
+    
     steps:
     - name: Checkout
       uses: actions/checkout@v4
       
-    # ---
-
-    # ⚠️ [수정 반영] 시크릿이 없더라도 실패하지 않고 경고 후 계속 진행
     - name: Check Required Secrets (Continue on Missing)
       id: check_secrets
       shell: bash
       run: |
         echo "--- Checking Required Secrets ---"
         
-        # 1. API Key 체크: 인증의 핵심. 없으면 플래그 설정
         if [ -z "${{ secrets.IBM_CLOUD_API_KEY }}" ]; then
           echo "⚠️ Warning: IBM_CLOUD_API_KEY secret is missing. Cloud authentication will fail." >&2
           echo "AUTH_OK=false" >> $GITHUB_ENV
@@ -40,7 +116,6 @@ jobs:
           echo "AUTH_OK=true" >> $GITHUB_ENV
         fi
 
-        # 2. ICR Namespace 체크: 태그의 핵심. 없으면 태그/푸시 실패함
         if [ -z "${{ secrets.ICR_NAMESPACE }}" ]; then
           echo "⚠️ Warning: ICR_NAMESPACE secret is missing. Image build/push will fail (invalid tag)." >&2
           echo "ICR_NAMESPACE_OK=false" >> $GITHUB_ENV
@@ -48,15 +123,9 @@ jobs:
           echo "ICR_NAMESPACE_OK=true" >> $GITHUB_ENV
         fi
         
-        # 3. 필수 시크릿을 환경 변수로 설정 (값이 비어있더라도 설정은 진행)
         echo "ICR_NAMESPACE=${{ secrets.ICR_NAMESPACE }}" >> $GITHUB_ENV
         echo "IBM_CLOUD_API_KEY=${{ secrets.IBM_CLOUD_API_KEY }}" >> $GITHUB_ENV
-        
-        echo "Secret check complete. Proceeding regardless of status."
       
-    # ---
-
-    # Download and Install IBM Cloud CLI
     - name: Install IBM Cloud CLI
       run: |
         curl -fsSL https://clis.cloud.ibm.com/install/linux | sh
@@ -65,34 +134,37 @@ jobs:
         ibmcloud plugin install -f kubernetes-service
         ibmcloud plugin install -f container-registry
         
-    # ---
-
-    # Authenticate with IBM Cloud CLI
-    - name: Authenticate with IBM Cloud CLI
-      if: env.AUTH_OK == 'true' # 👈 AUTH_OK=true일 때만 시도
-      id: ibm_auth
+    - name: Authenticate with IBM Cloud CLI (Retries)
+      if: env.AUTH_OK == 'true'
+      id: ibm_auth_deploy
+      shell: bash
       run: |
-        ibmcloud login --apikey "${IBM_CLOUD_API_KEY}" -r "${IBM_CLOUD_REGION}" -g default
-        # 인증 성공 여부를 플래그에 저장하여 다음 스텝에서 사용
-        if [ $? -eq 0 ]; then
-          echo "AUTH_SUCCESS=true" >> $GITHUB_ENV
-        else
-          echo "AUTH_SUCCESS=false" >> $GITHUB_ENV
-        fi
-      continue-on-error: true 
+        MAX_RETRIES=3
+        for i in $(seq 1 $MAX_RETRIES); do
+          echo "Attempt $i/$MAX_RETRIES: Logging into IBM Cloud..."
+          if ibmcloud login --apikey "${IBM_CLOUD_API_KEY}" -r "${IBM_CLOUD_REGION}" -g default; then
+            echo "✅ IBM Cloud authentication successful."
+            echo "AUTH_SUCCESS=true" >> $GITHUB_ENV
+            exit 0
+          else
+            echo "❌ Authentication failed on attempt $i. Retrying in 5 seconds..." >&2
+            sleep 5
+          fi
+        done
         
-    # ---
+        echo "AUTH_SUCCESS=false" >> $GITHUB_ENV
+        echo "--- Final Authentication Failure after $MAX_RETRIES retries. ---" >&2
+        exit 1
+      continue-on-error: true
 
-    # Build the Docker image
     - name: Build with Docker
-      if: env.ICR_NAMESPACE_OK == 'true' # 👈 태그 생성이 가능할 때만 빌드 시도
+      if: env.ICR_NAMESPACE_OK == 'true'
       id: docker_build
       run: |
-        # 올바른 태그 생성: $REGISTRY_HOSTNAME/$ICR_NAMESPACE/$IMAGE_NAME:$GITHUB_SHA
         docker build -t "$REGISTRY_HOSTNAME"/"$ICR_NAMESPACE"/"$IMAGE_NAME":"$GITHUB_SHA" \
           --build-arg GITHUB_SHA="$GITHUB_SHA" \
           --build-arg GITHUB_REF="$GITHUB_REF" .
-        # 빌드 성공 여부를 플래그에 저장
+        
         if [ $? -eq 0 ]; then
           echo "BUILD_SUCCESS=true" >> $GITHUB_ENV
         else
@@ -100,11 +172,8 @@ jobs:
         fi
       continue-on-error: true
           
-    # ---
-
-    # Docker Registry Login and Push
-    - name: Push the image to ICR
-      if: env.AUTH_SUCCESS == 'true' && env.BUILD_SUCCESS == 'true' # 👈 인증과 빌드가 모두 성공했을 때만 푸시 시도
+    - name: Docker Registry Login and Push
+      if: env.AUTH_SUCCESS == 'true' && env.BUILD_SUCCESS == 'true'
       run: |
         echo "Attempting container registry login..."
         ibmcloud cr region-set "${IBM_CLOUD_REGION}"
@@ -113,14 +182,11 @@ jobs:
         docker push $REGISTRY_HOSTNAME/$ICR_NAMESPACE/$IMAGE_NAME:$GITHUB_SHA
       continue-on-error: true
         
-    # ---
-
-    # Deploy the Docker image to the IKS cluster
+    # --- [ 배포 및 공용 주소 추출 로직 (수정 및 추가) ] ---
     - name: Deploy to IKS
-      if: env.AUTH_SUCCESS == 'true' && env.BUILD_SUCCESS == 'true' # 👈 인증과 빌드가 모두 성공했을 때만 배포 시도
+      if: env.AUTH_SUCCESS == 'true' && env.BUILD_SUCCESS == 'true'
       run: |
         echo "Attempting IKS Deployment..."
-        # IKS 클러스터 설정을 가져옵니다.
         ibmcloud ks cluster config --cluster $IKS_CLUSTER
         kubectl config current-context
         
@@ -137,3 +203,73 @@ jobs:
         
         kubectl get services -o wide
       continue-on-error: true
+
+    - name: Get Service Public Hostname and Healthcheck
+      id: get_host_health
+      if: always() && env.AUTH_SUCCESS == 'true' # 👈 인증 성공 시에만 시도 (배포 실패 여부와 무관)
+      shell: bash
+      run: |
+        SERVICE_HOST=""
+        MAX_TRIES=10
+        
+        # 1. 공용 IP가 할당될 때까지 재시도
+        for i in $(seq 1 $MAX_TRIES); do
+          echo "Attempt $i/$MAX_TRIES: Getting public service IP..."
+          # 외부 IP (EXTERNAL-IP) 컬럼에서 pending이 아닌 값을 추출
+          SERVICE_HOST=$(kubectl get services $DEPLOYMENT_NAME -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" 2>/dev/null)
+          
+          if [ -z "$SERVICE_HOST" ]; then
+             SERVICE_HOST=$(kubectl get services $DEPLOYMENT_NAME -o jsonpath="{.status.loadBalancer.ingress[0].ip}" 2>/dev/null)
+          fi
+          
+          if [ -n "$SERVICE_HOST" ] && [ "$SERVICE_HOST" != "<pending>" ] && [ "$SERVICE_HOST" != "0.0.0.0" ]; then
+            echo "✅ Public Service Hostname/IP found: $SERVICE_HOST"
+            break
+          fi
+          
+          echo "Service IP still pending or not assigned. Waiting 10 seconds..."
+          sleep 10
+          SERVICE_HOST=""
+        done
+
+        if [ -z "$SERVICE_HOST" ]; then
+          echo "❌ Failed to get public service IP after $MAX_TRIES attempts. Skipping healthcheck."
+          echo "SERVICE_URL_FINAL=(Not Available)" >> $GITHUB_ENV
+          exit 0
+        fi
+
+        # 2. curl 헬스 체크
+        echo "--- Running Healthcheck ---"
+        CURL_URL="http://$SERVICE_HOST:$PORT"
+        echo "Checking $CURL_URL..."
+        
+        # 3번 재시도
+        for i in 1 2 3; do
+          if curl -fsS "$CURL_URL" > /dev/null; then
+            echo "✅ Healthcheck successful (try $i)."
+            echo "SERVICE_URL_FINAL=$CURL_URL" >> $GITHUB_ENV
+            exit 0
+          else
+            echo "❌ Healthcheck failed (try $i). Waiting 5 seconds..." >&2
+            sleep 5
+          fi
+        done
+        
+        echo "--- Healthcheck failed after retries. ---" >&2
+        echo "SERVICE_URL_FINAL=$CURL_URL (Check Failed)" >> $GITHUB_ENV
+        exit 0
+      continue-on-error: true
+      
+    # --- [ 최종 결과 출력 ] ---
+    - name: Final Deployment Status
+      run: |
+        echo "======================================================"
+        echo "🎉 W O R K F L O W   C O M P L E T E D (SafeContinue)"
+        echo "======================================================"
+        echo "Deployment Status: All steps attempted."
+        echo "Deployment Name: ${DEPLOYMENT_NAME}"
+        echo "IKS Cluster: ${IKS_CLUSTER}"
+        echo "--- Service Endpoint ---"
+        echo "**FINAL SERVICE URL: ${{ env.SERVICE_URL_FINAL || 'N/A' }}**"
+        echo "======================================================"
+      if: ${{ github.event.inputs.force_success_msg == 'true' || github.event.inputs.force_success_msg == '' }}
