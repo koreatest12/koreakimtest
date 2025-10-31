@@ -1,8 +1,4 @@
-name: 
-  "
-  
-  
-  Docker Build & Deploy"
+name: "Docker Build & Deploy (Revised)"
 
 on:
   push:
@@ -17,13 +13,14 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Tag for the image (default: sha)"
+        description: "Tag for the image (overrides default)"
         required: false
         default: ""
       deploy:
         description: "Run deploy step via SSH (true/false)"
         required: false
-        default: "false"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,106 +33,131 @@ env:
 
 jobs:
   build-and-push:
-    name: Build and push image
-    runs-on: ubuntu-24.04
+    name: Build and Push Image
+    runs-on: ubuntu-22.04 # LTS version for stability
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU
+      - name: Set up QEMU for multi-platform builds
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      - name: Extract metadata for Docker (tags and labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha
+            type=sha,prefix=
             type=ref,event=branch
             type=ref,event=tag
             type=semver,pattern={{version}}
-            type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
+            type=raw,value=${{ github.event.inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag != '' }}
 
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
-          push: true
           platforms: linux/amd64
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Print image digest
+        run: echo "Image pushed successfully with digest:${{ steps.build.outputs.digest }}"
 
   deploy:
-    name: Deploy to server via SSH
+    name: Deploy to Server via SSH
     needs: build-and-push
+    # Corrected condition: run on push to main OR on manual dispatch when 'deploy' is true
     if: |
-      github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.deploy == 'true'
-    runs-on: ubuntu-24.04
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}
-      CONTAINER_NAME: app
-      CONTAINER_PORT: 3000
-      HOST_PORT: 3000
-    steps:
-      - name: Install SSH client
-        run: sudo apt-get update -y && sudo apt-get install -y openssh-client
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == true)
+    runs-on: ubuntu-22.04
 
-      - name: Add SSH key
+    steps:
+      - name: Add SSH key to ssh-agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Known hosts
+      - name: Add server to known_hosts
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Compute image tag
-        id: img
-        shell: bash
+      - name: Determine image tag for deployment
+        id: image_tag
         run: |
-          set -Eeuo pipefail
-          if [[ -n "${{ inputs.image_tag }}" ]]; then
-            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.image_tag }}" ]]; then
+            TAG_VALUE="${{ github.event.inputs.image_tag }}"
           else
-            echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            TAG_VALUE="sha-${GITHUB_SHA::7}"
           fi
+          echo "Using image tag: ${TAG_VALUE}"
+          echo "tag=${TAG_VALUE}" >> "$GITHUB_OUTPUT"
 
-      - name: Pull and restart container
+      - name: Deploy to remote server
         env:
+          # Server details
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
+          
+          # GHCR credentials (passed safely)
+          GH_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+          # Docker image and container details
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
-          TAG: ${{ steps.img.outputs.tag }}
-          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
-          HOST_PORT: ${{ env.HOST_PORT }}
-          CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
+          IMAGE_TAG: ${{ steps.image_tag.outputs.tag }}
+          CONTAINER_NAME: app
+          HOST_PORT: 3000
+          CONTAINER_PORT: 3000
         run: |
-          set -Eeuo pipefail
-          REMOTE_IMAGE="${REGISTRY}/${IMAGE_NAME}:${TAG}"
-          ssh -o StrictHostKeyChecking=yes "${SERVER_USER}@${SERVER_HOST}" bash -lc "
-            set -Eeuo pipefail
-            docker login ${REGISTRY} -u '${{ github.actor }}' -p '${{ secrets.GITHUB_TOKEN }}'
+          set -e # Exit script on first error
+
+          REMOTE_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+          echo "🚀 Starting deployment to ${SERVER_USER}@${SERVER_HOST}"
+          echo "Image to deploy: ${REMOTE_IMAGE}"
+
+          # The remote script is created here using a heredoc.
+          # 'set -e' ensures that if any command fails (like docker pull), the script will stop.
+          # This prevents a failed pull from taking down the currently running container.
+          ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_HOST}" "
+            set -e
+
+            echo '▶ [remote] Logging in to GHCR...'
+            echo '${GH_TOKEN}' | docker login ${REGISTRY} -u '${GH_ACTOR}' --password-stdin
+
+            echo '▶ [remote] Pulling latest image: ${REMOTE_IMAGE}'
             docker pull ${REMOTE_IMAGE}
-            docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
+
+            echo '▶ [remote] Stopping and removing existing container...'
+            # '|| true' allows the script to continue if the container doesn't exist yet.
+            docker rm -f ${CONTAINER_NAME} || true
+
+            echo '▶ [remote] Starting new container...'
             docker run -d --name ${CONTAINER_NAME} \
               -p ${HOST_PORT}:${CONTAINER_PORT} \
               --restart unless-stopped \
               ${REMOTE_IMAGE}
+
+            echo '✅ [remote] Deployment successful!'
           "
