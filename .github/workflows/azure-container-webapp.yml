@@ -1,4 +1,4 @@
-name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev7)"
+name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev9)"
 
 on:
   push:
@@ -29,7 +29,7 @@ permissions:
   security-events: write
 
 env:
-  TZ: Asia/Seoul
+  TZ: Asia: Seoul
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
   
@@ -100,13 +100,9 @@ jobs:
         with:
           images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # 1. Git SHA 태그 (기본 배포용)
             type=sha
-            # 2. Run ID 태그 (추적용)
             type=raw,value=${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
-            # 3. 'latest' 태그 (main 브랜치일 때만)
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            # 4. 수동 입력 태그 (값이 있을 때만)
             type=raw,value=${{ github.event.inputs.extra_tag }},enable=${{ github.event.inputs.extra_tag != '' }}
 
       - name: Build and push Docker image
@@ -118,19 +114,18 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # ⬇️ 'progress: plain' 제거됨 (v5에서 유효하지 않은 옵션)
 
       - name: Security scan placeholder
         shell: bash
         run: |
-          set +e # 👈 'SafeContinue'를 위해 set +e 사용
+          set +e
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" # 👈 디렉토리 생성 보장
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
           
           log_ok "Security scan placeholder for image..."
           log_ok "Tags pushed: ${{ steps.meta.outputs.tags }}"
           echo "Tags: ${{ steps.meta.outputs.tags }}" > "${LOG_DIR}/security_scan.log"
-          exit 0 # 👈 'SafeContinue'를 위해 exit 0 사용
+          exit 0
 
       - name: Upload build logs
         uses: actions/upload-artifact@v4
@@ -165,54 +160,37 @@ jobs:
         run: |
           set -Eeuo pipefail
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" # 👈 디렉토리 생성 보장
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
           
           # build 잡의 output을 env var로 등록
           echo "IMAGE_TO_DEPLOY=${{ needs.build-and-push.outputs.image_sha_tag }}" >> $GITHUB_ENV
           
           log_ok "Will deploy image: ${{ needs.build-and-push.outputs.image_sha_tag }}"
-          log_ok "Target WebApp: ${{ env.AZURE_WEBAPP_NAME }}"
+          log_ok "Target WebApp: ${{ env.AZURE_WEBAPP_NAME }}" # 👈 'Target WebApp' 로그 복원
 
       #################################################################
-      # Gate: Publish Profile 있는지 체크해서 배포 여부 결정
+      # Gate: 'rev9'에서 의도적으로 제거됨 (스킵 없는 실행을 위해)
       #################################################################
-      - name: Check publish profile availability
-        id: gate
-        env:
-          AZURE_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" # 👈 디렉토리 생성 보장
-          
-          if [ -z "${AZURE_PUBLISH_PROFILE}" ]; then
-            log_warn "No AZURE_WEBAPP_PUBLISH_PROFILE secret found. Deployment will be SKIPPED."
-            echo "DEPLOY_ENABLED=false" >> $GITHUB_ENV
-          else
-            log_ok "AZURE_WEBAPP_PUBLISH_PROFILE detected. Deployment will PROCEED."
-            echo "DEPLOY_ENABLED=true" >> $GITHUB_ENV
-          fi
-
+      
       #################################################################
       # 실제 컨테이너 이미지 배포 (azure/webapps-deploy@v3 사용)
       #################################################################
       - name: Deploy to Azure Web App (publish-profile mode)
-        if: env.DEPLOY_ENABLED == 'true'
+        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'에서 제거됨
         id: deploy-webapp
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          images: '${{ env.IMAGE_TO_DEPLOY }}' # build 잡에서 전달받은 이미지 태그 사용
+          images: '${{ env.IMAGE_TO_DEPLOY }}'
 
       - name: Record deploy output
-        if: env.DEPLOY_ENABLED == 'true'
+        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'에서 제거됨
         shell: bash
         run: |
-          set +e # 👈 'SafeContinue'
+          set +e
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" # 👈 디렉토리 생성 보장
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
           DEPLOY_URL="${{ steps.deploy-webapp.outputs.webapp-url }}"
           if [ -z "$DEPLOY_URL" ]; then
@@ -221,15 +199,16 @@ jobs:
             log_ok "Azure webapp-url -> $DEPLOY_URL"
           fi
           echo "$DEPLOY_URL" > "${LOG_DIR}/deploy_url.txt"
-          exit 0 # 👈 'SafeContinue'
+          exit 0
 
       - name: Healthcheck (optional)
-        if: env.DEPLOY_ENABLED == 'true' && (github.event.inputs.run_healthcheck == 'true' || github.event.inputs.run_healthcheck == '')
+        # ⬇️ 'DEPLOY_ENABLED' 조건 제거됨
+        if: github.event.inputs.run_healthcheck == 'true' || github.event.inputs.run_healthcheck == ''
         shell: bash
         run: |
-          set +e # 👈 'SafeContinue'
+          set +e
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" # 👈 디렉토리 생성 보장
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
           
           TARGET_URL="$(cat ${LOG_DIR}/deploy_url.txt 2>/dev/null || true)"
           if [ -z "$TARGET_URL" ]; then
@@ -251,22 +230,21 @@ jobs:
               log_err "Healthcheck failed after retries — continue anyway"
             fi
           fi
-          exit 0 # 👈 'SafeContinue'
+          exit 0
 
       - name: Azure runtime info placeholder
-        if: env.DEPLOY_ENABLED == 'true'
+        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'에서 제거됨
         shell: bash
         run: |
-          set +e # 👈 'SafeContinue'
+          set +e
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" # 👈 'safe_run'도 쓰지만 명시적으로 추가
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
           
-          # 'safe_run'은 내부적으로 실패를 로깅하고 0을 반환
           safe_run "azure.runtime.info" \
             echo "Runtime inspect placeholder for ${AZURE_WEBAPP_NAME}" \
             | tee "${LOG_DIR}/azure_runtime.log"
             
-          exit 0 # 👈 'SafeContinue'
+          exit 0
 
       - name: Upload deploy logs
         uses: actions/upload-artifact@v4
@@ -282,19 +260,17 @@ jobs:
         if: ${{ github.event.inputs.force_success_msg == 'true' || github.event.inputs.force_success_msg == '' }}
         shell: bash
         run: |
-          set +e # 👈 'SafeContinue'
+          set +e
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" # 👈 디렉토리 생성 보장
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
           
-          if [ "${DEPLOY_ENABLED}" = "true" ]; then
-            STATUS_MSG="Deployment attempted (publish-profile mode)."
-          else
-            STATUS_MSG="Deployment SKIPPED (no publish profile secret)."
-          fi
+          # ⬇️ 'DEPLOY_ENABLED' 분기 제거됨. 이제 항상 '시도' 상태.
+          STATUS_MSG="Deployment attempted (publish-profile mode)."
+
           log_ok "🎉 SAFE-CONTINUE COMPLETE"
           log_ok "Status: ${STATUS_MSG}"
-          log_ok "App: ${AZURE_WEBAPP_NAME}"
+          log_ok "App: ${AZURE_WEBAPP_NAME:- (Not Set) }"
           log_ok "Image: ${{ env.IMAGE_TO_DEPLOY }}"
           log_ok "Env tag: ${{ github.event.inputs.deploy_env || 'dev' }}"
           log_ok "Some steps may have failed, but pipeline reached the final checkpoint by design."
-          exit 0 # 👈 'SafeContinue'
+          exit 0
