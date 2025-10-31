@@ -32,7 +32,7 @@ on:
 
 permissions:
   contents: write      # GitHub Release 작성/업로드
-  packages: write      # 추후 npm pack / GHCR 등 패키지 push 대비
+  packages: write      # npm pack, GHCR 등 패키지 push 대비
   id-token: write      # OIDC 등 확장 대비
 
 env:
@@ -51,8 +51,7 @@ env:
 
 jobs:
   ###########################################################################
-  # 1) MCP MEGA (Claude Code + Postgres COPY + Report)
-  #    - safe-continue / 로그 / 결과 산출 / 리포트 생성
+  # 1) MCP MEGA
   ###########################################################################
   mcp-mega:
     runs-on: ubuntu-24.04
@@ -77,12 +76,15 @@ jobs:
         continue-on-error: true
         run: |
           set -Eeuo pipefail
+
+          # 디렉토리 전역 보장
           mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR" \
                    "$MCP_DIR/migrations/00_common" \
                    "$MCP_DIR/migrations/10_post_bulk/common" \
                    "$MCP_DIR/migrations/10_post_bulk/pg" \
                    "$ARTIFACT_DIR/release_bundle"
           touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
+
           : > "${ARTIFACT_DIR}/transactions_bulk.csv" || true
           : > "${ARTIFACT_DIR}/benchmark_sqlite.json" || true
           : > "${ARTIFACT_DIR}/benchmark_pg.json" || true
@@ -120,6 +122,7 @@ jobs:
         continue-on-error: true
         run: |
           set -Eeuo pipefail
+
           mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR" \
                    "$MCP_DIR/migrations/00_common" \
                    "$MCP_DIR/migrations/10_post_bulk/common" \
@@ -132,7 +135,7 @@ jobs:
           OK(){  echo "✅ [$(TS)] $*"; }
           WARN(){ echo "⚠️  [$(TS)] $*" >&2; }
           FAIL(){ echo "❌ [$(TS)] $*" >&2; }
-          mklogs(){ mkdir -p "$LOG_DIR" "$ARTIFACT_DIR"; }
+          mklogs(){ mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR"; }
           safe(){
             local name="$1"; shift
             mklogs
@@ -201,6 +204,8 @@ jobs:
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR"
+
           safe "docker.pull.pg" docker pull "${PG_IMAGE}"
           docker rm -f "${PG_CONTAINER}" >/dev/null 2>&1 || true
           runlog "docker.run.pg" docker run -d --name "${PG_CONTAINER}" \
@@ -230,6 +235,8 @@ jobs:
           CSV_ROWS_EFF: ${{ inputs.csv_rows != '' && inputs.csv_rows || env.CSV_ROWS_INPUT || '20000' }}
         run: |
           source /tmp/echo_helpers.sh
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR"
+
           CSV="$ARTIFACT_DIR/transactions_bulk.csv"
           echo "id,customer_id,bank_id,account_id,merchant_id,ts,memo,amount" > "$CSV"
           rows=${CSV_ROWS_EFF:-20000}
@@ -249,13 +256,17 @@ jobs:
           head -n 5 "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
           tail -n 5 "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
 
-      - name: Generate migrations (도메인/권한/파티션/잡)
+      - name: Generate migrations (스키마/권한/파티션 등)
         shell: bash
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR" \
+                   "$MCP_DIR/migrations/00_common" \
+                   "$MCP_DIR/migrations/10_post_bulk/common" \
+                   "$MCP_DIR/migrations/10_post_bulk/pg"
 
-          # 00_common schema
+          # 공통 스키마
           cat > "$MCP_DIR/migrations/00_common/001_core.sql" <<'SQL'
           CREATE TABLE IF NOT EXISTS customers(
             id INTEGER PRIMARY KEY,
@@ -296,7 +307,7 @@ jobs:
           );
           SQL
 
-          # post bulk common indexes
+          # 공통 인덱스/최적화
           cat > "$MCP_DIR/migrations/10_post_bulk/common/030_indexes.sql" <<'SQL'
           CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions(customer_id);
           CREATE INDEX IF NOT EXISTS idx_tx_account  ON transactions(account_id);
@@ -305,7 +316,7 @@ jobs:
           CREATE INDEX IF NOT EXISTS idx_tx_ts       ON transactions(ts);
           SQL
 
-          # pg-specific: 권한/롤/파티션/머티리얼뷰/스케줄러 알림
+          # PG 전용 권한/롤
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/020_roles_privs.sql" <<'SQL'
           DO $$
           BEGIN
@@ -323,6 +334,7 @@ jobs:
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO finance_admin;
           SQL
 
+          # PG 시퀀스
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/025_sequences.sql" <<'SQL'
           DO $$
           BEGIN
@@ -333,6 +345,7 @@ jobs:
           END $$;
           SQL
 
+          # PG 파티셔닝
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/040_partitioning.sql" <<'SQL'
           DO $$
           BEGIN
@@ -366,6 +379,7 @@ jobs:
           END$$;
           SQL
 
+          # PG 트리거 라우터
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/050_trigger_route.sql" <<'SQL'
           CREATE OR REPLACE FUNCTION trg_route_transactions() RETURNS trigger AS $$
           BEGIN
@@ -389,6 +403,7 @@ jobs:
             FOR EACH ROW EXECUTE FUNCTION trg_route_transactions();
           SQL
 
+          # PG 뷰 / 머티리얼뷰 / cron
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/060_views.sql" <<'SQL'
           CREATE OR REPLACE VIEW v_tx_agg_by_customer AS
           SELECT customer_id, COUNT(*) AS cnt, SUM(amount) AS sum
@@ -442,13 +457,14 @@ jobs:
           END$$;
           SQL
 
-      - name: Generate MCP server/client/benchmark/report code (no placeholder, real JS stubs)
+      - name: Generate MCP server/client/benchmark/report code
         shell: bash
         continue-on-error: true
         env:
           BATCH_SIZE_ENV: ${{ inputs.batch_size != '' && inputs.batch_size || env.BATCH_SIZE_INPUT || '2000' }}
         run: |
           source /tmp/echo_helpers.sh
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR"
 
           # package.json
           cat > "$MCP_DIR/package.json" <<'JSON'
@@ -473,10 +489,8 @@ jobs:
           }
           JSON
 
-          # server.js (더미 MCP 서버: 실제 DB연결 없이 info만 출력)
+          # server.js
           cat > "$MCP_DIR/server.js" <<'JS'
-          // Minimal MCP server stub for CI.
-          // We don't actually start HTTP in CI, we just prove the file is valid JS.
           import fs from "fs";
           console.log("[MCP SERVER] boot start");
           const cfgPath = process.cwd() + "/mcp.config.json";
@@ -488,19 +502,14 @@ jobs:
           console.log("[MCP SERVER] ready (stub, no network listen)");
           JS
 
-          # test_client.js (sqlite / pg 모드에 따라 로그만 남기고 0으로 종료)
+          # test_client.js
           cat > "$MCP_DIR/test_client.js" <<'JS'
-          // test_client.js
-          // 목적:
-          //  - sqlite 또는 pg 인자를 받아서 "클라이언트 테스트 성공" 로그 찍고 정상 종료
-          //  - GitHub Actions에서 sqlite.client / pg.client 단계가 실패하지 않도록 보장
           import fs from "fs";
           import path from "path";
           const mode = process.argv[2] || "sqlite";
 
           console.log(`[test_client] mode=${mode}`);
 
-          // 러너 환경 변수들 일부 참고(없으면 빈값)
           const DB_PATH = process.env.DB_PATH || "(no DB_PATH)";
           const PG_DSN = process.env.PG_DSN || "(no PG_DSN)";
           const CSV_FILE = process.env.CSV_FILE || "(no CSV_FILE)";
@@ -512,7 +521,6 @@ jobs:
             DB_PATH, PG_DSN, CSV_FILE, MIG_ROOT, BATCH_SIZE, USE_COPY
           });
 
-          // 간단 검증: CSV 파일 있으면 몇 줄만 읽어서 로그로 남김
           try {
             if (CSV_FILE && fs.existsSync(CSV_FILE)) {
               const sample = fs.readFileSync(CSV_FILE, "utf8")
@@ -527,7 +535,6 @@ jobs:
             console.warn("[test_client] CSV preview failed:", e);
           }
 
-          // 마이그레이션 디렉토리 존재 여부만 체크 (실제 적용 X)
           try {
             if (MIG_ROOT && fs.existsSync(MIG_ROOT)) {
               console.log("[test_client] migrations root exists:", MIG_ROOT);
@@ -541,20 +548,14 @@ jobs:
           }
 
           console.log(`[test_client] ${mode} client OK (stub).`);
-          // 정상종료
           process.exit(0);
           JS
 
-          # benchmark.js (stdout으로 JSON 출력 -> GHA에서 파일로 redirect)
+          # benchmark.js
           cat > "$MCP_DIR/benchmark.js" <<'JS'
-          // benchmark.js
-          // 목적:
-          //  - mode 인자(sqlite / pg)를 받아서 가짜 벤치마크 수치(JSON) stdout으로 출력
-          //  - GHA 단계에서 이 stdout을 benchmark_sqlite.json / benchmark_pg.json 로 저장
           const mode = process.argv[2] || "sqlite";
 
           function fakeMetric(base) {
-            // 단순 의사 랜덤 값
             return base + Math.floor(Math.random() * 50);
           }
 
@@ -574,21 +575,14 @@ jobs:
             notes: "Stub benchmark data for CI / artifact / report."
           };
 
-          // stdout으로 JSON
           process.stdout.write(JSON.stringify(result, null, 2));
           JS
 
-          # report.js (benchmark_*와 CSV/환경을 읽어 리포트 HTML/MD 생성)
+          # report.js
           cat > "$MCP_DIR/report.js" <<'JS'
-          // report.js
-          // 목적:
-          //  - benchmark_sqlite.json / benchmark_pg.json 읽어서
-          //    간단한 Markdown/HTML 리포트 생성
-          //  - 결과물을 ARTIFACT_DIR/report.md / report.html 에 저장
           import fs from "fs";
           import path from "path";
 
-          // env에서 ARTIFACT_DIR 받아오기 (없으면 상대경로 fallback)
           const ARTIFACT_DIR =
             process.env.ARTIFACT_DIR ||
             path.resolve(process.cwd(), "../..", ".github/echo_artifacts");
@@ -623,7 +617,6 @@ jobs:
             csvPreview = `CSV preview failed: ${e}`;
           }
 
-          // Markdown
           const md = [
             `# MCP MEGA++++ Report`,
             ``,
@@ -648,7 +641,6 @@ jobs:
             `This is an automated CI stub report.`
           ].join("\n");
 
-          // 아주 간단한 HTML 버전
           const html = `
           <!DOCTYPE html>
           <html lang="en">
@@ -676,14 +668,13 @@ jobs:
           </body>
           </html>`.trim() + "\n";
 
-          // 결과 저장
           fs.writeFileSync(path.join(ARTIFACT_DIR, "report.md"), md, "utf8");
           fs.writeFileSync(path.join(ARTIFACT_DIR, "report.html"), html, "utf8");
 
           console.log("[report.js] report.md / report.html generated OK");
           JS
 
-          # mcp.config.json (MCP 런처 메타 정보)
+          # mcp.config.json
           cat > "$MCP_DIR/mcp.config.json" <<JSON
           {
             "mcpServers": {
@@ -696,15 +687,19 @@ jobs:
           }
           JSON
 
-          # npm install (safe / no-audit / fallback ci)
-          pushd "$MCP_DIR" >/dev/null
-          if [ ! -f package-lock.json ]; then
-            runlog "npm.install" bash -lc 'npm install --no-audit --no-fund'
+          # npm install (폴더 존재 여부 체크 + safe)
+          if [ -d "$MCP_DIR" ]; then
+            pushd "$MCP_DIR" >/dev/null
+            if [ ! -f package-lock.json ]; then
+              runlog "npm.install" bash -lc 'npm install --no-audit --no-fund'
+            else
+              runlog "npm.install" bash -lc '(npm ci || npm install --no-audit --no-fund)'
+            fi
+            runlog "npm.check.deps" bash -lc 'npm run -s check:deps || true'
+            popd >/dev/null
           else
-            runlog "npm.install" bash -lc '(npm ci || npm install --no-audit --no-fund)'
+            WARN "MCP_DIR $MCP_DIR not found, skipping npm install"
           fi
-          runlog "npm.check.deps" bash -lc 'npm run -s check:deps || true'
-          popd >/dev/null
 
       - name: Ensure DB parent dir (SQLite persistence path)
         shell: bash
@@ -713,6 +708,8 @@ jobs:
           DB_PATH_FALLBACK: ".github/echo_artifacts/mcp_demo.sqlite"
         run: |
           source /tmp/echo_helpers.sh
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR"
+
           DB_PATH_EFF="${{ inputs.db_path != '' && inputs.db_path || env.DB_PATH_INPUT || env.DB_PATH_FALLBACK }}"
           mkdir -p "$(dirname "$DB_PATH_EFF")"
           OK "SQLite DB parent dir ensured: $DB_PATH_EFF"
@@ -729,19 +726,25 @@ jobs:
           USE_COPY: "false"
         run: |
           source /tmp/echo_helpers.sh
-          pushd "$MCP_DIR" >/dev/null
-          set +e
-          node test_client.js sqlite >"../.."/$LOG_DIR/sqlite_client.log 2>&1
-          ec=$?
-          if [ $ec -ne 0 ]; then
-            FAIL "sqlite.client: FAILED (exit=$ec)"
-            tail -n 200 "../.."/$LOG_DIR/sqlite_client.log || true
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR"
+
+          if [ -d "$MCP_DIR" ]; then
+            pushd "$MCP_DIR" >/dev/null
+            set +e
+            node test_client.js sqlite >"../.."/$LOG_DIR/sqlite_client.log 2>&1
+            ec=$?
+            if [ $ec -ne 0 ]; then
+              FAIL "sqlite.client: FAILED (exit=$ec)"
+              tail -n 200 "../.."/$LOG_DIR/sqlite_client.log || true
+            else
+              OK "sqlite.client: completed (exit=0)"
+            fi
+            node benchmark.js sqlite >"../.."/$ARTIFACT_DIR/benchmark_sqlite.json 2>>"../.."/$LOG_DIR/sqlite_client.log || true
+            set -e
+            popd >/dev/null
           else
-            OK "sqlite.client: completed (exit=0)"
+            WARN "MCP_DIR $MCP_DIR not found, skipping sqlite scenario"
           fi
-          node benchmark.js sqlite >"../.."/$ARTIFACT_DIR/benchmark_sqlite.json 2>>"../.."/$LOG_DIR/sqlite_client.log || true
-          set -e
-          popd >/dev/null
 
       - name: Run PostgreSQL scenario (stub client OK)
         shell: bash
@@ -754,24 +757,29 @@ jobs:
           USE_COPY: ${{ inputs.use_copy != '' && inputs.use_copy || env.USE_COPY_INPUT || true }}
         run: |
           source /tmp/echo_helpers.sh
-          pushd "$MCP_DIR" >/dev/null
-          set +e
-          node test_client.js pg >"../.."/$LOG_DIR/pg_client.log 2>&1
-          ec=$?
-          if [ $ec -ne 0 ]; then
-            FAIL "pg.client: FAILED (exit=$ec)"
-            tail -n 200 "../.."/$LOG_DIR/pg_client.log || true
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR"
+
+          if [ -d "$MCP_DIR" ]; then
+            pushd "$MCP_DIR" >/dev/null
+            set +e
+            node test_client.js pg >"../.."/$LOG_DIR/pg_client.log 2>&1
+            ec=$?
+            if [ $ec -ne 0 ]; then
+              FAIL "pg.client: FAILED (exit=$ec)"
+              tail -n 200 "../.."/$LOG_DIR/pg_client.log || true
+            else
+              OK "pg.client: completed (exit=0)"
+            fi
+
+            docker ps -a | tee "${LOG_DIR}/pg_tables.log" || true
+            echo "total_rows_stub=12345" | tee "${LOG_DIR}/pg_count.log" || true
+
+            node benchmark.js pg >"../.."/$ARTIFACT_DIR/benchmark_pg.json 2>>"../.."/$LOG_DIR/pg_client.log || true
+            set -e
+            popd >/dev/null
           else
-            OK "pg.client: completed (exit=0)"
+            WARN "MCP_DIR $MCP_DIR not found, skipping pg scenario"
           fi
-
-          # 상태 스냅샷 (DB 안 붙어도 OK)
-          docker ps -a | tee "${LOG_DIR}/pg_tables.log" || true
-          echo "total_rows_stub=12345" | tee "${LOG_DIR}/pg_count.log" || true
-
-          node benchmark.js pg >"../.."/$ARTIFACT_DIR/benchmark_pg.json 2>>"../.."/$LOG_DIR/pg_client.log || true
-          set -e
-          popd >/dev/null
 
       - name: Build HTML/Markdown report (stub generator)
         shell: bash
@@ -781,9 +789,15 @@ jobs:
           ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
         run: |
           source /tmp/echo_helpers.sh
-          pushd "$MCP_DIR" >/dev/null
-          runlog "report.build" bash -lc 'node report.js'
-          popd >/dev/null
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR"
+
+          if [ -d "$MCP_DIR" ]; then
+            pushd "$MCP_DIR" >/dev/null
+            runlog "report.build" bash -lc 'node report.js'
+            popd >/dev/null
+          else
+            WARN "MCP_DIR $MCP_DIR not found, skipping report build"
+          fi
 
           ls -lh "$ARTIFACT_DIR/report.html" "$ARTIFACT_DIR/report.md" \
             | tee -a "${LOG_DIR}/report_build.log" || true
@@ -804,6 +818,8 @@ jobs:
         continue-on-error: true
         run: |
           source /tmp/echo_helpers.sh
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR"
+
           {
             echo "=== RUN SUMMARY ($(date)) ==="
             echo "sqlite_db_effective=$(cat "$LOG_DIR/db_path_effective.txt" 2>/dev/null || echo '(n/a)')"
@@ -852,7 +868,7 @@ jobs:
           exit 0
 
   ###########################################################################
-  # 2) Banking Data Pipeline — 멀티DB 매트릭스 / safe-continue / 적재
+  # 2) Banking Data Pipeline
   ###########################################################################
   banking-data-pipeline:
     runs-on: ubuntu-latest
@@ -864,6 +880,7 @@ jobs:
       TZ: Asia/Seoul
       LOG_DIR: .github/echo_logs
       ARTIFACT_DIR: .github/echo_artifacts
+      MCP_DIR: .github/mcp_demo
 
     steps:
       - name: Checkout
@@ -877,7 +894,7 @@ jobs:
           DB_MATRIX: ${{ matrix.db }}
         run: |
           set -Eeuo pipefail
-          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" artifacts "artifacts/${DB_MATRIX}" "$ARTIFACT_DIR/release_bundle"
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR" artifacts "artifacts/${DB_MATRIX}" "$ARTIFACT_DIR/release_bundle"
           touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
           : > "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
           : > "$LOG_DIR/bank_ctx_${DB_MATRIX}.log" || true
@@ -892,6 +909,7 @@ jobs:
             echo "TZ=$TZ"
             echo "LOG_DIR=$LOG_DIR"
             echo "ARTIFACT_DIR=$ARTIFACT_DIR"
+            echo "MCP_DIR=$MCP_DIR"
             echo "--- INITIAL PATH ---"
             echo "$PATH"
           } | tee "${LOG_DIR}/00_preflight_banking_${DB_MATRIX}.txt"
@@ -1024,8 +1042,6 @@ jobs:
         continue-on-error: true
         run: |
           set -euxo pipefail
-          # 여기는 실제 파이프라인(ETL 등)을 실행하는 자리입니다.
-          # 없는 경우라도 더미 산출물을 생성해서 이후 릴리즈 번들이 비지 않도록 합니다.
           OUTDIR="artifacts/${DB_MATRIX}"
           mkdir -p "$OUTDIR"
           echo "DB=${DB_MATRIX}" > "$OUTDIR/summary.txt"
@@ -1043,7 +1059,6 @@ jobs:
             python --version || python3 --version || true
           } | tee -a "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
 
-          # 릴리즈 번들 후보 위치에도 복사
           REL_DIR="$ARTIFACT_DIR/release_bundle/${DB_MATRIX}"
           mkdir -p "$REL_DIR"
           cp -r "$OUTDIR" "$REL_DIR/" 2>/dev/null || true
@@ -1070,15 +1085,13 @@ jobs:
         run: |
           echo "✅ BANKING ($DB_MATRIX) DONE — All steps attempted."
           echo "Artifacts snapshot:"
-          ls -R "$LOG_DIR" || true
-          ls -R "artifacts/${DB_MATRIX}" || true
-          ls -R ".github/echo_artifacts/release_bundle/${DB_MATRIX}" || true
+          ls -R .github/echo_logs || true
+          ls -R artifacts/${DB_MATRIX} || true
+          ls -R .github/echo_artifacts/release_bundle/${DB_MATRIX} || true
           exit 0
 
   ###########################################################################
   # 3) release-and-publish
-  #    - mcp-mega / banking-data-pipeline 결과물로 릴리즈 번들 생성
-  #    - draft GitHub Release (실패해도 워크플로 성공처럼 마무리)
   ###########################################################################
   release-and-publish:
     runs-on: ubuntu-latest
@@ -1102,7 +1115,9 @@ jobs:
         continue-on-error: true
         run: |
           set -Eeuo pipefail
-          mkdir -p "$RELEASE_BUNDLE_DIR"
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR" "$RELEASE_BUNDLE_DIR"
+          touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
+
           TS_TAG="$(date +%Y%m%d-%H%M%S)"
           if [ -n "${REQ_TAG}" ]; then
             TAG="${REQ_TAG}"
@@ -1122,17 +1137,24 @@ jobs:
         continue-on-error: true
         run: |
           set -Eeuo pipefail
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" "$MCP_DIR" "$RELEASE_BUNDLE_DIR"
+
           TAG="$(cat "$RELEASE_BUNDLE_DIR/release_tag.txt" 2>/dev/null || echo latest)"
-          cd "$MCP_DIR"
 
-          # npm pack 시도 (의존성 설치는 앞 단계에서 이미 수행)
-          npm pack --no-audit --no-fund || true
+          if [ -d "$MCP_DIR" ]; then
+            if command -v node >/dev/null 2>&1; then
+              if command -v npm >/dev/null 2>&1; then
+                (
+                  cd "$MCP_DIR" || exit 0
+                  npm pack --no-audit --no-fund || true
+                  mkdir -p "../echo_artifacts/release_bundle/mcp"
+                  cp ./*.tgz "../echo_artifacts/release_bundle/mcp/" 2>/dev/null || true
+                )
+              fi
+            fi
+          fi
 
-          mkdir -p "../echo_artifacts/release_bundle/mcp"
-          cp *.tgz "../echo_artifacts/release_bundle/mcp/" 2>/dev/null || true
-          cd -
-
-          # SQLite DB, report, benchmark 등 MCP 관련 산출물 복사
+          mkdir -p "$RELEASE_BUNDLE_DIR/mcp"
           cp "$ARTIFACT_DIR"/mcp_demo.sqlite "$RELEASE_BUNDLE_DIR/mcp/mcp_demo-${TAG}.sqlite" 2>/dev/null || true
           cp "$ARTIFACT_DIR"/report.html "$RELEASE_BUNDLE_DIR/mcp/report-${TAG}.html" 2>/dev/null || true
           cp "$ARTIFACT_DIR"/report.md   "$RELEASE_BUNDLE_DIR/mcp/report-${TAG}.md"   2>/dev/null || true
@@ -1145,8 +1167,10 @@ jobs:
         continue-on-error: true
         run: |
           set -Eeuo pipefail
+          mkdir -p "$RELEASE_BUNDLE_DIR"
           TAG="$(cat "$RELEASE_BUNDLE_DIR/release_tag.txt" 2>/dev/null || echo latest)"
           MCP_TAR="$RELEASE_BUNDLE_DIR/mcp-mega-${TAG}.tar.gz"
+
           tar -czf "$MCP_TAR" \
             "$LOG_DIR"/*.log \
             "$LOG_DIR"/pg_* \
@@ -1159,6 +1183,7 @@ jobs:
             "$ARTIFACT_DIR"/transactions_bulk.csv \
             "$MCP_DIR" \
             2>/dev/null || true
+
           ls -lh "$RELEASE_BUNDLE_DIR" || true
 
       - name: Tarball Banking pipeline payloads (per-DB)
@@ -1166,10 +1191,11 @@ jobs:
         continue-on-error: true
         run: |
           set -Eeuo pipefail
+          mkdir -p "$RELEASE_BUNDLE_DIR"
           TAG="$(cat "$RELEASE_BUNDLE_DIR/release_tag.txt" 2>/dev/null || echo latest)"
           for DB_DIR in "$RELEASE_BUNDLE_DIR"/* ; do
             base="$(basename "$DB_DIR")"
-            # mcp 디렉토리나 release_tag.txt 등은 제외
+            # mcp 디렉토리 / release_tag.txt / mcp-mega-*.tar.gz 등은 스킵
             if [ "$base" = "mcp" ] || [ "$base" = "release_tag.txt" ] || [[ "$base" == mcp-mega-* ]]; then
               continue
             fi
@@ -1197,13 +1223,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
+          mkdir -p "$RELEASE_BUNDLE_DIR"
           TAG="$(cat "$RELEASE_BUNDLE_DIR/release_tag.txt" 2>/dev/null || echo latest)"
           echo "Using TAG=$TAG for draft release"
 
           cd "$RELEASE_BUNDLE_DIR"
           ls -1 > filelist.txt || true
 
-          # gh CLI 설치 시도 (없어도 safe-continue)
+          # gh cli 설치 (실패해도 계속)
           if ! command -v gh >/dev/null 2>&1; then
             echo "Installing gh cli..."
             type -p curl >/dev/null || sudo apt-get update
@@ -1220,7 +1247,7 @@ jobs:
           # gh auth
           gh auth status || (echo "$GITHUB_TOKEN" | gh auth login --with-token) || true
 
-          # draft 릴리즈 만들거나 업데이트
+          # draft 릴리즈 시도
           gh release create "$TAG" \
             --draft \
             --title "Automated Release $TAG" \
