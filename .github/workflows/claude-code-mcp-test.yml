@@ -44,13 +44,12 @@ env:
 
 jobs:
   ###########################################################################
-  # 1) MCP MEGA + Claude Code + PG COPY + 보고서 + 만전 대비 + PATH 스냅샷
+  # 1) MCP MEGA (Claude Code + Postgres COPY + Report) - 만전 대비 / PATH 스냅샷
   ###########################################################################
   mcp-mega:
     runs-on: ubuntu-24.04
     env:
-      # workflow_dispatch 에서만 inputs가 있지만
-      # push/pull_request 시에는 inputs.* 가 비어있음 → 안전한 기본값 직접 부여
+      # inputs.* 는 push/pull_request 에서는 비어 있음 → fallback 준비
       NODE_VERSION_FALLBACK: "20"
       PY_VERSION_FALLBACK: "3.12"
       NODE_VERSION_INPUT: ${{ inputs.node_version }}
@@ -64,7 +63,6 @@ jobs:
         uses: actions/checkout@v4
         continue-on-error: true
 
-      # PRE-FLIGHT HARDEN + 경로/환경 스냅샷 (만전 대비)
       - name: Prepare service state (pre-flight harden)
         shell: bash
         continue-on-error: true
@@ -75,10 +73,8 @@ jobs:
                    "$MCP_DIR/migrations/00_common" \
                    "$MCP_DIR/migrations/10_post_bulk/common" \
                    "$MCP_DIR/migrations/10_post_bulk/pg"
-
           touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
 
-          # placeholder 산출물 확보
           : > "${ARTIFACT_DIR}/transactions_bulk.csv" || true
           : > "${ARTIFACT_DIR}/benchmark_sqlite.json" || true
           : > "${ARTIFACT_DIR}/benchmark_pg.json" || true
@@ -87,24 +83,23 @@ jobs:
 
           {
             echo "=== PRE-FLIGHT SERVICE SNAPSHOT ==="
-            echo "workflow=${{ github.workflow }}"
+            echo "workflow=${GITHUB_WORKFLOW}"
             echo "job=mcp-mega"
-            echo "runner=$(uname -a)"
+            echo "runner_uname=$(uname -a)"
             echo "pwd_now=$(pwd)"
             echo "whoami_now=$(whoami)"
             echo "TZ=$TZ"
             echo "LOG_DIR=$LOG_DIR"
             echo "ARTIFACT_DIR=$ARTIFACT_DIR"
             echo "MCP_DIR=$MCP_DIR"
-
             echo "PG_IMAGE=${PG_IMAGE}"
             echo "PG_CONTAINER=${PG_CONTAINER}"
             echo "PG_DSN=${PG_DSN}"
 
             echo "RAW_NODE_VERSION_INPUT='${{ env.NODE_VERSION_INPUT }}'"
             echo "RAW_PY_VERSION_INPUT='${{ env.PY_VERSION_INPUT }}'"
-            echo "NODE_VERSION_EFFECTIVE='${{ env.NODE_VERSION_INPUT || env.NODE_VERSION_FALLBACK }}'"
-            echo "PY_VERSION_EFFECTIVE='${{ env.PY_VERSION_INPUT || env.PY_VERSION_FALLBACK }}'"
+            echo "NODE_VERSION_EFFECTIVE='${{ inputs.node_version != '' && inputs.node_version || env.NODE_VERSION_FALLBACK }}'"
+            echo "PY_VERSION_EFFECTIVE='${{ inputs.python_version != '' && inputs.python_version || env.PY_VERSION_FALLBACK }}'"
 
             echo "DB_PATH_INPUT='${{ env.DB_PATH_INPUT }}'"
             echo "CSV_ROWS_INPUT='${{ env.CSV_ROWS_INPUT }}'"
@@ -157,23 +152,18 @@ jobs:
           source /tmp/echo_helpers.sh
           OK "Directories + echo helpers ready"
 
-      # Node 버전은 inputs.node_version 있으면 그걸 쓰고, push/PR에서는 fallback
-      - name: Setup Node.js
+      - name: Setup Node.js (with fallback)
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version != '' && inputs.node_version || env.NODE_VERSION_FALLBACK }}
         continue-on-error: true
 
-      # Python도 동일하게 fallback. 이 단계가 실제 PATH에 python을 올림.
-      - name: Setup Python runtime
+      - name: Setup Python runtime (with fallback)
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version != '' && inputs.python_version || env.PY_VERSION_FALLBACK }}
-      # 위 경고(`python-version` 입력이 설정되지 않았습니다...) 방지:
-      # push/PR에서는 fallback 값으로 고정되고, dispatch 시에는 사용자가 준 값으로 고정됨.
         continue-on-error: true
 
-      # runtime PATH / 바이너리 버전 증적 (만전 대비)
       - name: Runtime PATH / versions snapshot
         shell: bash
         continue-on-error: true
@@ -183,7 +173,7 @@ jobs:
             echo "=== RUNTIME SNAPSHOT AFTER setup-node & setup-python ==="
             echo "--- PATH ---"
             echo "$PATH"
-            echo "--- which node/python ---"
+            echo "--- which node/npm/python/pip ---"
             which node || true
             which npm || true
             which python || true
@@ -195,10 +185,9 @@ jobs:
             npm --version || true
             python --version || python3 --version || true
             pip --version || pip3 --version || true
-            echo "--- env NODE_VERSION_EFFECTIVE ---"
-            echo "${{ inputs.node_version != '' && inputs.node_version || env.NODE_VERSION_FALLBACK }}"
-            echo "--- env PY_VERSION_EFFECTIVE ---"
-            echo "${{ inputs.python_version != '' && inputs.python_version || env.PY_VERSION_FALLBACK }}"
+            echo "--- effective versions ---"
+            echo "NODE_VERSION_EFFECTIVE=${{ inputs.node_version != '' && inputs.node_version || env.NODE_VERSION_FALLBACK }}"
+            echo "PY_VERSION_EFFECTIVE=${{ inputs.python_version != '' && inputs.python_version || env.PY_VERSION_FALLBACK }}"
           } | tee "${LOG_DIR}/01_runtime_snapshot.txt"
 
       - name: Start PostgreSQL container
@@ -236,13 +225,13 @@ jobs:
         shell: bash
         continue-on-error: true
         env:
-          CSV_ROWS: ${{ inputs.csv_rows != '' && inputs.csv_rows || env.CSV_ROWS_INPUT || '20000' }}
+          CSV_ROWS_EFF: ${{ inputs.csv_rows != '' && inputs.csv_rows || env.CSV_ROWS_INPUT || '20000' }}
         run: |
           source /tmp/echo_helpers.sh
           CSV="$ARTIFACT_DIR/transactions_bulk.csv"
           echo "id,customer_id,bank_id,account_id,merchant_id,ts,memo,amount" > "$CSV"
 
-          rows=${CSV_ROWS:-20000}
+          rows=${CSV_ROWS_EFF:-20000}
           for i in $(seq 1 $rows); do
             cust=$(( (i % 100) + 1 ))
             bank=$(( (i % 6) + 1 ))
@@ -267,7 +256,7 @@ jobs:
         run: |
           source /tmp/echo_helpers.sh
 
-          # 00_common
+          # 00_common schema
           cat > "$MCP_DIR/migrations/00_common/001_core.sql" <<'SQL'
           CREATE TABLE IF NOT EXISTS customers(
             id INTEGER PRIMARY KEY,
@@ -308,7 +297,7 @@ jobs:
           );
           SQL
 
-          # 10_post_bulk/common
+          # post bulk common indexes
           cat > "$MCP_DIR/migrations/10_post_bulk/common/030_indexes.sql" <<'SQL'
           CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions(customer_id);
           CREATE INDEX IF NOT EXISTS idx_tx_account  ON transactions(account_id);
@@ -317,7 +306,7 @@ jobs:
           CREATE INDEX IF NOT EXISTS idx_tx_ts       ON transactions(ts);
           SQL
 
-          # 10_post_bulk/pg
+          # pg-specific roles, partitions, matviews, cron
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/020_roles_privs.sql" <<'SQL'
           DO $$
           BEGIN
@@ -325,11 +314,14 @@ jobs:
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='finance_writer') THEN CREATE ROLE finance_writer; END IF;
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='finance_reader') THEN CREATE ROLE finance_reader; END IF;
           END$$;
+
           GRANT CONNECT ON DATABASE mcpdb TO finance_reader, finance_writer, finance_admin;
           GRANT USAGE ON SCHEMA public TO finance_reader, finance_writer, finance_admin;
+
           GRANT SELECT ON ALL TABLES IN SCHEMA public TO finance_reader;
           GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO finance_writer;
           GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO finance_admin;
+
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO finance_reader;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO finance_writer;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO finance_admin;
@@ -454,7 +446,7 @@ jobs:
           END$$;
           SQL
 
-      - name: Generate MCP server + client + benchmark + report
+      - name: Generate MCP server/client/benchmark/report code
         shell: bash
         continue-on-error: true
         env:
@@ -565,6 +557,7 @@ jobs:
               return {ok:true};
             }
           }
+
           async function txCommit(){
             if (engine==="sqlite") return runSql("COMMIT");
             if (engine==="pg"&&pg.tx){
@@ -573,6 +566,7 @@ jobs:
               return {ok:true};
             }
           }
+
           async function txRollback(){
             if (engine==="sqlite") return runSql("ROLLBACK");
             if (engine==="pg"&&pg.tx){
@@ -632,7 +626,6 @@ jobs:
             const cols = parseCSVLine(header);
             const idx = Object.fromEntries(cols.map((c,i)=>[c,i]));
 
-            // COPY fastpath for pg
             if (engine === "pg" && use_copy){
               await pg.client.query("BEGIN");
               try{
@@ -640,7 +633,6 @@ jobs:
                   `COPY transactions(customer_id,bank_id,account_id,merchant_id,ts,memo,amount)
                    FROM STDIN WITH (FORMAT csv)`
                 ));
-
                 for (const line of readLines(csv_path)){
                   if (!line || !line.trim() || line === header) continue;
                   const arr = parseCSVLine(line);
@@ -650,7 +642,6 @@ jobs:
                   ].map(k=>arr[idx[k]] ?? "");
                   stream.write(rec.map(v => (v==null?"":String(v))).join(",") + "\n");
                 }
-
                 await new Promise((res,rej)=>{
                   stream.on("finish",res);
                   stream.on("error",rej);
@@ -664,7 +655,6 @@ jobs:
               }
             }
 
-            // generic path
             let loaded = 0, batch = 0;
             await txBegin();
             try{
@@ -849,7 +839,7 @@ jobs:
             r = await mcp.call("migrate.apply", { dir: `${MIG_ROOT}` });
             log("migrate.apply.pre", r);
 
-            // seed base rows
+            // seed rows
             for (let i=1;i<=5;i++){
               const sqls = [
                 `INSERT INTO customers(id,name,email) VALUES(${i},'cust-${i}','c${i}@ex') ON CONFLICT DO NOTHING`,
@@ -874,7 +864,7 @@ jobs:
               await mcp.call("sql.exec", { sql: t });
             }
 
-            // transaction / rollback test
+            // tx + rollback test
             await mcp.call("tx.begin");
             const before = await mcp.call("sql.exec", {
               sql:`SELECT COUNT(*) AS c FROM transactions`
@@ -907,7 +897,7 @@ jobs:
             });
             log("bulk.load.csv", r);
 
-            // post-bulk migrations
+            // post bulk migrations
             const COMMON_POST = `${MIG_ROOT}/10_post_bulk/common`;
             await mcp.call("migrate.apply", { dir: COMMON_POST });
 
@@ -1071,7 +1061,7 @@ jobs:
           console.log("Report generated:", path.join(OUT_DIR, "report.html"));
           JS
 
-          # MCP 설정
+          # mcp.config.json
           cat > "$MCP_DIR/mcp.config.json" <<JSON
           {
             "mcpServers": {
@@ -1203,7 +1193,9 @@ jobs:
             echo "=== RUN SUMMARY ($(date)) ==="
             echo "sqlite_db_effective=$(cat "$LOG_DIR/db_path_effective.txt" 2>/dev/null || echo '(n/a)')"
             echo "pg_dsn=${PG_DSN}"
-            echo "csv_rows=${{ inputs.csv_rows || env.CSV_ROWS_INPUT || '20000' }}, batch_size=${{ inputs.batch_size || env.BATCH_SIZE_INPUT || '2000' }}, use_copy=${{ inputs.use_copy || env.USE_COPY_INPUT || true }}"
+            echo "csv_rows_effective=${{ inputs.csv_rows || env.CSV_ROWS_INPUT || '20000' }}"
+            echo "batch_size_effective=${{ inputs.batch_size || env.BATCH_SIZE_INPUT || '2000' }}"
+            echo "use_copy_effective=${{ inputs.use_copy || env.USE_COPY_INPUT || true }}"
             echo "roles: finance_admin / finance_writer / finance_reader"
             echo "partitions: transactions_p (monthly), ensure_next_month_partition()"
             echo "--- docker ps -a ---"
@@ -1245,7 +1237,7 @@ jobs:
           exit 0
 
   ###########################################################################
-  # 2) Banking Data Pipeline — 멀티DB 매트릭스 + 만전 대비 + PATH/런타임 로그
+  # 2) Banking Data Pipeline — 멀티DB 매트릭스 / bad substitution fix / PATH 스냅샷
   ###########################################################################
   banking-data-pipeline:
     runs-on: ubuntu-latest
@@ -1265,19 +1257,22 @@ jobs:
       - name: Prepare service state (pre-flight harden)
         shell: bash
         continue-on-error: true
+        env:
+          DB_MATRIX: ${{ matrix.db }}
         run: |
           set -Eeuo pipefail
-          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" artifacts "artifacts/${{ matrix.db }}"
+
+          mkdir -p "$LOG_DIR" "$ARTIFACT_DIR" artifacts "artifacts/${DB_MATRIX}"
           touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
-          : > "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
-          : > "$LOG_DIR/bank_ctx_${{ matrix.db }}.log" || true
+          : > "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
+          : > "$LOG_DIR/bank_ctx_${DB_MATRIX}.log" || true
 
           {
             echo "=== PRE-FLIGHT SERVICE SNAPSHOT ==="
-            echo "workflow=${{ github.workflow }}"
+            echo "workflow=${GITHUB_WORKFLOW}"
             echo "job=banking-data-pipeline"
-            echo "matrix.db=${{ matrix.db }}"
-            echo "runner=$(uname -a)"
+            echo "matrix.db=${DB_MATRIX}"
+            echo "runner_uname=$(uname -a)"
             echo "pwd_now=$(pwd)"
             echo "whoami_now=$(whoami)"
             echo "TZ=$TZ"
@@ -1285,7 +1280,7 @@ jobs:
             echo "ARTIFACT_DIR=$ARTIFACT_DIR"
             echo "--- INITIAL PATH ---"
             echo "$PATH"
-          } | tee "${LOG_DIR}/00_preflight_banking_${{ matrix.db }}.txt"
+          } | tee "${LOG_DIR}/00_preflight_banking_${DB_MATRIX}.txt"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -1296,9 +1291,11 @@ jobs:
       - name: Runtime PATH / versions snapshot (after python setup)
         shell: bash
         continue-on-error: true
+        env:
+          DB_MATRIX: ${{ matrix.db }}
         run: |
           {
-            echo "=== banking-data-pipeline runtime snapshot (${ { matrix.db } }) ==="
+            echo "=== banking-data-pipeline runtime snapshot (${DB_MATRIX}) ==="
             echo "--- PATH ---"
             echo "$PATH"
             echo "--- which python/pip ---"
@@ -1310,7 +1307,7 @@ jobs:
             python --version || python3 --version || true
             echo "--- pip --version ---"
             pip --version || pip3 --version || true
-          } | tee -a "$LOG_DIR/bank_ctx_${{ matrix.db }}.log"
+          } | tee -a "$LOG_DIR/bank_ctx_${DB_MATRIX}.log"
 
       - name: Install system clients (psql, mysqlclient)
         shell: bash
@@ -1334,12 +1331,12 @@ jobs:
 
       - name: Start database container
         env:
-          DB: ${{ matrix.db }}
+          DB_MATRIX: ${{ matrix.db }}
         shell: bash
         continue-on-error: true
         run: |
           set -euxo pipefail
-          case "$DB" in
+          case "$DB_MATRIX" in
             postgres)
               docker run -d --name pgdb \
                 -e POSTGRES_USER=postgres \
@@ -1360,50 +1357,50 @@ jobs:
                 -p 3307:3306 mariadb:11
               ;;
             sqlite|duckdb)
-              echo "No external DB container required for $DB"
+              echo "No external DB container required for $DB_MATRIX"
               ;;
             *)
-              echo "Unsupported DB $DB"
+              echo "Unsupported DB $DB_MATRIX"
               exit 1
               ;;
           esac
 
       - name: Wait for DB readiness
         env:
-          DB: ${{ matrix.db }}
+          DB_MATRIX: ${{ matrix.db }}
         shell: bash
         continue-on-error: true
         run: |
           set -euxo pipefail
-          if [ "$DB" = "postgres" ]; then
+          if [ "$DB_MATRIX" = "postgres" ]; then
             for i in $(seq 1 60); do
               pg_isready -h localhost -p 5432 -U postgres && break || sleep 2
             done
-          elif [ "$DB" = "mysql" ]; then
+          elif [ "$DB_MATRIX" = "mysql" ]; then
             for i in $(seq 1 90); do
               mysqladmin ping -h 127.0.0.1 -P 3306 -ppassword && break || sleep 2
             done
-          elif [ "$DB" = "mariadb" ]; then
+          elif [ "$DB_MATRIX" = "mariadb" ]; then
             for i in $(seq 1 90); do
               mysqladmin ping -h 127.0.0.1 -P 3307 -ppassword && break || sleep 2
             done
           else
-            echo "No readiness wait needed for $DB"
+            echo "No readiness wait needed for $DB_MATRIX"
           fi
 
           {
-            echo "=== SERVICE SNAPSHOT AFTER READINESS CHECK ==="
-            echo "DB=$DB"
+            echo "=== SERVICE SNAPSHOT AFTER READINESS CHECK (${DB_MATRIX}) ==="
             echo "--- docker ps -a ---"
             docker ps -a || true
             echo "--- ss -tlnp (ports) ---"
             ss -tlnp || true
             echo "--- PATH (current) ---"
             echo "$PATH"
-          } | tee -a "$LOG_DIR/bank_ctx_${{ matrix.db }}.log" 2>&1 || true
+          } | tee -a "$LOG_DIR/bank_ctx_${DB_MATRIX}.log" 2>&1 || true
 
       - name: Run pipeline
         env:
+          DB_MATRIX: ${{ matrix.db }}
           DB_USER: ${{ matrix.db == 'postgres' && 'postgres' || 'root' }}
           DB_PASSWORD: ${{ matrix.db == 'postgres' && 'postgres' || 'password' }}
           DB_HOST: localhost
@@ -1414,26 +1411,26 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # banking_pipeline.pipeline 은 사용자 제공 패키지를 가정
+          # 사용자가 제공한 banking_pipeline.pipeline 모듈 호출
           python -m banking_pipeline.pipeline \
-            --target ${{ matrix.db }} \
+            --target "${DB_MATRIX}" \
             --rows 20000 \
             --seed 42 \
             --out artifacts \
-            | tee -a "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
+            | tee -a "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
 
-          ls -R "artifacts/${{ matrix.db }}" \
-            | tee -a "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
+          ls -R "artifacts/${DB_MATRIX}" \
+            | tee -a "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
 
           {
-            echo "=== POST PIPELINE RUNTIME ==="
+            echo "=== POST PIPELINE RUNTIME (${DB_MATRIX}) ==="
             echo "--- PATH ---"
             echo "$PATH"
             echo "--- which python ---"
             which python || which python3 || true
             echo "--- python --version ---"
             python --version || python3 --version || true
-          } | tee -a "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
+          } | tee -a "$LOG_DIR/pipeline_${DB_MATRIX}.log" || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -1450,9 +1447,11 @@ jobs:
       - name: Always success footer (matrix ${{ matrix.db }})
         if: always()
         shell: bash
+        env:
+          DB_MATRIX: ${{ matrix.db }}
         run: |
-          echo "✅ BANKING (${{ matrix.db }}) DONE — All steps attempted."
+          echo "✅ BANKING ($DB_MATRIX) DONE — All steps attempted."
           echo "Artifacts snapshot:"
           ls -R "$LOG_DIR" || true
-          ls -R "artifacts/${{ matrix.db }}" || true
+          ls -R "artifacts/${DB_MATRIX}" || true
           exit 0
