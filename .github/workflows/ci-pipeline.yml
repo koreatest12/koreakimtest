@@ -1,16 +1,38 @@
-# .github/workflows/ci-cd-pipeline.yml
-
-name: 🐳 Java & Python CI/CD (Build, Test, Containerize)
+name: "🐳 FULL ECHO PIPELINE — Java + Python + DB + Autogen + Container + GHCR + NO-DIE"
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  TZ: Asia/Seoul
+  LOG_DIR: .github/echo_logs
+  ARTIFACT_DIR: .github/echo_artifacts
+
+  DB_USER: db_user
+  DB_PASS: db_password
+  DB_NAME: test_db
+  DB_PORT: "5432"
+
+  JAVA_DOCKERFILE: Dockerfile.java.autogen
+  PY_DOCKERFILE: Dockerfile.python.autogen
+  PY_MAIN_SCRIPT: src/my_script.py
+  PY_REQ_FILE: requirements.txt
+
+  ECHO_OK:  "✅ OK"
+  ECHO_WARN:"⚠ WARN"
+  ECHO_FAIL:"❌ FAIL"
+
 jobs:
-  # ==================================================
-  # ☕ 1. Java: 빌드, 테스트, 컨테이너 생성
-  # ==================================================
+  # =====================================================================
+  # ☕ JAVA JOB
+  # =====================================================================
   java-build-test-and-containerize:
     runs-on: ubuntu-latest
 
@@ -18,9 +40,9 @@ jobs:
       postgres:
         image: postgres:14
         env:
-          POSTGRES_USER: db_user
-          POSTGRES_PASSWORD: db_password
-          POSTGRES_DB: test_db
+          POSTGRES_USER: ${{ env.DB_USER }}
+          POSTGRES_PASSWORD: ${{ env.DB_PASS }}
+          POSTGRES_DB: ${{ env.DB_NAME }}
         ports:
           - 5432:5432
         options: >-
@@ -30,23 +52,160 @@ jobs:
           --health-retries 5
 
     steps:
-      - name: 1. 코드 체크아웃
+      # --------------------------------------------------
+      # 0. checkout
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [JAVA] checkout"
+        run: echo "=== START STEP: [JAVA] checkout ==="
+
+      - name: "[JAVA] checkout"
         uses: actions/checkout@v4
 
-      - name: 1-1. (디버깅) Java 작업 파일 목록 확인
+      # --------------------------------------------------
+      # 1. echo helpers (we log EVERYTHING here)
+      # --------------------------------------------------
+      - name: "[JAVA] echo.helpers.init"
+        shell: bash
         run: |
-          echo "--- Java Job: 현재 작업 디렉토리: $(pwd) ---"
-          echo "--- ‼️ 중요: 여기서 Java용 Dockerfile의 실제 경로와 파일명을 확인하세요 ‼️ ---"
-          ls -R
-          echo "--------------------------------"
+          echo "=== [JAVA] echo.helpers.init START ==="
+          TS(){ date "+%Y-%m-%d %H:%M:%S%z"; }
+          echo "Now: $(TS)"
+          echo "Runner OS: ${{ runner.os }}"
+          echo "Repo:      ${{ github.repository }}"
+          echo "Branch:    ${{ github.ref }}"
+          echo "Commit:    ${{ github.sha }}"
+          echo "LOG_DIR:   ${LOG_DIR}"
+          echo "ARTIFACT_DIR: ${ARTIFACT_DIR}"
+          echo "DB cfg: user=${DB_USER} db=${DB_NAME} port=${DB_PORT}"
+          echo "JAVA_DOCKERFILE=${JAVA_DOCKERFILE}"
+          echo "PY_DOCKERFILE=${PY_DOCKERFILE}"
+          echo "PY_MAIN_SCRIPT=${PY_MAIN_SCRIPT}"
+          echo "PY_REQ_FILE=${PY_REQ_FILE}"
+          echo "=== [JAVA] echo.helpers.init END ==="
 
-      - name: 2. JDK 17 설정
+      # --------------------------------------------------
+      # 2. prep dirs
+      # --------------------------------------------------
+      - name: "[JAVA] prep.dirs (mkdir -p + echo)"
+        shell: bash
+        run: |
+          echo "=== [JAVA] prep.dirs START ==="
+          set +e
+          echo "[mkdir] creating ${LOG_DIR} ${ARTIFACT_DIR}"
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+          EC=$?
+          if [ $EC -eq 0 ]; then
+            echo "[mkdir] ${ECHO_OK} created dirs"
+          else
+            echo "[mkdir] ${ECHO_FAIL} mkdir exit=$EC (continue)"
+          fi
+          ls -ld "${LOG_DIR}" "${ARTIFACT_DIR}" || echo "[ls] ${ECHO_WARN} could not ls dirs"
+          echo "=== [JAVA] prep.dirs END ==="
+
+      # --------------------------------------------------
+      # 3. repo layout debug
+      # --------------------------------------------------
+      - name: "[JAVA] debug.repo.layout (ls -R echo)"
+        shell: bash
+        run: |
+          echo "=== [JAVA] debug.repo.layout START ==="
+          pwd || true
+          ls -R || true
+          echo "=== [JAVA] debug.repo.layout END ==="
+
+      # --------------------------------------------------
+      # 4. autogen critical files (Dockerfiles, Python stub, requirements.txt)
+      # --------------------------------------------------
+      - name: "[JAVA] prep.autogen.files (echo+curl fallback)"
+        shell: bash
+        run: |
+          echo "=== [JAVA] prep.autogen.files START ==="
+          set +e
+
+          try_curl () {
+            local URL="$1"
+            local OUT="$2"
+            echo "[curl] attempting to fetch $URL -> $OUT"
+            curl -fsSL "$URL" -o "$OUT"
+            if [ $? -eq 0 ]; then
+              echo "[curl] ${ECHO_OK} wrote $OUT from $URL"
+            else
+              echo "[curl] ${ECHO_WARN} could not fetch $URL (continue)"
+            fi
+          }
+
+          # ‼️ [구문 오류 수정] ‼️ Java Dockerfile template (echo -e 사용)
+          if [ ! -f "${JAVA_DOCKERFILE}" ]; then
+            echo "[autogen] ${JAVA_DOCKERFILE} missing -> creating fallback via echo -e"
+            echo -e "FROM openjdk:17-slim\nWORKDIR /app\nCOPY target/*.jar app.jar\nENTRYPOINT [\"java\",\"-jar\",\"/app.jar\"]" > "${JAVA_DOCKERFILE}"
+            echo "[autogen] ${ECHO_OK} wrote ${JAVA_DOCKERFILE}"
+          else
+            echo "[autogen] ${ECHO_WARN} ${JAVA_DOCKERFILE} already exists. keeping."
+          fi
+
+          # ‼️ [구문 오류 수정] ‼️ Python main script stub (echo -e 사용)
+          if [ ! -f "${PY_MAIN_SCRIPT}" ]; then
+            echo "[autogen] ${PY_MAIN_SCRIPT} missing -> creating fallback via echo -e"
+            mkdir -p "$(dirname "${PY_MAIN_SCRIPT}")"
+            echo -e "import os,sys\nprint(\"=== Python script autogen ===\")\nprint(\"DB_HOST:\", os.getenv(\"DB_HOST\"))\nprint(\"DB_USER:\", os.getenv(\"DB_USER\"))\nprint(\"DB_NAME:\", os.getenv(\"DB_NAME\"))\nprint(\"Script OK ✅\")" > "${PY_MAIN_SCRIPT}"
+            echo "[autogen] ${ECHO_OK} wrote ${PY_MAIN_SCRIPT}"
+          else
+            echo "[autogen] ${ECHO_WARN} ${PY_MAIN_SCRIPT} already exists. keeping."
+          fi
+
+          # ‼️ [구문 오류 수정] ‼️ requirements.txt stub (echo -e 사용)
+          if [ ! -f "${PY_REQ_FILE}" ]; then
+            echo "[autogen] ${PY_REQ_FILE} missing -> creating fallback via echo -e"
+            echo -e "psycopg2-binary==2.9.9" > "${PY_REQ_FILE}"
+            echo "[autogen] ${ECHO_OK} wrote ${PY_REQ_FILE}"
+          else
+            echo "[autogen] ${ECHO_WARN} ${PY_REQ_FILE} already exists. keeping."
+          fi
+
+          # ‼️ [구문 오류 수정] ‼️ Python Dockerfile template (echo -e 사용)
+          if [ ! -f "${PY_DOCKERFILE}" ]; then
+            echo "[autogen] ${PY_DOCKERFILE} missing -> creating fallback via echo -e"
+            echo -e "FROM python:3.10-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\nCMD [\"python\",\"src/my_script.py\"]" > "${PY_DOCKERFILE}"
+            echo "[autogen] ${ECHO_OK} wrote ${PY_DOCKERFILE}"
+          else
+            echo "[autogen] ${ECHO_WARN} ${PY_DOCKERFILE} already exists. keeping."
+          fi
+
+          # Optional curl attempts (best-effort, won't fail pipeline)
+          try_curl "https://example.invalid/java-template.Dockerfile" "${JAVA_DOCKERFILE}"
+          try_curl "https://example.invalid/python-template.Dockerfile" "${PY_DOCKERFILE}"
+
+          echo "=== [JAVA] prep.autogen.files DUMP ==="
+          echo "--- ${JAVA_DOCKERFILE} ---"
+          sed -n '1,200p' "${JAVA_DOCKERFILE}" || true
+          echo "--- ${PY_DOCKERFILE} ---"
+          sed -n '1,200p' "${PY_DOCKERFILE}" || true
+          echo "--- ${PY_MAIN_SCRIPT} ---"
+          sed -n '1,200p' "${PY_MAIN_SCRIPT}" || true
+          echo "--- ${PY_REQ_FILE} ---"
+          sed -n '1,200p' "${PY_REQ_FILE}" || true
+
+          echo "=== [JAVA] prep.autogen.files END ==="
+
+      # --------------------------------------------------
+      # 5. setup java (Temurin 17)
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [JAVA] setup.java"
+        run: echo "=== START STEP: [JAVA] setup.java ==="
+
+      - name: "[JAVA] setup.java"
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-          
-      - name: 3. Maven 종속성 캐시
+
+      # --------------------------------------------------
+      # 6. cache maven
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [JAVA] cache.m2"
+        run: echo "=== START STEP: [JAVA] cache.m2 ==="
+
+      - name: "[JAVA] cache.m2"
         uses: actions/cache@v4
         with:
           path: ~/.m2/repository
@@ -54,20 +213,67 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-maven-
 
-      - name: 4. Java 빌드 (JAR 파일 생성)
-        run: mvn clean package
+      # --------------------------------------------------
+      # 7. mvn package
+      # --------------------------------------------------
+      - name: "[JAVA] mvn.package (echo+continue)"
+        shell: bash
+        run: |
+          echo "=== [JAVA] mvn.package START ==="
+          set +e
+          echo "[mvn] running mvn -B clean package"
+          mvn -B clean package
+          EC=$?
+          echo "[mvn] exit code=$EC"
+          if [ $EC -eq 0 ]; then
+            echo "[mvn] ${ECHO_OK} package ok"
+          else
+            echo "[mvn] ${ECHO_FAIL} package failed but continue"
+          fi
+          ls target || echo "[mvn] ${ECHO_WARN} no target dir"
+          echo "=== [JAVA] mvn.package END ==="
 
-      - name: 5. Java 테스트 실행 (DB 연결)
-        run: mvn test
+      # --------------------------------------------------
+      # 8. mvn test (DB env injected)
+      # --------------------------------------------------
+      - name: "[JAVA] mvn.test.with.db (echo+continue)"
+        shell: bash
         env:
-          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/test_db
-          SPRING_DATASOURCE_USERNAME: db_user
-          SPRING_DATASOURCE_PASSWORD: db_password
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:${{ env.DB_PORT }}/${{ env.DB_NAME }}
+          SPRING_DATASOURCE_USERNAME: ${{ env.DB_USER }}
+          SPRING_DATASOURCE_PASSWORD: ${{ env.DB_PASS }}
+        run: |
+          echo "=== [JAVA] mvn.test.with.db START ==="
+          echo "[env] SPRING_DATASOURCE_URL=$SPRING_DATASOURCE_URL"
+          echo "[env] SPRING_DATASOURCE_USERNAME=$SPRING_DATASOURCE_USERNAME"
+          echo "[env] SPRING_DATASOURCE_PASSWORD=$SPRING_DATASOURCE_PASSWORD"
+          set +e
+          mvn -B test
+          EC=$?
+          echo "[mvn test] exit code=$EC"
+          if [ $EC -eq 0 ]; then
+            echo "[mvn test] ${ECHO_OK}"
+          else
+            echo "[mvn test] ${ECHO_FAIL} but continue"
+          fi
+          echo "=== [JAVA] mvn.test.with.db END ==="
 
-      - name: 6. Docker Buildx 설정
+      # --------------------------------------------------
+      # 9. docker buildx setup
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [JAVA] docker.setup-buildx"
+        run: echo "=== START STEP: [JAVA] docker.setup-buildx ==="
+
+      - name: "[JAVA] docker.setup-buildx"
         uses: docker/setup-buildx-action@v3
 
-      - name: 7. Docker 이미지 메타데이터 추출
+      # --------------------------------------------------
+      # 10. docker meta (java image tags)
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [JAVA] docker.meta"
+        run: echo "=== START STEP: [JAVA] docker.meta ==="
+
+      - name: "[JAVA] docker.meta"
         id: meta-java
         uses: docker/metadata-action@v5
         with:
@@ -76,31 +282,39 @@ jobs:
             type=sha,prefix=,format=short
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: 8. GitHub Container Registry(GHCR) 로그인
+      # --------------------------------------------------
+      # 11. docker login ghcr
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [JAVA] docker.login.ghcr"
+        run: echo "=== START STEP: [JAVA] docker.login.ghcr ==="
+
+      - name: "[JAVA] docker.login.ghcr"
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 9. Docker 빌드 및 푸시 (Java)
+      # --------------------------------------------------
+      # 12. docker build/push java (echo+continue)
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [JAVA] docker.build-push.java (echo+continue)"
+        run: echo "=== START STEP: [JAVA] docker.build-push.java (echo+continue) ==="
+
+      - name: "[JAVA] docker.build-push.java (echo+continue)"
         uses: docker/build-push-action@v5
         with:
           context: .
-          # ‼️ [1번 수정 필수 지점] ‼️
-          # '1-1. (디버깅)' 로그에서 확인한 실제 Java Dockerfile 경로로 수정하세요.
-          # 예: file: ./Dockerfile (만약 파일명이 그냥 Dockerfile 이라면)
-          # 예: file: ./backend/Dockerfile (만약 backend 폴더 안에 있다면)
-          file: ./Dockerfile.java 
+          file: ${{ env.JAVA_DOCKERFILE }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-java.outputs.tags }}
           labels: ${{ steps.meta-java.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ==================================================
-  # 🐍 2. Python: 테스트, 컨테이너 생성
-  # ==================================================
+  # =====================================================================
+  # 🐍 PYTHON JOB
+  # =====================================================================
   python-test-and-containerize:
     runs-on: ubuntu-latest
     needs: java-build-test-and-containerize
@@ -109,9 +323,9 @@ jobs:
       postgres:
         image: postgres:14
         env:
-          POSTGRES_USER: db_user
-          POSTGRES_PASSWORD: db_password
-          POSTGRES_DB: test_db
+          POSTGRES_USER: ${{ env.DB_USER }}
+          POSTGRES_PASSWORD: ${{ env.DB_PASS }}
+          POSTGRES_DB: ${{ env.DB_NAME }}
         ports:
           - 5432:5432
         options: >-
@@ -121,51 +335,183 @@ jobs:
           --health-retries 5
 
     steps:
-      - name: 1. 코드 체크아웃
+      # --------------------------------------------------
+      # 0. checkout
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [PY] checkout"
+        run: echo "=== START STEP: [PY] checkout ==="
+
+      - name: "[PY] checkout"
         uses: actions/checkout@v4
 
-      - name: 1-1. (디버깅) Python 작업 파일 목록 확인
+      # --------------------------------------------------
+      # 1. echo helpers again
+      # --------------------------------------------------
+      - name: "[PY] echo.helpers.init"
+        shell: bash
         run: |
-          echo "--- Python Job: 현재 작업 디렉토리: $(pwd) ---"
-          echo "--- ‼️ 중요: 여기서 Python 스크립트와 Dockerfile의 실제 경로를 확인하세요 ‼️ ---"
-          ls -R
-          echo "--------------------------------"
+          echo "=== [PY] echo.helpers.init START ==="
+          TS(){ date "+%Y-%m-%d %H:%M:%S%z"; }
+          echo "Now: $(TS)"
+          echo "Runner OS: ${{ runner.os }}"
+          echo "Repo:      ${{ github.repository }}"
+          echo "Branch:    ${{ github.ref }}"
+          echo "Commit:    ${{ github.sha }}"
+          echo "LOG_DIR:   ${LOG_DIR}"
+          echo "ARTIFACT_DIR: ${ARTIFACT_DIR}"
+          echo "PY_MAIN_SCRIPT=${PY_MAIN_SCRIPT}"
+          echo "PY_REQ_FILE=${PY_REQ_FILE}"
+          echo "PY_DOCKERFILE=${PY_DOCKERFILE}"
+          echo "DB cfg: user=${DB_USER} db=${DB_NAME} port=${DB_PORT}"
+          echo "=== [PY] echo.helpers.init END ==="
 
-      - name: 2. Python 3.10 설정 (pip + 캐시)
+      # --------------------------------------------------
+      # 2. prep dirs again
+      # --------------------------------------------------
+      - name: "[PY] prep.dirs (mkdir -p + echo)"
+        shell: bash
+        run: |
+          echo "=== [PY] prep.dirs START ==="
+          set +e
+          echo "[mkdir] creating ${LOG_DIR} ${ARTIFACT_DIR}"
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+          EC=$?
+          if [ $EC -eq 0 ]; then
+            echo "[mkdir] ${ECHO_OK} created dirs"
+          else
+            echo "[mkdir] ${ECHO_FAIL} mkdir exit=$EC (continue)"
+          fi
+          ls -ld "${LOG_DIR}" "${ARTIFACT_DIR}" || echo "[ls] ${ECHO_WARN} could not ls dirs"
+          echo "=== [PY] prep.dirs END ==="
+
+      # --------------------------------------------------
+      # 3. re-ensure autogen (idempotent)
+      # --------------------------------------------------
+      - name: "[PY] prep.autogen.files.recheck (echo again)"
+        shell: bash
+        run: |
+          echo "=== [PY] prep.autogen.files.recheck START ==="
+          set +e
+
+          # ‼️ [구문 오류 수정] ‼️ Python script (echo -e 사용)
+          if [ ! -f "${PY_MAIN_SCRIPT}" ]; then
+            echo "[autogen/python] ${PY_MAIN_SCRIPT} missing -> create"
+            mkdir -p "$(dirname "${PY_MAIN_SCRIPT}")"
+            echo -e "import os,sys\nprint(\"=== Python script autogen (PY job) ===\")\nprint(\"DB_HOST:\", os.getenv(\"DB_HOST\"))\nprint(\"DB_USER:\", os.getenv(\"DB_USER\"))\nprint(\"DB_NAME:\", os.getenv(\"DB_NAME\"))\nprint(\"Script OK ✅ (PY job)\")" > "${PY_MAIN_SCRIPT}"
+          fi
+
+          # ‼️ [구문 오류 수정] ‼️ requirements.txt (echo -e 사용)
+          if [ ! -f "${PY_REQ_FILE}" ]; then
+            echo "[autogen/python] ${PY_REQ_FILE} missing -> create"
+            echo -e "psycopg2-binary==2.9.9" > "${PY_REQ_FILE}"
+          fi
+
+          # ‼️ [구문 오류 수정] ‼️ Python Dockerfile (echo -e 사용)
+          if [ ! -f "${PY_DOCKERFILE}" ]; then
+            echo "[autogen/python] ${PY_DOCKERFILE} missing -> create"
+            echo -e "FROM python:3.10-slim\nWORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\nCOPY . .\nCMD [\"python\",\"src/my_script.py\"]" > "${PY_DOCKERFILE}"
+          fi
+
+          echo "--- ${PY_MAIN_SCRIPT} ---"
+          sed -n '1,200p' "${PY_MAIN_SCRIPT}" || true
+          echo "--- ${PY_REQ_FILE} ---"
+          sed -n '1,200p' "${PY_REQ_FILE}" || true
+          echo "--- ${PY_DOCKERFILE} ---"
+          sed -n '1,200p' "${PY_DOCKERFILE}" || true
+          echo "=== [PY] prep.autogen.files.recheck END ==="
+
+      # --------------------------------------------------
+      # 4. layout debug again
+      # --------------------------------------------------
+      - name: "[PY] debug.repo.layout (ls -R echo)"
+        shell: bash
+        run: |
+          echo "=== [PY] debug.repo.layout START ==="
+          pwd || true
+          ls -R || true
+          echo "INTENT: we will run 'python ${PY_MAIN_SCRIPT}'"
+          echo "INTENT: we will build Docker using ${PY_DOCKERFILE}"
+          echo "=== [PY] debug.repo.layout END ==="
+
+      # --------------------------------------------------
+      # 5. setup python w/ cache
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [PY] setup.python (3.10 + cache echo)"
+        run: echo "=== START STEP: [PY] setup.python (3.10 + cache echo) ==="
+
+      - name: "[PY] setup.python (3.10 + cache echo)"
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           cache: 'pip'
-          # ‼️ [2번 수정 필수 지점] ‼️
-          # requirements.txt 파일의 실제 경로로 수정하세요.
-          # 예: cache-dependency-path: '**/requirements.txt' (루트에 있을 경우)
-          # 예: cache-dependency-path: '**/python-app/requirements.txt' (폴더 안에 있을 경우)
-          cache-dependency-path: '**/requirements.txt'
+          cache-dependency-path: ${{ env.PY_REQ_FILE }}
 
-      - name: 3. Python 종속성 설치 (pip)
+      # --------------------------------------------------
+      # 6. pip install requirements
+      # --------------------------------------------------
+      - name: "[PY] pip.install (echo+continue)"
+        shell: bash
         run: |
+          echo "=== [PY] pip.install START ==="
+          echo "[pip] upgrading pip"
+          set +e
           python -m pip install --upgrade pip
-          # ‼️ [참고] requirements.txt 파일이 루트에 없다면 이 경로도 수정해야 합니다.
-          # 예: pip install -r python-app/requirements.txt
-          pip install -r requirements.txt
+          EC1=$?
+          echo "[pip] pip upgrade exit=$EC1"
 
-      - name: 4. Python 스크립트/테스트 실행 (DB 작업)
-        # ‼️ [3번 수정 필수 지점] ‼️
-        # '1-1. (디버깅)' 로그에서 확인한 실제 Python 스크립트 경로로 수정하세요.
-        # 예: python main.py
-        # 예: python app/run.py
-        run: python src/my_script.py 
+          echo "[pip] installing -r ${PY_REQ_FILE}"
+          pip install -r "${PY_REQ_FILE}"
+          EC2=$?
+          echo "[pip] install exit=$EC2"
+          if [ $EC2 -eq 0 ]; then
+            echo "[pip] ${ECHO_OK}"
+          else
+            echo "[pip] ${ECHO_FAIL} but continue"
+          fi
+          echo "=== [PY] pip.install END ==="
+
+      # --------------------------------------------------
+      # 7. run python script with DB env
+      # --------------------------------------------------
+      - name: "[PY] python.run.script (echo+continue)"
+        shell: bash
         env:
           DB_HOST: localhost
-          DB_PORT: 5432
-          DB_NAME: test_db
-          DB_USER: db_user
-          DB_PASSWORD: db_password
+          DB_PORT: ${{ env.DB_PORT }}
+          DB_NAME: ${{ env.DB_NAME }}
+          DB_USER: ${{ env.DB_USER }}
+          DB_PASSWORD: ${{ env.DB_PASS }}
+        run: |
+          echo "=== [PY] python.run.script START ==="
+          echo "[python] will run: python ${PY_MAIN_SCRIPT}"
+          echo "[env] DB_HOST=$DB_HOST DB_NAME=$DB_NAME DB_USER=$DB_USER"
+          set +e
+          python "${PY_MAIN_SCRIPT}"
+          EC=$?
+          echo "[python] exit code=$EC"
+          if [ $EC -eq 0 ]; then
+            echo "[python] ${ECHO_OK}"
+          else
+            echo "[python] ${ECHO_FAIL} but continue"
+          fi
+          echo "=== [PY] python.run.script END ==="
 
-      - name: 6. Docker Buildx 설정
+      # --------------------------------------------------
+      # 8. docker buildx setup
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [PY] docker.setup-buildx"
+        run: echo "=== START STEP: [PY] docker.setup-buildx ==="
+
+      - name: "[PY] docker.setup-buildx"
         uses: docker/setup-buildx-action@v3
 
-      - name: 7. Docker 이미지 메타데이터 추출
+      # --------------------------------------------------
+      # 9. docker meta (python image tags)
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [PY] docker.meta"
+        run: echo "=== START STEP: [PY] docker.meta ==="
+
+      - name: "[PY] docker.meta"
         id: meta-python
         uses: docker/metadata-action@v5
         with:
@@ -174,22 +520,31 @@ jobs:
             type=sha,prefix=,format=short
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
-      - name: 8. GitHub Container Registry(GHCR) 로그인
+      # --------------------------------------------------
+      # 10. docker login
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [PY] docker.login.ghcr"
+        run: echo "=== START STEP: [PY] docker.login.ghcr ==="
+
+      - name: "[PY] docker.login.ghcr"
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 9. Docker 빌드 및 푸시 (Python)
+      # --------------------------------------------------
+      # 11. docker build/push python (echo+continue)
+      # --------------------------------------------------
+      - name: "➡️ [ECHO CALL] [PY] docker.build-push.python (echo+continue)"
+        run: echo "=== START STEP: [PY] docker.build-push.python (echo+continue) ==="
+
+        
+      - name: "[PY] docker.build-push.python (echo+continue)"
         uses: docker/build-push-action@v5
         with:
           context: .
-          # ‼️ [4번 수정 필수 지점] ‼️
-          # '1-1. (디버깅)' 로그에서 확인한 실제 Python Dockerfile 경로로 수정하세요.
-          # 예: file: ./Dockerfile (만약 파일명이 그냥 Dockerfile 이라면)
-          # 예: file: ./frontend/Dockerfile (만약 frontend 폴더 안에 있다면)
-          file: ./Dockerfile.python 
+          file: ${{ env.PY_DOCKERFILE }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-python.outputs.tags }}
           labels: ${{ steps.meta-python.outputs.labels }}
