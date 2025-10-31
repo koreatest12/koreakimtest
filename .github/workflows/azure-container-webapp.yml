@@ -1,23 +1,23 @@
-name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev6 no-skip)"
+name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev6)"
 
 on:
   push:
     branches: ["main"]
   workflow_dispatch:
     inputs:
-      deploy_env:        # 1
+      deploy_env:
         description: "배포 환경 태그 (dev/stage/prod 등)"
         default: "dev"
         required: false
-      extra_tag:         # 2
+      extra_tag:
         description: "추가 커스텀 이미지 태그 (비워도 됨)"
         default: ""
         required: false
-      run_healthcheck:   # 3 (지금은 항상 실행하지만 값은 그대로 기록에만 사용)
+      run_healthcheck:
         description: "배포 후 curl로 헬스체크 할까요?"
         type: boolean
         default: true
-      force_success_msg: # 4
+      force_success_msg:
         description: "실패해도 마지막에 성공 메시지 강제로 찍기"
         type: boolean
         default: true
@@ -25,18 +25,38 @@ on:
 permissions:
   contents: read
   packages: write      # GHCR push
-  id-token: write      # 미래 확장용 (OIDC)
+  id-token: write      # OIDC (향후 확장 자리)
   security-events: write
 
 env:
   TZ: Asia/Seoul
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
-  AZURE_WEBAPP_NAME: your-app-name            # 실제 Azure Web App 이름으로 교체 필수
+  
+  # ⚠️ 중요: GitHub 레포지토리 시크릿에 AZURE_WEBAPP_NAME을 등록해야 합니다.
+  AZURE_WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME }}
   DOCKER_REGISTRY: ghcr.io
-  IMAGE_REPO_RAW: ${{ github.repository }}    # ex) koreatest12/koreakimtest
-  GIT_SHA: ${{ github.sha }}
-  TS_NOW: ${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
+  IMAGE_NAME: ${{ github.repository }} # ex) koreatest12/koreakimtest
+
+  # 헬퍼 스크립트를 상단 env로 추출 (DRY)
+  HELPER_SCRIPT: |
+    TS(){ date "+%Y-%m-%d %H:%M:%S%z"; }
+    log_ok(){   echo "✅ [$(TS)] $*"; }
+    log_warn(){ echo "⚠️  [$(TS)] $*" >&2; }
+    log_err(){  echo "❌ [$(TS)] $*" >&2; }
+    safe_run() {
+      local step="$1"; shift
+      log_ok "▶ ${step} :: $*"
+      mkdir -p "${LOG_DIR:-.github/echo_logs}" "${ARTIFACT_DIR:-.github/echo_artifacts}" || true
+      "$@" 2>&1
+      rc=$?
+      if [ $rc -eq 0 ]; then
+        log_ok "${step} OK"
+      else
+        log_err "${step} FAILED (exit=${rc}) — continue anyway"
+      fi
+      return 0  # 항상 0으로 반환 → 이 step은 실패로 안 죽음
+    }
 
 concurrency:
   group: azure-webapp-deploy-${{ github.ref }}
@@ -46,63 +66,23 @@ jobs:
   build-and-push:
     name: "① Build & Push Image (GHCR)"
     runs-on: ubuntu-24.04
-
+    outputs:
+      # deploy 잡에 전달할 이미지 태그 (git sha 기준)
+      image_sha_tag: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+      
     steps:
       - name: Init dirs + helpers
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-          cat > /tmp/echo_helpers.sh <<'EOF'
-          TS(){ date "+%Y-%m-%d %H:%M:%S%z"; }
-          log_ok(){   echo "✅ [$(TS)] $*"; }
-          log_warn(){ echo "⚠️  [$(TS)] $*" >&2; }
-          log_err(){  echo "❌ [$(TS)] $*" >&2; }
-          safe_run() {
-            local step="$1"; shift
-            log_ok "▶ ${step} :: $*"
-            mkdir -p "${LOG_DIR:-.github/echo_logs}" "${ARTIFACT_DIR:-.github/echo_artifacts}" || true
-            "$@" 2>&1
-            rc=$?
-            if [ $rc -eq 0 ]; then
-              log_ok "${step} OK"
-            else
-              log_err "${step} FAILED (exit=${rc}) — continue anyway"
-            fi
-            return 0  # 항상 0 반환 → step 죽지 않음
-          }
-          EOF
+          echo "${HELPER_SCRIPT}" > /tmp/echo_helpers.sh
           chmod +x /tmp/echo_helpers.sh
           . /tmp/echo_helpers.sh
           log_ok "Helpers ready. Dirs ready: ${LOG_DIR}, ${ARTIFACT_DIR}"
 
       - name: Checkout source
         uses: actions/checkout@v4
-
-      - name: Prepare tag/env variables
-        id: prep
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          . /tmp/echo_helpers.sh
-
-          repo_lc="$(echo "${IMAGE_REPO_RAW}" | tr '[:upper:]' '[:lower:]')"
-
-          echo "REPO_LC=${repo_lc}"                                  >> $GITHUB_ENV
-          echo "SHA_TAG=${GIT_SHA}"                                  >> $GITHUB_ENV
-          echo "LATEST_TAG=latest"                                   >> $GITHUB_ENV
-          echo "RUN_TAG=${TS_NOW}"                                   >> $GITHUB_ENV
-          echo "INPUT_TAG=${{ github.event.inputs.extra_tag }}"      >> $GITHUB_ENV
-          echo "DEPLOY_ENV=${{ github.event.inputs.deploy_env }}"    >> $GITHUB_ENV
-          echo "IMG_BASE=${DOCKER_REGISTRY}/${repo_lc}"              >> $GITHUB_ENV
-          echo "HEALTHCHECK_WANTED=${{ github.event.inputs.run_healthcheck }}" >> $GITHUB_ENV
-
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-          log_ok "Repo lowercased: ${repo_lc}"
-          log_ok "Image base: ${DOCKER_REGISTRY}/${repo_lc}"
-          log_ok "Tags -> sha:${GIT_SHA}, run:${TS_NOW}, latest:latest, extra:${{ github.event.inputs.extra_tag }}"
-          log_ok "Deploy env: ${{ github.event.inputs.deploy_env }}"
-          log_ok "Healthcheck desired: ${{ github.event.inputs.run_healthcheck }}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
@@ -114,78 +94,48 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Docker build (tag :sha)
-        shell: bash
-        run: |
-          set +e
-          . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # 1. Git SHA 태그 (기본 배포용)
+            type=sha
+            # 2. Run ID 태그 (추적용)
+            type=raw,value=${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
+            # 3. 'latest' 태그 (main 브랜치일 때만)
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # 4. 수동 입력 태그 (값이 있을 때만)
+            type=raw,value=${{ github.event.inputs.extra_tag }},enable=${{ github.event.inputs.extra_tag != '' }}
 
-          safe_run "docker.build" \
-            docker build \
-              --progress=plain \
-              --file Dockerfile \
-              --tag "${IMG_BASE}:${SHA_TAG}" \
-              .
-
-          exit 0
-
-      - name: Push sha & runid tags
-        shell: bash
-        run: |
-          set +e
-          . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
-          # push :sha
-          safe_run "docker.push.sha" docker push "${IMG_BASE}:${SHA_TAG}"
-
-          # tag/push :runid
-          docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${RUN_TAG}" 2>/dev/null
-          safe_run "docker.push.runid" docker push "${IMG_BASE}:${RUN_TAG}"
-
-          exit 0
-
-      - name: Push latest & extra_tag (only on main)
-        if: github.ref == 'refs/heads/main'
-        shell: bash
-        run: |
-          set +e
-          . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
-          # latest
-          docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${LATEST_TAG}" 2>/dev/null
-          safe_run "docker.push.latest" docker push "${IMG_BASE}:${LATEST_TAG}"
-
-          # extra tag (수동 태그)
-          if [ -n "${INPUT_TAG}" ]; then
-            docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${INPUT_TAG}" 2>/dev/null
-            safe_run "docker.push.extra" docker push "${IMG_BASE}:${INPUT_TAG}"
-          else
-            log_warn "No extra_tag provided, skipping extra push"
-          fi
-
-          exit 0
+      - name: Build and push Docker image
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          progress: plain
 
       - name: Security scan placeholder
         shell: bash
         run: |
-          set +e
+          set -Eeuo pipefail
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
-          log_ok "Security scan placeholder for ${IMG_BASE}:${SHA_TAG}" > "${LOG_DIR}/security_scan.log"
-
-          exit 0
-
+          log_ok "Security scan placeholder for image..."
+          log_ok "Tags pushed: ${{ steps.meta.outputs.tags }}"
+          echo "Tags: ${{ steps.meta.outputs.tags }}" > "${LOG_DIR}/security_scan.log"
+          
       - name: Upload build logs
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
-            .github/echo_logs
-            .github/echo_artifacts
+            ${{ env.LOG_DIR }}
+            ${{ env.ARTIFACT_DIR }}
           if-no-files-found: ignore
           retention-days: 7
 
@@ -194,147 +144,116 @@ jobs:
     runs-on: ubuntu-24.04
     needs: build-and-push
     environment:
-      name: "Development"
-
+      name: "Development" 
+    
     steps:
       - name: Init dirs + helpers
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-          cat > /tmp/echo_helpers.sh <<'EOF'
-          TS(){ date "+%Y-%m-%d %H:%M:%S%z"; }
-          log_ok(){   echo "✅ [$(TS)] $*"; }
-          log_warn(){ echo "⚠️  [$(TS)] $*" >&2; }
-          log_err(){  echo "❌ [$(TS)] $*" >&2; }
-          safe_run() {
-            local step="$1"; shift
-            log_ok "▶ ${step} :: $*"
-            mkdir -p "${LOG_DIR:-.github/echo_logs}" "${ARTIFACT_DIR:-.github/echo_artifacts}" || true
-            "$@" 2>&1
-            rc=$?
-            if [ $rc -eq 0 ]; then
-              log_ok "${step} OK"
-            else
-              log_err "${step} FAILED (exit=${rc}) — continue anyway"
-            fi
-            return 0
-          }
-          EOF
+          echo "${HELPER_SCRIPT}" > /tmp/echo_helpers.sh
           chmod +x /tmp/echo_helpers.sh
           . /tmp/echo_helpers.sh
           log_ok "Deploy helpers ready"
 
-      - name: Recompute image refs
+      - name: Get deploy metadata from build job
         shell: bash
         run: |
           set -Eeuo pipefail
           . /tmp/echo_helpers.sh
+          # build 잡의 output을 env var로 등록
+          echo "IMAGE_TO_DEPLOY=${{ needs.build-and-push.outputs.image_sha_tag }}" >> $GITHUB_ENV
+          
+          log_ok "Will deploy image: ${{ needs.build-and-push.outputs.image_sha_tag }}"
+          log_ok "Target WebApp: ${{ env.AZURE_WEBAPP_NAME }}"
 
-          repo_lc="$(echo "${IMAGE_REPO_RAW}" | tr '[:upper:]' '[:lower:]')"
-
-          echo "REPO_LC=${repo_lc}"                     >> $GITHUB_ENV
-          echo "IMG_BASE=${DOCKER_REGISTRY}/${repo_lc}" >> $GITHUB_ENV
-          echo "SHA_TAG=${GIT_SHA}"                     >> $GITHUB_ENV
-
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
-          log_ok "Will deploy image: ${DOCKER_REGISTRY}/${repo_lc}:${GIT_SHA}"
-          log_ok "Target WebApp: ${AZURE_WEBAPP_NAME}"
-
-      - name: Check publish profile presence (log only, no skip)
-        shell: bash
+      #################################################################
+      # Gate: Publish Profile 있는지 체크해서 배포 여부 결정
+      #################################################################
+      - name: Check publish profile availability
+        id: gate
         env:
           AZURE_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        shell: bash
         run: |
-          set +e
+          set -Eeuo pipefail
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
           if [ -z "${AZURE_PUBLISH_PROFILE}" ]; then
-            log_warn "AZURE_WEBAPP_PUBLISH_PROFILE is NOT set. Deployment may fail."
+            log_warn "No AZURE_WEBAPP_PUBLISH_PROFILE secret found. Deployment will be SKIPPED."
             echo "DEPLOY_ENABLED=false" >> $GITHUB_ENV
           else
-            log_ok "AZURE_WEBAPP_PUBLISH_PROFILE is present. Proceeding."
+            log_ok "AZURE_WEBAPP_PUBLISH_PROFILE detected. Deployment will PROCEED."
             echo "DEPLOY_ENABLED=true" >> $GITHUB_ENV
           fi
 
-          exit 0
-
-      # 핵심 배포 단계
-      # slot-name / package 제거.
-      # 강제 실행, 에러 나도 멈추지 않도록 continue-on-error: true
-      - name: Deploy to Azure Web App (publish-profile mode, always run)
+      #################################################################
+      # 실제 컨테이너 이미지 배포 (azure/webapps-deploy@v3 사용)
+      #################################################################
+      - name: Deploy to Azure Web App (publish-profile mode)
+        # ⬇️ 로그에서 발생한 문제를 해결하는 핵심 'if' 조건
+        if: env.DEPLOY_ENABLED == 'true'
         id: deploy-webapp
-        continue-on-error: true
-        uses: azure/webapps-deploy@v2
+        uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-          images: '${{ env.DOCKER_REGISTRY }}/${{ env.REPO_LC }}:${{ env.SHA_TAG }}'
+          images: '${{ env.IMAGE_TO_DEPLOY }}' # build 잡에서 전달받은 이미지 태그 사용
 
-      - name: Record deploy output (always run)
+      - name: Record deploy output
+        if: env.DEPLOY_ENABLED == 'true'
         shell: bash
         run: |
           set +e
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
           DEPLOY_URL="${{ steps.deploy-webapp.outputs.webapp-url }}"
           if [ -z "$DEPLOY_URL" ]; then
-            log_warn "webapps-deploy didn't emit webapp-url output (possibly failed auth/deploy)."
-            DEPLOY_URL="(no-url)"
+            log_warn "webapps-deploy didn't emit webapp-url output."
           else
             log_ok "Azure webapp-url -> $DEPLOY_URL"
           fi
-
           echo "$DEPLOY_URL" > "${LOG_DIR}/deploy_url.txt"
-
           exit 0
 
-      - name: Healthcheck (always run, no skip)
+      - name: Healthcheck (optional)
+        if: env.DEPLOY_ENABLED == 'true' && (github.event.inputs.run_healthcheck == 'true' || github.event.inputs.run_healthcheck == '')
         shell: bash
         run: |
           set +e
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
           TARGET_URL="$(cat ${LOG_DIR}/deploy_url.txt 2>/dev/null || true)"
-          if [ -z "$TARGET_URL" ] || [ "$TARGET_URL" = "(no-url)" ]; then
-            log_warn "No valid URL for healthcheck. We'll still mark health as attempted."
-            echo "HEALTH=unknown" >> $GITHUB_ENV
+          if [ -z "$TARGET_URL" ]; then
+            log_warn "No URL found for healthcheck. Skipping."
+            echo "HEALTH=skip" >> $GITHUB_ENV
           else
             for try in 1 2 3 4 5; do
               log_ok "Healthcheck try #$try -> $TARGET_URL"
+              # safe_run 사용 대신, curl 자체의 실패를 직접 처리
               if curl -fsS "$TARGET_URL" >/dev/null 2>&1; then
                 log_ok "Healthcheck success on try #$try"
                 echo "HEALTH=ok" >> $GITHUB_ENV
                 break
               else
-                log_warn "Healthcheck attempt #$try failed, sleeping 5s"
+                log_warn "Healthcheck attempt #$try failed, sleep 5s"
                 sleep 5
               fi
             done
-
             if [ "${HEALTH:-}" != "ok" ]; then
-              log_err "Healthcheck not confirmed healthy — continue anyway"
-              echo "HEALTH=fail" >> $GITHUB_ENV
+              log_err "Healthcheck failed after retries — continue anyway"
             fi
           fi
-
           exit 0
 
-      - name: Azure runtime info placeholder (always run)
+      - name: Azure runtime info placeholder
+        if: env.DEPLOY_ENABLED == 'true'
         shell: bash
         run: |
           set +e
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
-          # 실제 운영이라면 az webapp show 등으로 컨테이너 설정을 수집 가능.
-          log_ok "Runtime inspect placeholder for ${AZURE_WEBAPP_NAME}" \
+          # safe_run을 사용하여 실패하더라도 다음 스텝으로 계속 진행
+          safe_run "azure.runtime.info" \
+            echo "Runtime inspect placeholder for ${AZURE_WEBAPP_NAME}" \
             | tee "${LOG_DIR}/azure_runtime.log"
-
           exit 0
 
       - name: Upload deploy logs
@@ -342,32 +261,26 @@ jobs:
         with:
           name: deploy-logs
           path: |
-            .github/echo_logs
-            .github/echo_artifacts
+            ${{ env.LOG_DIR }}
+            ${{ env.ARTIFACT_DIR }}
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Force success footer (always run)
-        # 굳이 조건부 if 안 건다. 무조건 실행.
+      - name: Force success footer
+        if: ${{ github.event.inputs.force_success_msg == 'true' || github.event.inputs.force_success_msg == '' }}
         shell: bash
         run: |
           set +e
           . /tmp/echo_helpers.sh
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
-          STATUS_MSG="Deployment step EXECUTED (continue-on-error)."
           if [ "${DEPLOY_ENABLED}" = "true" ]; then
-            STATUS_MSG="${STATUS_MSG} Publish Profile existed."
+            STATUS_MSG="Deployment attempted (publish-profile mode)."
           else
-            STATUS_MSG="${STATUS_MSG} Publish Profile MISSING (auth likely failed)."
+            STATUS_MSG="Deployment SKIPPED (no publish profile secret)."
           fi
-
-          log_ok "🎉 SAFE-CONTINUE COMPLETE — NO-SKIP MODE"
+          log_ok "🎉 SAFE-CONTINUE COMPLETE"
           log_ok "Status: ${STATUS_MSG}"
           log_ok "App: ${AZURE_WEBAPP_NAME}"
-          log_ok "Image: ${DOCKER_REGISTRY}/${REPO_LC}:${SHA_TAG}"
+          log_ok "Image: ${{ env.IMAGE_TO_DEPLOY }}"
           log_ok "Env tag: ${{ github.event.inputs.deploy_env || 'dev' }}"
-          log_ok "Health result (may be ok/fail/unknown): ${HEALTH:-unset}"
-          log_ok "All steps executed (no skip). Any failures were logged but did not stop pipeline."
-
+          log_ok "Some steps may have failed, but pipeline reached the final checkpoint by design."
           exit 0
