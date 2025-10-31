@@ -1,4 +1,4 @@
-name: "🔄 Concurrency Control + Runner Self-Heal + Auto-Retry"
+name: "🔄 Concurrency Control + Runner Self-Heal + Auto-Retry (Stable Logs)"
 
 on:
   push:
@@ -8,8 +8,6 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # 같은 브랜치/같은 워크플로우 안에서는 항상 최신 실행만 남기고
-  # 이전 실행(진행 중/대기 중)은 취소
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -21,8 +19,6 @@ env:
 jobs:
   ##########################################################################
   # 0. 러너 상태 점검 & 청소
-  #    - 디스크/메모리 사용률, docker 잔재, 캐시 등 점검
-  #    - 가능하면 정리해서 "러너가 꽉 차서 죽는 상황"을 완화
   ##########################################################################
   prep_and_clean:
     name: "Runner Pre-Check / Cleanup"
@@ -31,8 +27,9 @@ jobs:
     outputs:
       disk_ok: ${{ steps.check.outputs.disk_ok }}
       mem_ok:  ${{ steps.check.outputs.mem_ok }}
+
     steps:
-      - name: Prep dirs
+      - name: Prep dirs (initial)
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -43,6 +40,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+
           {
             echo "=== RUNNER SNAPSHOT (BEFORE CLEANUP) ==="
             echo "--- uname -a"
@@ -66,9 +66,13 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+
           echo ">>> docker system prune -af (safe cleanup)" | tee "${LOG_DIR}/01_cleanup.txt"
           docker system prune -af || true
           docker volume prune -f || true
+
           echo ">>> apt-get clean / autoremove" | tee -a "${LOG_DIR}/01_cleanup.txt"
           sudo apt-get clean || true
           sudo apt-get autoremove -y || true
@@ -78,8 +82,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
 
-          # 기본 임계값 - 디스크 여유 2GB 이상, 메모리 여유 512MB 이상 있으면 OK로 간주
           DISK_AVAIL_GB=$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')
           MEM_FREE_MB=$(free -m | awk '/Mem:/ {print $4}')
 
@@ -115,6 +120,7 @@ jobs:
             ${{ env.LOG_DIR }}/.keep
           if-no-files-found: warn
 
+
   ##########################################################################
   # 1. 실제 작업 1차 시도
   ##########################################################################
@@ -122,24 +128,43 @@ jobs:
     name: "Build & Test (Attempt 1)"
     runs-on: ubuntu-latest
     needs: prep_and_clean
-    continue-on-error: true   # 실패해도 워크플로우는 계속 진행
+    continue-on-error: true
     outputs:
       attempt1_status: ${{ steps.mark.outputs.attempt1_status }}
+
     steps:
-      - name: Prep dirs
+      # checkout이 워크스페이스를 초기화하면서 우리가 만든 LOG_DIR을 지울 수 있으므로
+      # checkout을 항상 먼저 하고, 그 다음 다시 mkdir -p
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Prep dirs (post-checkout)
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
           touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
 
-      - name: Checkout code
-        uses: actions/checkout@v4
+          # 추가적으로 파이프라인 / 컨텍스트 요약도 남겨두면 좋음
+          {
+            echo "=== PIPELINE CONTEXT (ATTEMPT 1) ==="
+            echo "EVENT_NAME=${{ github.event_name }}"
+            echo "REF=${{ github.ref }}"
+            echo "SHA=${{ github.sha }}"
+            echo "ACTOR=${{ github.actor }}"
+            echo "RUN_ID=${{ github.run_id }}"
+            echo "RUN_NUMBER=${{ github.run_number }}"
+            echo "WORKFLOW=${{ github.workflow }}"
+            echo "TZ=$TZ"
+          } | tee "${LOG_DIR}/09_attempt1_context.txt"
 
       - name: Runner snapshot (attempt1 start)
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+
           {
             echo "=== RUNNER SNAPSHOT (ATTEMPT 1 START) ==="
             df -h || true
@@ -151,14 +176,17 @@ jobs:
         id: buildtest
         shell: bash
         run: |
+          # 여기서 -e를 걸면 중간 실패시 바로 죽기 때문에,
+          # 실제 CI 작업에 따라 조정 가능. 여기서는 죽지 않게 -Eeuo pipefail 그대로 사용
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+
           echo "⚙ Attempt #1 running on ${{ github.ref }} (commit ${{ github.sha }})" \
             | tee "${LOG_DIR}/11_attempt1_run.txt"
 
-          # 여기서 실제 빌드/테스트 로직을 넣으면 됩니다.
-          # 예: maven 빌드, npm ci && npm test, docker build 등
-          # 지금은 예시로 일부러 긴 작업 흉내:
-          echo "Simulating heavy workload..."
+          # 실제 작업(빌드/테스트/도커 등) 넣을 부분
+          echo "Simulating heavy workload in attempt #1..."
           sleep 60
 
           echo "Attempt #1 work finished." | tee -a "${LOG_DIR}/11_attempt1_run.txt"
@@ -168,13 +196,15 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          # 여기서는 간단히 "success"로 남기지만,
-          # 실제로는 위 단계가 실패했는지 $?를 체크해서 기록할 수 있습니다.
-          # 예: if [ "${{ steps.buildtest.outcome }}" != "success" ]; then ...
-          # GitHub Actions에서 outcome을 직접 변수로 못쓰니, try/catch 패턴으로 캡처하려면
-          # 위 build/test 단계에서 종료코드 관리하면 됩니다.
-          # 현재는 0으로 종료했으므로 success
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+
+          # 여기서 실패 감지 로직을 커스터마이즈 가능:
+          # 예: 빌드 단계에서 echo "::error::"가 있었는지 검사하거나,
+          #     빌드 exit code를 잡아두고 비교.
+          # 현재는 성공 가정.
           STATUS="success"
+
           echo "attempt1_status=$STATUS" >> $GITHUB_OUTPUT
           echo "attempt1_status=$STATUS" | tee "${LOG_DIR}/12_attempt1_status.txt"
 
@@ -184,17 +214,16 @@ jobs:
         with:
           name: attempt1-logs
           path: |
+            ${{ env.LOG_DIR }}/09_attempt1_context.txt
             ${{ env.LOG_DIR }}/10_snapshot_attempt1_start.txt
             ${{ env.LOG_DIR }}/11_attempt1_run.txt
             ${{ env.LOG_DIR }}/12_attempt1_status.txt
             ${{ env.LOG_DIR }}/.keep
           if-no-files-found: warn
 
+
   ##########################################################################
-  # 2. 자동 재시도 (Attempt 2)
-  #    - Attempt 1이 "실패"일 때만 실행하도록 설계
-  #    - 여기서는 attempt1_status != success 일 때만 실행되도록 조건부 처리
-  #    - 위 예시는 항상 success로 마킹되어 있어서 실제로는 실행 안 될 것.
+  # 2. 자동 재시도 (2차 시도)
   ##########################################################################
   job_attempt_2:
     name: "Build & Test (Attempt 2 / Self-Heal Retry)"
@@ -202,21 +231,37 @@ jobs:
     needs: [prep_and_clean, job_attempt_1]
     if: ${{ needs.job_attempt_1.outputs.attempt1_status != 'success' }}
     continue-on-error: true
+
     steps:
-      - name: Prep dirs
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Prep dirs (post-checkout)
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
           touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
 
-      - name: Checkout code
-        uses: actions/checkout@v4
+          {
+            echo "=== PIPELINE CONTEXT (ATTEMPT 2) ==="
+            echo "EVENT_NAME=${{ github.event_name }}"
+            echo "REF=${{ github.ref }}"
+            echo "SHA=${{ github.sha }}"
+            echo "ACTOR=${{ github.actor }}"
+            echo "RUN_ID=${{ github.run_id }}"
+            echo "RUN_NUMBER=${{ github.run_number }}"
+            echo "WORKFLOW=${{ github.workflow }}"
+            echo "TZ=$TZ"
+          } | tee "${LOG_DIR}/19_attempt2_context.txt"
 
       - name: Runner snapshot (attempt2 start)
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+
           {
             echo "=== RUNNER SNAPSHOT (ATTEMPT 2 START) ==="
             df -h || true
@@ -228,12 +273,13 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "⚠ Attempt #2 retry due to resource or previous failure" \
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+
+          echo "⚠ Attempt #2 retry due to resource/previous failure" \
             | tee "${LOG_DIR}/21_attempt2_run.txt"
 
-          # 재시도 로직 (동일 빌드/테스트 다시 실행)
-          # 예시: sleep 으로 시뮬레이션
-          echo "Retrying heavy workload..."
+          echo "Retrying heavy workload in attempt #2..."
           sleep 60
 
           echo "Attempt #2 finished." | tee -a "${LOG_DIR}/21_attempt2_run.txt"
@@ -244,15 +290,15 @@ jobs:
         with:
           name: attempt2-logs
           path: |
+            ${{ env.LOG_DIR }}/19_attempt2_context.txt
             ${{ env.LOG_DIR }}/20_snapshot_attempt2_start.txt
             ${{ env.LOG_DIR }}/21_attempt2_run.txt
             ${{ env.LOG_DIR }}/.keep
           if-no-files-found: warn
 
+
   ##########################################################################
-  # 3. 최종 리포트/스냅샷 업로드
-  #    - prep_and_clean, attempt_1, attempt_2 (조건부) 실행 결과를 종합
-  #    - 항상 실행해서 최종 상태 추적 가능
+  # 3. 최종 요약 및 전체 로그 번들 업로드
   ##########################################################################
   final_report:
     name: "Final Report / Collected Evidence"
@@ -262,8 +308,9 @@ jobs:
       - job_attempt_1
       - job_attempt_2
     if: always()
+
     steps:
-      - name: Prep dirs
+      - name: Prep dirs (final stage)
         shell: bash
         run: |
           set -Eeuo pipefail
