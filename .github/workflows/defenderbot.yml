@@ -1,4 +1,4 @@
-name: "🛡️ DefenderBot — FULL PIPELINE (Build→Docker→Release→Upgrade, No-Skip, Safe-Continue)"
+name: "🛡️ DefenderBot — FULL PIPELINE (Build→Docker→Release→Upgrade, No-Skip, Safe-Continue, Stable Dirs)"
 
 on:
   push:
@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag (ex: v1.2.3). 빈 값이면 자동으로 manual-<sha7> 사용"
+        description: "Release tag (ex: v1.2.3). 빈 값이면 manual-<sha7>"
         required: false
         default: ""
       image_tag:
@@ -23,17 +23,17 @@ on:
         required: false
         default: ""
       upgrade:
-        description: "원격 업그레이드 시도 여부(true/false). 값 없어도 전체 파이프라인은 항상 진행"
+        description: "원격 업그레이드 시도 여부(true/false). 없어도 전체 파이프라인은 항상 진행"
         required: false
         default: "false"
       distro_image:
-        description: "추가 base 이미지 빌드 요청 (ubuntu|ubi|none). 값 없어도 전체 파이프라인은 항상 진행"
+        description: "추가 base 이미지 빌드 (ubuntu|ubi|none)"
         required: false
         default: "none"
 
 permissions:
-  contents: write      # release 생성/업데이트에 필요
-  packages: write      # GHCR push
+  contents: write      # GH Release에 필요
+  packages: write      # GHCR push에 필요
   id-token: write      # (확장용: OIDC 등)
 
 env:
@@ -57,24 +57,29 @@ jobs:
   full-pipeline:
     name: "DefenderBot Full Pipeline (No-Skip Everything)"
     runs-on: ubuntu-24.04
-    continue-on-error: true   # 최악의 경우라도 job 자체는 성공 비슷하게 보이게 (전체 파이프라인은 끝까지 수행)
+    continue-on-error: true   # 최악이어도 job 자체는 녹색에 가깝게 유지
 
     steps:
       ########################################################################
-      # 0. 준비 (디렉토리/로깅)
+      # 0. Checkout 먼저 (중요: .github 디렉토리 덮어쓰기로 우리가 만든 폴더 사라지는 문제 방지)
       ########################################################################
-      - name: Prep audit dirs
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      ########################################################################
+      # 1. 공용 디렉토리 준비 (checkout 이후에 반드시 다시 mkdir -p!!)
+      ########################################################################
+      - name: Prep audit dirs (post-checkout)
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" target "${DIST_DIR}"
           echo "[`date '+%Y-%m-%d %H:%M:%S%z'`] pipeline.start" | tee "${LOG_DIR}/00_pipeline_start.log"
-
-      - name: Checkout source
-        uses: actions/checkout@v4
+          # 업로드 경로에 최소 .keep 파일도 만들어둠
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
 
       ########################################################################
-      # 1. Maven Build (절대 스킵 안 함)
+      # 2. Maven Build
       ########################################################################
       - name: Set up Temurin JDK
         uses: actions/setup-java@v4
@@ -88,6 +93,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          # 디렉토리 보강 (혹시라도 이전 단계에서 누락되거나 나중에 뭔가가 지워졌어도 다시 생성)
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" target "${DIST_DIR}"
+
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             CMD="mvn -q -DskipTests package"
           else
@@ -95,6 +103,7 @@ jobs:
           fi
 
           echo "▶ Running: $CMD" | tee "${LOG_DIR}/10_maven_cmd.log"
+
           if $CMD 2>&1 | tee "${LOG_DIR}/11_maven_build_full.log"; then
             echo "build_status=success" >> $GITHUB_OUTPUT
             echo "[OK] Maven build success" | tee -a "${LOG_DIR}/11_maven_build_full.log"
@@ -103,23 +112,26 @@ jobs:
             echo "[WARN] Maven build failed, pipeline continues" | tee -a "${LOG_DIR}/11_maven_build_full.log"
           fi
 
-          # JAR 확보/대체
+          # jar 산출물 확보
           REAL_JAR="$(ls target/*.jar 2>/dev/null | head -n1 || true)"
           if [[ -n "$REAL_JAR" ]]; then
             cp -f "$REAL_JAR" "${{ env.TARGET_JAR }}" || true
           fi
 
-          # 빌드 실패 시 dummy jar 강제 생성해서 이후 Docker 단계가 절대 막히지 않게 함
+          # 빌드 실패해도 docker 단계가 깨지지 않도록 dummy jar 생성
           if [[ ! -f "${{ env.TARGET_JAR }}" ]]; then
             echo "[WARN] No real JAR found, creating dummy jar" | tee -a "${LOG_DIR}/11_maven_build_full.log"
-            echo "This is a dummy JAR placeholder because build failed $(date '+%Y-%m-%d %H:%M:%S%z')" > dummy.txt
+            echo "Dummy JAR placeholder because build failed $(date '+%Y-%m-%d %H:%M:%S%z')" > dummy.txt
             zip -q -j "${{ env.TARGET_JAR }}" dummy.txt || true
           fi
 
-          # 실패 흔적 저장
+          # 실패 흔적 파일
           if [[ "$(cat $GITHUB_OUTPUT | grep build_status | cut -d= -f2)" != "success" ]]; then
             echo "BUILD_FAILED_AT=$(date '+%Y-%m-%d %H:%M:%S%z')" > target/BUILD_FAILED.txt
           fi
+
+          # 안전하게 .keep 다시
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" target/.keep "${DIST_DIR}/.keep"
 
       - name: Upload build logs/artifacts snapshot
         if: always()
@@ -129,12 +141,14 @@ jobs:
           path: |
             ${{ env.LOG_DIR }}/10_maven_cmd.log
             ${{ env.LOG_DIR }}/11_maven_build_full.log
+            ${{ env.LOG_DIR }}/.keep
             target/BUILD_FAILED.txt
+            target/.keep
             ${{ env.TARGET_JAR }}
           if-no-files-found: warn
 
       ########################################################################
-      # 2. Docker Build & Push (절대 스킵 안 함)
+      # 3. Docker Build & Push
       ########################################################################
       - name: Setup QEMU
         uses: docker/setup-qemu-action@v3
@@ -152,21 +166,21 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
-      # 최종 이미지 태그 계산:
-      #   1) workflow_dispatch 인 경우 inputs.image_tag 우선
-      #   2) 그 외 sha-<7>
       - name: Compute image tag
         id: image_tag_calc
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" target "${DIST_DIR}"
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" target/.keep "${DIST_DIR}/.keep"
+
           SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
           FINAL_TAG="sha-${SHORT_SHA}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            if [[ -n "${{ github.event.inputs.image_tag }}" ]]; then
-              FINAL_TAG="${{ github.event.inputs.image_tag }}"
-            fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.image_tag }}" ]]; then
+            FINAL_TAG="${{ github.event.inputs.image_tag }}"
           fi
+
           echo "final_tag=$FINAL_TAG" >> $GITHUB_OUTPUT
           echo "IMAGE_TAG_FINAL=$FINAL_TAG" | tee "${LOG_DIR}/20_image_tag.log"
 
@@ -174,6 +188,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" target "${DIST_DIR}"
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" target/.keep "${DIST_DIR}/.keep"
+
           IMG_TAG="${{ steps.image_tag_calc.outputs.final_tag }}"
           IMAGE_FULL="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMG_TAG}"
 
@@ -189,12 +206,13 @@ jobs:
           docker images 2>&1 | tee "${LOG_DIR}/22_docker_images_after_main.log" || true
           docker history "${IMAGE_FULL}" 2>&1 | tee "${LOG_DIR}/23_docker_history_main.log" || true
 
-      # distro_image(ubuntu|ubi|none)도 항상 시도.
-      # 단, Dockerfile이 없으면 실패하지 않고 경고만 남기고 계속 진행.
       - name: Optionally build distro images (ubuntu / ubi)
         shell: bash
         run: |
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" target "${DIST_DIR}"
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" target/.keep "${DIST_DIR}/.keep"
+
           DISTRO_REQ="none"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             DISTRO_REQ="${{ github.event.inputs.distro_image }}"
@@ -242,22 +260,23 @@ jobs:
             ${{ env.LOG_DIR }}/22_docker_images_after_main.log
             ${{ env.LOG_DIR }}/23_docker_history_main.log
             ${{ env.LOG_DIR }}/24_distro_build.log
+            ${{ env.LOG_DIR }}/.keep
           if-no-files-found: warn
 
       ########################################################################
-      # 3. Release 생성 (항상 시도)
+      # 4. Release 생성
       ########################################################################
       - name: Prepare dist dir & checksum
         id: release_prep
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p "${DIST_DIR}"
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${DIST_DIR}" target
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
 
           echo "▶ Copy final JAR to dist" | tee "${LOG_DIR}/30_release_prep.log"
           cp -f "${{ env.TARGET_JAR }}" "${DIST_DIR}/" 2>>"${LOG_DIR}/30_release_prep.log" || true
 
-          # checksum 생성 (JAR 유무 상관없이 시도)
           if ls "${DIST_DIR}"/*.jar >/dev/null 2>&1; then
             for f in "${DIST_DIR}"/*.jar; do
               sha256sum "$f" > "$f.sha256" || true
@@ -266,10 +285,6 @@ jobs:
             echo "[WARN] no jar in dist for checksum" | tee -a "${LOG_DIR}/30_release_prep.log"
           fi
 
-          # Release tag 결정:
-          # 1) workflow_dispatch + release_tag 입력값
-          # 2) 현재 ref가 태그(refs/tags/...)라면 그 태그
-          # 3) fallback: manual-<sha7>
           SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
           FALLBACK="manual-${SHORT_SHA}"
           FINAL_REL_TAG="$FALLBACK"
@@ -290,8 +305,10 @@ jobs:
           name: defenderbot-release-prep-step
           path: |
             ${{ env.LOG_DIR }}/30_release_prep.log
+            ${{ env.LOG_DIR }}/.keep
             ${{ env.DIST_DIR }}/*.jar
             ${{ env.DIST_DIR }}/*.sha256
+            ${{ env.DIST_DIR }}/.keep
           if-no-files-found: warn
 
       - name: Create / Update GitHub Release
@@ -304,10 +321,10 @@ jobs:
           files: |
             ${{ env.DIST_DIR }}/*.jar
             ${{ env.DIST_DIR }}/*.sha256
-        continue-on-error: true   # 릴리스 실패해도 파이프라인은 계속
+        continue-on-error: true   # 릴리스 실패해도 계속
 
       ########################################################################
-      # 4. Remote Upgrade (항상 시도하되, ssh-agent 사용 X)
+      # 5. Remote Upgrade (ssh-agent 없이, 항상 시도하되 soft-pass)
       ########################################################################
       - name: Install SSH client
         shell: bash
@@ -315,6 +332,8 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get update -y
           sudo apt-get install -y openssh-client || true
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${DIST_DIR}" target
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
           echo "[OK] ssh client ready" | tee "${LOG_DIR}/40_upgrade_sshclient.log"
 
       - name: Compute upgrade enable & tag
@@ -322,7 +341,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          # 업그레이드 요청 여부 (workflow_dispatch 에서 upgrade=true)
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${DIST_DIR}" target
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
+
           UPG_REQ="false"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.upgrade }}" == "true" ]]; then
             UPG_REQ="true"
@@ -347,6 +368,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p ~/.ssh
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${DIST_DIR}" target
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
+
           if [[ -n "${{ secrets.SERVER_HOST }}" ]]; then
             ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts || true
             echo "known_hosts updated for ${{ secrets.SERVER_HOST }}" | tee "${LOG_DIR}/42_known_hosts.log"
@@ -362,14 +386,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${DIST_DIR}" target
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
 
           echo ">>> REMOTE UPGRADE STEP"          | tee "${LOG_DIR}/43_remote_upgrade.log"
           echo "SERVER_HOST=${SERVER_HOST}"      | tee -a "${LOG_DIR}/43_remote_upgrade.log"
           echo "SERVER_USER=${SERVER_USER}"      | tee -a "${LOG_DIR}/43_remote_upgrade.log"
 
-          # 조건을 만족하지 못하면 그냥 soft-pass
           if [[ "${{ steps.upgrade_calc.outputs.upgrade_request }}" != "true" ]]; then
-            echo "[INFO] upgrade_request != true, skipping remote deploy logic (soft-pass)" | tee -a "${LOG_DIR}/43_remote_upgrade.log"
+            echo "[INFO] upgrade_request != true, soft-pass" | tee -a "${LOG_DIR}/43_remote_upgrade.log"
             exit 0
           fi
           if [[ -z "${SERVER_HOST}" || -z "${SERVER_USER}" || -z "${GITHUB_TOKEN}" ]]; then
@@ -381,8 +406,7 @@ jobs:
           REMOTE_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMG_TAG}"
           echo "[INFO] Using remote image ${REMOTE_IMAGE}" | tee -a "${LOG_DIR}/43_remote_upgrade.log"
 
-          # 여기서 ssh-agent를 쓰지 않고 ssh 기본키(default key)로 접근 시도
-          # 만약 러너에 key가 없으면 그냥 실패하고 || true 로 soft-pass
+          # ssh-agent 없이 기본 ssh 키로만 시도. 실패해도 || true 로 계속.
           ssh -o StrictHostKeyChecking=yes "${SERVER_USER}@${SERVER_HOST}" bash -lc "
             set -Eeuo pipefail
             echo '--- Remote Upgrade Script Started ---'
@@ -414,11 +438,21 @@ jobs:
             ${{ env.LOG_DIR }}/41_upgrade_calc.log
             ${{ env.LOG_DIR }}/42_known_hosts.log
             ${{ env.LOG_DIR }}/43_remote_upgrade.log
+            ${{ env.LOG_DIR }}/.keep
           if-no-files-found: warn
 
       ########################################################################
-      # 5. FINAL PIPELINE SNAPSHOT (전체 로그 모음)
+      # 6. FINAL PIPELINE SNAPSHOT (모든 것)
       ########################################################################
+      - name: Final ensure dirs + .keep
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${DIST_DIR}" target
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
+          echo "[`date '+%Y-%m-%d %H:%M:%S%z'`] pipeline.end (ALL STEPS ATTEMPTED)" \
+            | tee "${LOG_DIR}/99_pipeline_end.log"
+
       - name: Upload ALL logs/final snapshot
         if: always()
         uses: actions/upload-artifact@v4
@@ -427,12 +461,6 @@ jobs:
           path: |
             ${{ env.LOG_DIR }}/
             ${{ env.ARTIFACT_DIR }}/
-            target/
             ${{ env.DIST_DIR }}/
+            target/
           if-no-files-found: warn
-
-      - name: Mark pipeline end
-        shell: bash
-        run: |
-          echo "[`date '+%Y-%m-%d %H:%M:%S%z'`] pipeline.end (ALL STEPS ATTEMPTED)" \
-            | tee "${LOG_DIR}/99_pipeline_end.log"
