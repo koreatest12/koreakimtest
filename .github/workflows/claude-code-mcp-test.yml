@@ -1,4 +1,4 @@
-name: "🧪 Claude Code — MCP MEGA++++ + Banking Pipeline (PG COPY • 파티션 자동화 • 권한/롤 • 성능 그래프 • 멀티DB • 만전 대비)"
+name: "🧪 Claude Code — MCP MEGA++++ + Banking Pipeline (PG COPY • 파티션 자동화 • 권한/롤 • 성능 그래프 • 멀티DB • 만전 대비 • PATH/런타임 스냅샷)"
 
 on:
   push:
@@ -43,17 +43,28 @@ env:
   PG_DSN: postgres://postgres:pass@localhost:5432/mcpdb
 
 jobs:
-  # ───────────────────────────────────────────────────────────────
-  # 1) MEGA++++ — Claude Code용 MCP 서버 + PG COPY + 보고서 + 만전대비
-  # ───────────────────────────────────────────────────────────────
+  ###########################################################################
+  # 1) MCP MEGA + Claude Code + PG COPY + 보고서 + 만전 대비 + PATH 스냅샷
+  ###########################################################################
   mcp-mega:
     runs-on: ubuntu-24.04
+    env:
+      # workflow_dispatch 에서만 inputs가 있지만
+      # push/pull_request 시에는 inputs.* 가 비어있음 → 안전한 기본값 직접 부여
+      NODE_VERSION_FALLBACK: "20"
+      PY_VERSION_FALLBACK: "3.12"
+      NODE_VERSION_INPUT: ${{ inputs.node_version }}
+      PY_VERSION_INPUT: ${{ inputs.python_version }}
+      DB_PATH_INPUT: ${{ inputs.db_path }}
+      CSV_ROWS_INPUT: ${{ inputs.csv_rows }}
+      BATCH_SIZE_INPUT: ${{ inputs.batch_size }}
+      USE_COPY_INPUT: ${{ inputs.use_copy }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         continue-on-error: true
 
-      # PRE-FLIGHT HARDEN: 필수 디렉토리/파일/스냅샷 선제 생성
+      # PRE-FLIGHT HARDEN + 경로/환경 스냅샷 (만전 대비)
       - name: Prepare service state (pre-flight harden)
         shell: bash
         continue-on-error: true
@@ -67,25 +78,7 @@ jobs:
 
           touch "$LOG_DIR/.keep" "$ARTIFACT_DIR/.keep"
 
-          # 사전 스냅샷 (증적)
-          {
-            echo "=== PRE-FLIGHT SERVICE SNAPSHOT ==="
-            echo "workflow=${{ github.workflow }}"
-            echo "job=mcp-mega"
-            echo "runner_uname=$(uname -a)"
-            echo "pwd_now=$(pwd)"
-            echo "whoami_now=$(whoami)"
-            echo "node_ver_will=${{ inputs.node_version }}"
-            echo "python_ver_will=${{ inputs.python_version }}"
-            echo "pg_image=${PG_IMAGE}"
-            echo "pg_container=${PG_CONTAINER}"
-            echo "TZ=$TZ"
-            echo "LOG_DIR=$LOG_DIR"
-            echo "ARTIFACT_DIR=$ARTIFACT_DIR"
-            echo "MCP_DIR=$MCP_DIR"
-          } | tee "${LOG_DIR}/00_preflight_mcp.txt"
-
-          # placeholder 아티팩트 선제 생성
+          # placeholder 산출물 확보
           : > "${ARTIFACT_DIR}/transactions_bulk.csv" || true
           : > "${ARTIFACT_DIR}/benchmark_sqlite.json" || true
           : > "${ARTIFACT_DIR}/benchmark_pg.json" || true
@@ -93,9 +86,34 @@ jobs:
           : > "${ARTIFACT_DIR}/report.html" || true
 
           {
-            echo "[OK] base dirs created"
-            echo "[OK] placeholder artifacts touched"
-          } >> "${LOG_DIR}/00_preflight_mcp.txt" 2>&1 || true
+            echo "=== PRE-FLIGHT SERVICE SNAPSHOT ==="
+            echo "workflow=${{ github.workflow }}"
+            echo "job=mcp-mega"
+            echo "runner=$(uname -a)"
+            echo "pwd_now=$(pwd)"
+            echo "whoami_now=$(whoami)"
+            echo "TZ=$TZ"
+            echo "LOG_DIR=$LOG_DIR"
+            echo "ARTIFACT_DIR=$ARTIFACT_DIR"
+            echo "MCP_DIR=$MCP_DIR"
+
+            echo "PG_IMAGE=${PG_IMAGE}"
+            echo "PG_CONTAINER=${PG_CONTAINER}"
+            echo "PG_DSN=${PG_DSN}"
+
+            echo "RAW_NODE_VERSION_INPUT='${{ env.NODE_VERSION_INPUT }}'"
+            echo "RAW_PY_VERSION_INPUT='${{ env.PY_VERSION_INPUT }}'"
+            echo "NODE_VERSION_EFFECTIVE='${{ env.NODE_VERSION_INPUT || env.NODE_VERSION_FALLBACK }}'"
+            echo "PY_VERSION_EFFECTIVE='${{ env.PY_VERSION_INPUT || env.PY_VERSION_FALLBACK }}'"
+
+            echo "DB_PATH_INPUT='${{ env.DB_PATH_INPUT }}'"
+            echo "CSV_ROWS_INPUT='${{ env.CSV_ROWS_INPUT }}'"
+            echo "BATCH_SIZE_INPUT='${{ env.BATCH_SIZE_INPUT }}'"
+            echo "USE_COPY_INPUT='${{ env.USE_COPY_INPUT }}'"
+
+            echo "--- INITIAL ENV PATH ---"
+            echo "$PATH"
+          } | tee "${LOG_DIR}/00_preflight_mcp.txt"
 
       - name: Prepare dirs & echo helpers
         shell: bash
@@ -106,6 +124,7 @@ jobs:
                    "$MCP_DIR/migrations/00_common" \
                    "$MCP_DIR/migrations/10_post_bulk/common" \
                    "$MCP_DIR/migrations/10_post_bulk/pg"
+
           cat > /tmp/echo_helpers.sh <<'SH'
           #!/usr/bin/env bash
           TS(){ date "+%Y-%m-%d %H:%M:%S%z"; }
@@ -138,17 +157,49 @@ jobs:
           source /tmp/echo_helpers.sh
           OK "Directories + echo helpers ready"
 
+      # Node 버전은 inputs.node_version 있으면 그걸 쓰고, push/PR에서는 fallback
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ inputs.node_version }}
+          node-version: ${{ inputs.node_version != '' && inputs.node_version || env.NODE_VERSION_FALLBACK }}
         continue-on-error: true
 
-      - name: Setup Python (optional)
+      # Python도 동일하게 fallback. 이 단계가 실제 PATH에 python을 올림.
+      - name: Setup Python runtime
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ inputs.python_version }}
+          python-version: ${{ inputs.python_version != '' && inputs.python_version || env.PY_VERSION_FALLBACK }}
+      # 위 경고(`python-version` 입력이 설정되지 않았습니다...) 방지:
+      # push/PR에서는 fallback 값으로 고정되고, dispatch 시에는 사용자가 준 값으로 고정됨.
         continue-on-error: true
+
+      # runtime PATH / 바이너리 버전 증적 (만전 대비)
+      - name: Runtime PATH / versions snapshot
+        shell: bash
+        continue-on-error: true
+        run: |
+          source /tmp/echo_helpers.sh
+          {
+            echo "=== RUNTIME SNAPSHOT AFTER setup-node & setup-python ==="
+            echo "--- PATH ---"
+            echo "$PATH"
+            echo "--- which node/python ---"
+            which node || true
+            which npm || true
+            which python || true
+            which python3 || true
+            which pip || true
+            which pip3 || true
+            echo "--- versions ---"
+            node --version || true
+            npm --version || true
+            python --version || python3 --version || true
+            pip --version || pip3 --version || true
+            echo "--- env NODE_VERSION_EFFECTIVE ---"
+            echo "${{ inputs.node_version != '' && inputs.node_version || env.NODE_VERSION_FALLBACK }}"
+            echo "--- env PY_VERSION_EFFECTIVE ---"
+            echo "${{ inputs.python_version != '' && inputs.python_version || env.PY_VERSION_FALLBACK }}"
+          } | tee "${LOG_DIR}/01_runtime_snapshot.txt"
 
       - name: Start PostgreSQL container
         shell: bash
@@ -165,7 +216,6 @@ jobs:
             -e POSTGRES_DB="${PG_DB}" \
             -p "${PG_PORT}:5432" "${PG_IMAGE}"
 
-          # readiness loop
           for i in {1..30}; do
             if docker exec "${PG_CONTAINER}" pg_isready -U "${PG_USER}" >/dev/null 2>&1; then
               OK "Postgres is ready"
@@ -174,26 +224,24 @@ jobs:
             sleep 2
           done
 
-          # 1차 연결 확인
           docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" \
             -c "SELECT NOW() AS pg_now, current_database() AS db, current_user AS usr;" \
             | tee "${LOG_DIR}/pg_healthcheck.log" || true
 
-          # dsn 저장
           echo "${PG_DSN}" > "$ARTIFACT_DIR/pg_dsn.txt"
 
-          # 컨테이너 상태 스냅샷
           docker ps -a | tee "${LOG_DIR}/pg_container_status.log" || true
 
       - name: Generate CSV (대량·RFC4180)
         shell: bash
         continue-on-error: true
         env:
-          CSV_ROWS: ${{ inputs.csv_rows }}
+          CSV_ROWS: ${{ inputs.csv_rows != '' && inputs.csv_rows || env.CSV_ROWS_INPUT || '20000' }}
         run: |
           source /tmp/echo_helpers.sh
           CSV="$ARTIFACT_DIR/transactions_bulk.csv"
           echo "id,customer_id,bank_id,account_id,merchant_id,ts,memo,amount" > "$CSV"
+
           rows=${CSV_ROWS:-20000}
           for i in $(seq 1 $rows); do
             cust=$(( (i % 100) + 1 ))
@@ -204,11 +252,11 @@ jobs:
             memo="seed-${i}"
             if (( i % 200 == 0 )); then memo="\"memo, with, commas ${i}\""; fi
             if (( i % 333 == 0 )); then memo="\"quote \"\"inside\"\" ${i}\""; fi
+
             echo "$i,$cust,$bank,$acc,$mer,$(date -u +%Y-%m-%dT%H:%M:%SZ),$memo,$amt" >> "$CSV"
           done
-          OK "Generated CSV: $CSV (rows=$rows)"
 
-          # 무결성/샘플 스냅샷
+          OK "Generated CSV: $CSV (rows=$rows)"
           ls -lh "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
           head -n 5 "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
           tail -n 5 "$CSV" | tee -a "${LOG_DIR}/csv_gen.log" || true
@@ -219,7 +267,7 @@ jobs:
         run: |
           source /tmp/echo_helpers.sh
 
-          # ---------- 00_common ----------
+          # 00_common
           cat > "$MCP_DIR/migrations/00_common/001_core.sql" <<'SQL'
           CREATE TABLE IF NOT EXISTS customers(
             id INTEGER PRIMARY KEY,
@@ -260,7 +308,7 @@ jobs:
           );
           SQL
 
-          # ---------- 10_post_bulk/common ----------
+          # 10_post_bulk/common
           cat > "$MCP_DIR/migrations/10_post_bulk/common/030_indexes.sql" <<'SQL'
           CREATE INDEX IF NOT EXISTS idx_tx_customer ON transactions(customer_id);
           CREATE INDEX IF NOT EXISTS idx_tx_account  ON transactions(account_id);
@@ -269,7 +317,7 @@ jobs:
           CREATE INDEX IF NOT EXISTS idx_tx_ts       ON transactions(ts);
           SQL
 
-          # ---------- 10_post_bulk/pg ----------
+          # 10_post_bulk/pg
           cat > "$MCP_DIR/migrations/10_post_bulk/pg/020_roles_privs.sql" <<'SQL'
           DO $$
           BEGIN
@@ -334,7 +382,15 @@ jobs:
           CREATE OR REPLACE FUNCTION trg_route_transactions() RETURNS trigger AS $$
           BEGIN
             INSERT INTO transactions_p(customer_id, bank_id, account_id, merchant_id, ts, memo, amount)
-              VALUES (NEW.customer_id, NEW.bank_id, NEW.account_id, NEW.merchant_id, COALESCE(NEW.ts::timestamp, now()), NEW.memo, NEW.amount);
+              VALUES (
+                NEW.customer_id,
+                NEW.bank_id,
+                NEW.account_id,
+                NEW.merchant_id,
+                COALESCE(NEW.ts::timestamp, now()),
+                NEW.memo,
+                NEW.amount
+              );
             RETURN NULL;
           END
           $$ LANGUAGE plpgsql;
@@ -402,7 +458,7 @@ jobs:
         shell: bash
         continue-on-error: true
         env:
-          BATCH_SIZE: ${{ inputs.batch_size }}
+          BATCH_SIZE_ENV: ${{ inputs.batch_size != '' && inputs.batch_size || env.BATCH_SIZE_INPUT || '2000' }}
         run: |
           source /tmp/echo_helpers.sh
 
@@ -576,7 +632,7 @@ jobs:
             const cols = parseCSVLine(header);
             const idx = Object.fromEntries(cols.map((c,i)=>[c,i]));
 
-            // Fast path for Postgres COPY
+            // COPY fastpath for pg
             if (engine === "pg" && use_copy){
               await pg.client.query("BEGIN");
               try{
@@ -608,7 +664,7 @@ jobs:
               }
             }
 
-            // Generic path (sqlite or pg without COPY)
+            // generic path
             let loaded = 0, batch = 0;
             await txBegin();
             try{
@@ -859,20 +915,17 @@ jobs:
               const PG_POST = `${MIG_ROOT}/10_post_bulk/pg`;
               await mcp.call("migrate.apply", { dir: PG_POST });
 
-              // refresh matview (attempt CONCURRENTLY, fallback normal)
               await mcp.call("sql.exec", {
                 sql: `REFRESH MATERIALIZED VIEW CONCURRENTLY mv_tx_agg_by_customer;`
               }).catch(()=>mcp.call("sql.exec",{
                 sql:`REFRESH MATERIALIZED VIEW mv_tx_agg_by_customer;`
               }));
 
-              // ensure next month partition
               await mcp.call("sql.exec", {
                 sql: `SELECT ensure_next_month_partition();`
               }).catch(()=>{});
             }
 
-            // sample select
             const sel = await mcp.call("sql.exec", {
               sql:`SELECT customer_id, COUNT(*) AS cnt, SUM(amount) AS sum
                    FROM transactions
@@ -1018,7 +1071,7 @@ jobs:
           console.log("Report generated:", path.join(OUT_DIR, "report.html"));
           JS
 
-          # MCP 설정 (Claude Code에서 mcpServers로 붙일 수 있도록)
+          # MCP 설정
           cat > "$MCP_DIR/mcp.config.json" <<JSON
           {
             "mcpServers": {
@@ -1031,7 +1084,6 @@ jobs:
           }
           JSON
 
-          # install deps (npm install / ci)
           pushd "$MCP_DIR" >/dev/null
           if [ ! -f package-lock.json ]; then
             runlog "npm.install" bash -lc 'npm install --no-audit --no-fund'
@@ -1041,22 +1093,26 @@ jobs:
           runlog "npm.check.deps" bash -lc 'npm run -s check:deps || true'
           popd >/dev/null
 
-      - name: Ensure DB parent dir (SQLite file for sql.js persistence)
+      - name: Ensure DB parent dir (SQLite persistence path)
         shell: bash
         continue-on-error: true
+        env:
+          DB_PATH_FALLBACK: ".github/echo_artifacts/mcp_demo.sqlite"
         run: |
           source /tmp/echo_helpers.sh
-          mkdir -p "$(dirname "${{ inputs.db_path }}")"
-          OK "SQLite DB parent dir ensured"
+          DB_PATH_EFF="${{ inputs.db_path != '' && inputs.db_path || env.DB_PATH_INPUT || env.DB_PATH_FALLBACK }}"
+          mkdir -p "$(dirname "$DB_PATH_EFF")"
+          OK "SQLite DB parent dir ensured: $DB_PATH_EFF"
+          echo "$DB_PATH_EFF" > "$LOG_DIR/db_path_effective.txt"
 
       - name: Run SQLite scenario
         shell: bash
         continue-on-error: true
         env:
-          DB_PATH: ${{ inputs.db_path }}
+          DB_PATH: ${{ inputs.db_path != '' && inputs.db_path || env.DB_PATH_INPUT || '.github/echo_artifacts/mcp_demo.sqlite' }}
           CSV_FILE: ${{ env.ARTIFACT_DIR }}/transactions_bulk.csv
           MIG_ROOT: ${{ env.MCP_DIR }}/migrations
-          BATCH_SIZE: ${{ inputs.batch_size }}
+          BATCH_SIZE: ${{ inputs.batch_size != '' && inputs.batch_size || env.BATCH_SIZE_INPUT || '2000' }}
           USE_COPY: "false"
         run: |
           source /tmp/echo_helpers.sh
@@ -1084,8 +1140,8 @@ jobs:
           PG_DSN: ${{ env.PG_DSN }}
           CSV_FILE: ${{ env.ARTIFACT_DIR }}/transactions_bulk.csv
           MIG_ROOT: ${{ env.MCP_DIR }}/migrations
-          BATCH_SIZE: ${{ inputs.batch_size }}
-          USE_COPY: ${{ inputs.use_copy }}
+          BATCH_SIZE: ${{ inputs.batch_size != '' && inputs.batch_size || env.BATCH_SIZE_INPUT || '2000' }}
+          USE_COPY: ${{ inputs.use_copy != '' && inputs.use_copy || env.USE_COPY_INPUT || true }}
         run: |
           source /tmp/echo_helpers.sh
           pushd "$MCP_DIR" >/dev/null
@@ -1100,7 +1156,6 @@ jobs:
             OK "pg.client: completed (exit=0)"
           fi
 
-          # 컨테이너 내부 상태도 남겨서 증적 확보
           docker exec -i "${PG_CONTAINER}" psql -U "${PG_USER}" -d "${PG_DB}" -c "\dt" \
             > "$LOG_DIR/pg_tables.log" 2>&1 || true
 
@@ -1125,7 +1180,6 @@ jobs:
           runlog "report.build" bash -lc 'node report.js'
           popd >/dev/null
 
-          # 리포트 산출물/벤치 존재 여부까지 로그에 기록
           ls -lh "$ARTIFACT_DIR/report.html" "$ARTIFACT_DIR/report.md" \
             | tee -a "${LOG_DIR}/report_build.log" || true
           head -n 50 "$ARTIFACT_DIR/report.md" \
@@ -1147,15 +1201,22 @@ jobs:
           source /tmp/echo_helpers.sh
           {
             echo "=== RUN SUMMARY ($(date)) ==="
-            echo "sqlite_db=${{ inputs.db_path }}"
+            echo "sqlite_db_effective=$(cat "$LOG_DIR/db_path_effective.txt" 2>/dev/null || echo '(n/a)')"
             echo "pg_dsn=${PG_DSN}"
-            echo "csv_rows=${{ inputs.csv_rows }}, batch_size=${{ inputs.batch_size }}, use_copy=${{ inputs.use_copy }}"
+            echo "csv_rows=${{ inputs.csv_rows || env.CSV_ROWS_INPUT || '20000' }}, batch_size=${{ inputs.batch_size || env.BATCH_SIZE_INPUT || '2000' }}, use_copy=${{ inputs.use_copy || env.USE_COPY_INPUT || true }}"
             echo "roles: finance_admin / finance_writer / finance_reader"
             echo "partitions: transactions_p (monthly), ensure_next_month_partition()"
             echo "--- docker ps -a ---"
             docker ps -a || true
             echo "--- ss -tlnp (ports) ---"
             ss -tlnp || true
+            echo "--- PATH (final) ---"
+            echo "$PATH"
+            echo "--- which node/python ---"
+            which node || true
+            which python || true
+            node --version || true
+            python --version || python3 --version || true
           } | tee "$LOG_DIR/summary.txt"
           OK "Summary generated"
 
@@ -1181,12 +1242,11 @@ jobs:
           ls -R .github/echo_logs || true
           ls -R .github/echo_artifacts || true
           ls -R .github/mcp_demo || true
-          echo "If any step FAILED above, check *.log in artifact mcp-mega-artifacts."
           exit 0
 
-  # ───────────────────────────────────────────────────────────────
-  # 2) Banking Data Pipeline — 멀티DB 매트릭스 + 만전대비
-  # ───────────────────────────────────────────────────────────────
+  ###########################################################################
+  # 2) Banking Data Pipeline — 멀티DB 매트릭스 + 만전 대비 + PATH/런타임 로그
+  ###########################################################################
   banking-data-pipeline:
     runs-on: ubuntu-latest
     strategy:
@@ -1202,7 +1262,6 @@ jobs:
         uses: actions/checkout@v4
         continue-on-error: true
 
-      # PRE-FLIGHT HARDEN (DB별)
       - name: Prepare service state (pre-flight harden)
         shell: bash
         continue-on-error: true
@@ -1218,22 +1277,40 @@ jobs:
             echo "workflow=${{ github.workflow }}"
             echo "job=banking-data-pipeline"
             echo "matrix.db=${{ matrix.db }}"
-            echo "runner_uname=$(uname -a)"
+            echo "runner=$(uname -a)"
             echo "pwd_now=$(pwd)"
             echo "whoami_now=$(whoami)"
             echo "TZ=$TZ"
             echo "LOG_DIR=$LOG_DIR"
             echo "ARTIFACT_DIR=$ARTIFACT_DIR"
+            echo "--- INITIAL PATH ---"
+            echo "$PATH"
           } | tee "${LOG_DIR}/00_preflight_banking_${{ matrix.db }}.txt"
-
-          echo "[OK] dirs & placeholders ready for ${{ matrix.db }}" \
-            >> "${LOG_DIR}/00_preflight_banking_${{ matrix.db }}.txt" 2>&1 || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
         continue-on-error: true
+
+      - name: Runtime PATH / versions snapshot (after python setup)
+        shell: bash
+        continue-on-error: true
+        run: |
+          {
+            echo "=== banking-data-pipeline runtime snapshot (${ { matrix.db } }) ==="
+            echo "--- PATH ---"
+            echo "$PATH"
+            echo "--- which python/pip ---"
+            which python || true
+            which python3 || true
+            which pip || true
+            which pip3 || true
+            echo "--- python --version ---"
+            python --version || python3 --version || true
+            echo "--- pip --version ---"
+            pip --version || pip3 --version || true
+          } | tee -a "$LOG_DIR/bank_ctx_${{ matrix.db }}.log"
 
       - name: Install system clients (psql, mysqlclient)
         shell: bash
@@ -1248,9 +1325,9 @@ jobs:
         continue-on-error: true
         run: |
           set -euxo pipefail
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip || python3 -m pip install --upgrade pip || true
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt || true
+            pip install -r requirements.txt || pip3 install -r requirements.txt || true
           else
             echo "requirements.txt not found; skipping."
           fi
@@ -1321,6 +1398,8 @@ jobs:
             docker ps -a || true
             echo "--- ss -tlnp (ports) ---"
             ss -tlnp || true
+            echo "--- PATH (current) ---"
+            echo "$PATH"
           } | tee -a "$LOG_DIR/bank_ctx_${{ matrix.db }}.log" 2>&1 || true
 
       - name: Run pipeline
@@ -1334,8 +1413,8 @@ jobs:
         continue-on-error: true
         run: |
           set -euxo pipefail
-          # 사용자가 제공한 banking_pipeline.pipeline 을 가정
-          # 결과 로그를 남겨서 증적 확보
+
+          # banking_pipeline.pipeline 은 사용자 제공 패키지를 가정
           python -m banking_pipeline.pipeline \
             --target ${{ matrix.db }} \
             --rows 20000 \
@@ -1343,9 +1422,18 @@ jobs:
             --out artifacts \
             | tee -a "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
 
-          # 산출물 디렉토리 존재 여부/리스트 확보
           ls -R "artifacts/${{ matrix.db }}" \
             | tee -a "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
+
+          {
+            echo "=== POST PIPELINE RUNTIME ==="
+            echo "--- PATH ---"
+            echo "$PATH"
+            echo "--- which python ---"
+            which python || which python3 || true
+            echo "--- python --version ---"
+            python --version || python3 --version || true
+          } | tee -a "$LOG_DIR/pipeline_${{ matrix.db }}.log" || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -1367,5 +1455,4 @@ jobs:
           echo "Artifacts snapshot:"
           ls -R "$LOG_DIR" || true
           ls -R "artifacts/${{ matrix.db }}" || true
-          echo "Check 'reports-${{ matrix.db }}' artifact for DB-specific evidence."
           exit 0
