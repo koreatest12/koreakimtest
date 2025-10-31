@@ -7,11 +7,13 @@ on:
 
 jobs:
   run-pipeline:
+    # Use different databases in parallel
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         db: [postgres, mysql, mariadb, sqlite, duckdb]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,8 +22,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install system clients (psql, mysqlclient)
+      
+      # Install system clients required for readiness checks
+      - name: Install system clients (psql, mysql-client)
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client mysql-client
@@ -31,6 +34,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Start required database containers
       - name: Start database container
         env:
           DB: ${{ matrix.db }}
@@ -38,12 +42,16 @@ jobs:
           set -euxo pipefail
           case "$DB" in
             postgres)
+              # Use port 5432
               docker run -d --name pgdb -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=bank -p 5432:5432 postgres:16
               ;;
             mysql)
+              # Use port 3306
               docker run -d --name mysqldb -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=bank -p 3306:3306 mysql:8
               ;;
             mariadb)
+              # Use port 3307 to avoid collision with MySQL if both were run (though they aren't here)
+              # We map the host port 3307 to the container's internal port 3306
               docker run -d --name mariadb -e MARIADB_ROOT_PASSWORD=password -e MARIADB_DATABASE=bank -p 3307:3306 mariadb:11
               ;;
             sqlite|duckdb)
@@ -52,6 +60,7 @@ jobs:
             *) echo "Unsupported DB $DB"; exit 1 ;;
           esac
 
+      # Wait for DB readiness checks
       - name: Wait for DB readiness
         env:
           DB: ${{ matrix.db }}
@@ -60,15 +69,19 @@ jobs:
           if [ "$DB" = "postgres" ]; then
             for i in $(seq 1 60); do pg_isready -h localhost -p 5432 -U postgres && break || sleep 2; done
           elif [ "$DB" = "mysql" ]; then
+            # Note: MySQL uses 3306
             for i in $(seq 1 90); do mysqladmin ping -h 127.0.0.1 -P 3306 -ppassword && break || sleep 2; done
           elif [ "$DB" = "mariadb" ]; then
+            # Note: MariaDB uses 3307 (host port)
             for i in $(seq 1 90); do mysqladmin ping -h 127.0.0.1 -P 3307 -ppassword && break || sleep 2; done
           else
             echo "No readiness wait needed for $DB"
           fi
 
-      - name: Run pipeline
+      # Run the core Python pipeline script
+      - name: Run banking pipeline
         env:
+          # Configuration for remote databases (used by db_connector.py)
           DB_USER: ${{ matrix.db == 'postgres' && 'postgres' || 'root' }}
           DB_PASSWORD: ${{ matrix.db == 'postgres' && 'postgres' || 'password' }}
           DB_HOST: localhost
@@ -76,9 +89,15 @@ jobs:
           DB_NAME: bank
         run: |
           set -euxo pipefail
-          python -m banking_pipeline.pipeline --target ${{ matrix.db }} --rows 20000 --seed 42 --out artifacts
+          # The Python script will handle all connection logic based on the --target argument
+          python -m banking_pipeline.pipeline \
+            --target ${{ matrix.db }} \
+            --rows 20000 \
+            --seed 42 \
+            --out artifacts
 
-      - name: Upload artifacts
+      # Upload the generated reports as artifacts for each DB run
+      - name: Upload reports
         uses: actions/upload-artifact@v4
         with:
           name: reports-${{ matrix.db }}
