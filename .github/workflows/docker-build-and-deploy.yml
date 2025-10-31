@@ -1,4 +1,4 @@
-name: "Docker Build & Deploy (Revised)"
+name: "Docker Build & Deploy (Revised & Simplified)"
 
 on:
   push:
@@ -13,39 +13,47 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Tag for the image (overrides default)"
+        description: "Custom tag for the Docker image (optional)"
         required: false
         default: ""
       deploy:
-        description: "Run deploy step via SSH (true/false)"
-        required: false
+        description: "Trigger deployment to the server"
+        required: true
         type: boolean
         default: false
 
+# 필요한 권한 부여
 permissions:
   contents: read
   packages: write
 
+# 워크플로우 전역 환경 변수
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  TZ: Asia/Seoul
 
 jobs:
+  ########################################################
+  # 1. 빌드 및 푸시 잡
+  ########################################################
   build-and-push:
     name: Build and Push Image
-    runs-on: ubuntu-22.04 # LTS version for stability
+    runs-on: ubuntu-22.04 # 안정적인 LTS 버전 사용
 
     steps:
+      # 소스 코드 체크아웃
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU for multi-platform builds
+      # 멀티-플랫폼 빌드를 위한 QEMU 설정
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
+      # Docker Buildx 설정 (빌드 성능 향상)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # GitHub 컨테이너 레지스트리(GHCR)에 로그인
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -53,7 +61,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata for Docker (tags and labels)
+      # 이미지 태그와 라벨을 자동으로 추출
+      - name: Extract metadata for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -61,10 +70,10 @@ jobs:
           tags: |
             type=sha,prefix=
             type=ref,event=branch
-            type=ref,event=tag
             type=semver,pattern={{version}}
-            type=raw,value=${{ github.event.inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag != '' }}
+            type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
 
+      # Docker 이미지 빌드 및 푸시 (캐싱 적용으로 속도 향상)
       - name: Build and push Docker image
         id: build
         uses: docker/build-push-action@v5
@@ -77,87 +86,88 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      
-      - name: Print image digest
-        run: echo "Image pushed successfully with digest:${{ steps.build.outputs.digest }}"
 
+      - name: Print image digest
+        run: echo "✅ Image pushed successfully with digest:${{ steps.build.outputs.digest }}"
+
+  ########################################################
+  # 2. 배포 잡
+  ########################################################
   deploy:
     name: Deploy to Server via SSH
-    needs: build-and-push
-    # Corrected condition: run on push to main OR on manual dispatch when 'deploy' is true
+    needs: build-and-push # 빌드 잡이 성공해야 실행
+    # 실행 조건: main 브랜치에 push 되거나, 수동 실행 시 deploy=true인 경우
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == true)
+      (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
     runs-on: ubuntu-22.04
 
     steps:
+      # 1. SSH 키 등록 (필수)
+      # GitHub Secrets에 SSH_PRIVATE_KEY를 미리 등록해야 합니다.
       - name: Add SSH key to ssh-agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
+      # 2. 서버 호스트 키 자동 등록 (경고 메시지 방지)
       - name: Add server to known_hosts
-        run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+        run: ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
 
+      # 3. 배포할 이미지 태그 결정
       - name: Determine image tag for deployment
         id: image_tag
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.image_tag }}" ]]; then
-            TAG_VALUE="${{ github.event.inputs.image_tag }}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.image_tag }}" ]]; then
+            TAG_VALUE="${{ inputs.image_tag }}"
           else
+            # push 이벤트의 경우 짧은 SHA 커밋 해시를 태그로 사용
             TAG_VALUE="sha-${GITHUB_SHA::7}"
           fi
-          echo "Using image tag: ${TAG_VALUE}"
+          echo "🏷️ Using image tag for deployment: ${TAG_VALUE}"
           echo "tag=${TAG_VALUE}" >> "$GITHUB_OUTPUT"
 
+      # 4. 원격 서버에 배포 실행
       - name: Deploy to remote server
         env:
-          # Server details
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
-          
-          # GHCR credentials (passed safely)
           GH_ACTOR: ${{ github.actor }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
-          # Docker image and container details
-          REGISTRY: ${{ env.REGISTRY }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
           IMAGE_TAG: ${{ steps.image_tag.outputs.tag }}
-          CONTAINER_NAME: app
+          # 컨테이너 관련 정보 (필요시 수정)
+          CONTAINER_NAME: my-app-container
           HOST_PORT: 3000
           CONTAINER_PORT: 3000
         run: |
-          set -e # Exit script on first error
+          set -e # 오류 발생 시 즉시 스크립트 중단 (안정성 확보)
+          REMOTE_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
 
-          REMOTE_IMAGE="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          echo "🚀 Deploying ${REMOTE_IMAGE} to ${SERVER_USER}@${SERVER_HOST}"
 
-          echo "🚀 Starting deployment to ${SERVER_USER}@${SERVER_HOST}"
-          echo "Image to deploy: ${REMOTE_IMAGE}"
-
-          # The remote script is created here using a heredoc.
-          # 'set -e' ensures that if any command fails (like docker pull), the script will stop.
-          # This prevents a failed pull from taking down the currently running container.
+          # 원격 서버에서 실행될 스크립트 (복잡한 파일 생성 불필요)
           ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_HOST}" "
-            set -e
+            set -e # 원격지에서도 오류 발생 시 중단
 
-            echo '▶ [remote] Logging in to GHCR...'
-            echo '${GH_TOKEN}' | docker login ${REGISTRY} -u '${GH_ACTOR}' --password-stdin
+            echo '▶ [Remote] Logging in to GHCR...'
+            # GITHUB_TOKEN을 가장 안전한 방식으로 전달
+            echo '${GH_TOKEN}' | docker login ${{ env.REGISTRY }} -u '${GH_ACTOR}' --password-stdin
 
-            echo '▶ [remote] Pulling latest image: ${REMOTE_IMAGE}'
+            echo '▶ [Remote] Pulling latest image...'
             docker pull ${REMOTE_IMAGE}
 
-            echo '▶ [remote] Stopping and removing existing container...'
-            # '|| true' allows the script to continue if the container doesn't exist yet.
+            echo '▶ [Remote] Stopping and removing existing container...'
+            # 컨테이너가 없어도 오류가 나지 않도록 || true 추가
             docker rm -f ${CONTAINER_NAME} || true
 
-            echo '▶ [remote] Starting new container...'
+            echo '▶ [Remote] Starting new container...'
             docker run -d --name ${CONTAINER_NAME} \
               -p ${HOST_PORT}:${CONTAINER_PORT} \
               --restart unless-stopped \
               ${REMOTE_IMAGE}
 
-            echo '✅ [remote] Deployment successful!'
+            echo '▶ [Remote] Cleaning up old images...'
+            docker image prune -af || true
+
+            echo '✅ [Remote] Deployment successful!'
           "
