@@ -1,4 +1,4 @@
-name: "🛡️ DefenderBot — FULL PIPELINE (Build→Docker→Release→Upgrade, No-Skip, Safe-Continue, Stable Dirs)"
+name: "🛡️ DefenderBot — FULL PIPELINE (Build→Docker→Release→Upgrade, No-Skip, Safe-Continue, Audit+RunnerDump)"
 
 on:
   push:
@@ -32,19 +32,21 @@ on:
         default: "none"
 
 permissions:
-  contents: write      # GH Release에 필요
-  packages: write      # GHCR push에 필요
-  id-token: write      # (확장용: OIDC 등)
+  contents: write      # GH Release
+  packages: write      # GHCR push
+  id-token: write      # (확장: OIDC 등)
 
 env:
   TZ: Asia/Seoul
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   JAVA_VERSION: "17"
+
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
   DIST_DIR: dist
   TARGET_JAR: target/defenderbot.jar
+
   CONTAINER_NAME: defenderbot
   HOST_PORT: "8080"
   CONTAINER_PORT: "8080"
@@ -55,31 +57,77 @@ concurrency:
 
 jobs:
   full-pipeline:
-    name: "DefenderBot Full Pipeline (No-Skip Everything)"
+    name: "DefenderBot Full Pipeline (No-Skip Everything + Audit)"
     runs-on: ubuntu-24.04
-    continue-on-error: true   # 최악이어도 job 자체는 녹색에 가깝게 유지
+    continue-on-error: true
 
     steps:
       ########################################################################
-      # 0. Checkout 먼저 (중요: .github 디렉토리 덮어쓰기로 우리가 만든 폴더 사라지는 문제 방지)
+      # 0. Checkout 먼저 (중요: checkout이 .github 디렉토리 덮어쓰므로 mkdir은 checkout 이후에!)
       ########################################################################
       - name: Checkout source
         uses: actions/checkout@v4
 
       ########################################################################
-      # 1. 공용 디렉토리 준비 (checkout 이후에 반드시 다시 mkdir -p!!)
+      # 1. 공용 디렉토리 준비 + 컨텍스트/러너 상태 덤프 (운영 감사용)
       ########################################################################
-      - name: Prep audit dirs (post-checkout)
+      - name: Prep dirs / dump context / runner snapshot
         shell: bash
         run: |
           set -Eeuo pipefail
+
+          # 필수 디렉토리/keep 파일 준비
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" target "${DIST_DIR}"
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" target/.keep "${DIST_DIR}/.keep"
+
+          # 파이프라인 시작 로그
           echo "[`date '+%Y-%m-%d %H:%M:%S%z'`] pipeline.start" | tee "${LOG_DIR}/00_pipeline_start.log"
-          # 업로드 경로에 최소 .keep 파일도 만들어둠
-          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
+
+          # 실행 컨텍스트 요약 저장 (누가/언제/어떤 브랜치/어떤 SHA)
+          {
+            echo "=== PIPELINE CONTEXT DUMP ==="
+            echo "EVENT_NAME=${{ github.event_name }}"
+            echo "REPO=${{ github.repository }}"
+            echo "REF=${{ github.ref }}"
+            echo "SHA=${{ github.sha }}"
+            echo "ACTOR=${{ github.actor }}"
+            echo "RUN_ID=${{ github.run_id }}"
+            echo "RUN_NUMBER=${{ github.run_number }}"
+            echo "WORKFLOW=${{ github.workflow }}"
+            echo "TZ=$TZ"
+            echo "-----------------------------"
+            env | sort
+          } | tee "${LOG_DIR}/01_context_dump.log"
+
+          # 러너/환경 스냅샷 (빌드 전 상태 기록)
+          {
+            echo "=== RUNNER SNAPSHOT (BEFORE BUILD) ==="
+            echo "--- uname -a"
+            uname -a || true
+            echo
+            echo "--- lsb_release -a"
+            lsb_release -a || true
+            echo
+            echo "--- df -h"
+            df -h || true
+            echo
+            echo "--- free -m"
+            free -m || true
+            echo
+            echo "--- docker version"
+            docker version || true
+            echo
+            echo "--- docker info"
+            docker info || true
+            echo
+            echo "--- whoami / pwd"
+            whoami || true
+            pwd || true
+            echo
+          } | tee "${LOG_DIR}/02_runner_snapshot_prebuild.log"
 
       ########################################################################
-      # 2. Maven Build
+      # 2. Maven Build (절대 중단 안 함, 실패해도 dummy JAR 강제 생성)
       ########################################################################
       - name: Set up Temurin JDK
         uses: actions/setup-java@v4
@@ -93,8 +141,9 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          # 디렉토리 보강 (혹시라도 이전 단계에서 누락되거나 나중에 뭔가가 지워졌어도 다시 생성)
+          # (방어적) 디렉토리 다시 보강
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" target "${DIST_DIR}"
+          touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" target/.keep "${DIST_DIR}/.keep"
 
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             CMD="mvn -q -DskipTests package"
@@ -118,19 +167,19 @@ jobs:
             cp -f "$REAL_JAR" "${{ env.TARGET_JAR }}" || true
           fi
 
-          # 빌드 실패해도 docker 단계가 깨지지 않도록 dummy jar 생성
+          # 실패 시 dummy jar 생성 (후속 docker 단계가 절대 멈추지 않게)
           if [[ ! -f "${{ env.TARGET_JAR }}" ]]; then
             echo "[WARN] No real JAR found, creating dummy jar" | tee -a "${LOG_DIR}/11_maven_build_full.log"
-            echo "Dummy JAR placeholder because build failed $(date '+%Y-%m-%d %H:%M:%S%z')" > dummy.txt
+            echo "Dummy JAR placeholder (build failed) $(date '+%Y-%m-%d %H:%M:%S%z')" > dummy.txt
             zip -q -j "${{ env.TARGET_JAR }}" dummy.txt || true
           fi
 
-          # 실패 흔적 파일
+          # 실패 흔적
           if [[ "$(cat $GITHUB_OUTPUT | grep build_status | cut -d= -f2)" != "success" ]]; then
             echo "BUILD_FAILED_AT=$(date '+%Y-%m-%d %H:%M:%S%z')" > target/BUILD_FAILED.txt
           fi
 
-          # 안전하게 .keep 다시
+          # 나중 업로드를 위해 keep 보강
           touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" target/.keep "${DIST_DIR}/.keep"
 
       - name: Upload build logs/artifacts snapshot
@@ -139,6 +188,9 @@ jobs:
         with:
           name: defenderbot-build-step
           path: |
+            ${{ env.LOG_DIR }}/00_pipeline_start.log
+            ${{ env.LOG_DIR }}/01_context_dump.log
+            ${{ env.LOG_DIR }}/02_runner_snapshot_prebuild.log
             ${{ env.LOG_DIR }}/10_maven_cmd.log
             ${{ env.LOG_DIR }}/11_maven_build_full.log
             ${{ env.LOG_DIR }}/.keep
@@ -148,7 +200,7 @@ jobs:
           if-no-files-found: warn
 
       ########################################################################
-      # 3. Docker Build & Push
+      # 3. Docker Build & Push (이미지 빌드, 태그 계산, 헬스체크까지 시도)
       ########################################################################
       - name: Setup QEMU
         uses: docker/setup-qemu-action@v3
@@ -206,6 +258,22 @@ jobs:
           docker images 2>&1 | tee "${LOG_DIR}/22_docker_images_after_main.log" || true
           docker history "${IMAGE_FULL}" 2>&1 | tee "${LOG_DIR}/23_docker_history_main.log" || true
 
+      - name: Docker container healthcheck (run/exit test)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}"
+          touch "${LOG_DIR}/.keep"
+
+          IMG_TAG="${{ steps.image_tag_calc.outputs.final_tag }}"
+          IMAGE_FULL="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMG_TAG}"
+
+          echo "▶ Smoke run container for ${IMAGE_FULL}" | tee "${LOG_DIR}/23b_docker_healthcheck.log"
+          # 여기서는 단순하게 컨테이너 한 번 띄워보고 java -version 비슷한 동작만 시도.
+          # Spring Boot app이라 바로 종료 안 할 수도 있지만 어쨌든 시도만: 실패해도 true 처리
+          docker run --rm "${IMAGE_FULL}" java -version \
+            2>&1 | tee -a "${LOG_DIR}/23b_docker_healthcheck.log" || true
+
       - name: Optionally build distro images (ubuntu / ubi)
         shell: bash
         run: |
@@ -259,12 +327,13 @@ jobs:
             ${{ env.LOG_DIR }}/21_docker_build_main.log
             ${{ env.LOG_DIR }}/22_docker_images_after_main.log
             ${{ env.LOG_DIR }}/23_docker_history_main.log
+            ${{ env.LOG_DIR }}/23b_docker_healthcheck.log
             ${{ env.LOG_DIR }}/24_distro_build.log
             ${{ env.LOG_DIR }}/.keep
           if-no-files-found: warn
 
       ########################################################################
-      # 4. Release 생성
+      # 4. Release 생성 (항상 시도, 태그 없으면 manual-<sha7>)
       ########################################################################
       - name: Prepare dist dir & checksum
         id: release_prep
@@ -321,10 +390,10 @@ jobs:
           files: |
             ${{ env.DIST_DIR }}/*.jar
             ${{ env.DIST_DIR }}/*.sha256
-        continue-on-error: true   # 릴리스 실패해도 계속
+        continue-on-error: true
 
       ########################################################################
-      # 5. Remote Upgrade (ssh-agent 없이, 항상 시도하되 soft-pass)
+      # 5. Remote Upgrade (ssh-agent 없이, soft-pass / 러너상태 재기록)
       ########################################################################
       - name: Install SSH client
         shell: bash
@@ -335,6 +404,16 @@ jobs:
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${DIST_DIR}" target
           touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
           echo "[OK] ssh client ready" | tee "${LOG_DIR}/40_upgrade_sshclient.log"
+
+          # 업그레이드 직전 러너 snapshot (배포 타이밍의 시스템 상태)
+          {
+            echo "=== RUNNER SNAPSHOT (BEFORE REMOTE UPGRADE) ==="
+            uname -a || true
+            df -h || true
+            free -m || true
+            docker ps -a || true
+            docker images || true
+          } | tee "${LOG_DIR}/40b_runner_snapshot_pre_upgrade.log"
 
       - name: Compute upgrade enable & tag
         id: upgrade_calc
@@ -406,7 +485,7 @@ jobs:
           REMOTE_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMG_TAG}"
           echo "[INFO] Using remote image ${REMOTE_IMAGE}" | tee -a "${LOG_DIR}/43_remote_upgrade.log"
 
-          # ssh-agent 없이 기본 ssh 키로만 시도. 실패해도 || true 로 계속.
+          # ssh-agent 없이 기본 ssh 키만 사용.
           ssh -o StrictHostKeyChecking=yes "${SERVER_USER}@${SERVER_HOST}" bash -lc "
             set -Eeuo pipefail
             echo '--- Remote Upgrade Script Started ---'
@@ -435,6 +514,7 @@ jobs:
           name: defenderbot-upgrade-step
           path: |
             ${{ env.LOG_DIR }}/40_upgrade_sshclient.log
+            ${{ env.LOG_DIR }}/40b_runner_snapshot_pre_upgrade.log
             ${{ env.LOG_DIR }}/41_upgrade_calc.log
             ${{ env.LOG_DIR }}/42_known_hosts.log
             ${{ env.LOG_DIR }}/43_remote_upgrade.log
@@ -442,16 +522,29 @@ jobs:
           if-no-files-found: warn
 
       ########################################################################
-      # 6. FINAL PIPELINE SNAPSHOT (모든 것)
+      # 6. FINAL PIPELINE SNAPSHOT (전체 수집)
       ########################################################################
-      - name: Final ensure dirs + .keep
+      - name: Final snapshot & upload all
+        if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${DIST_DIR}" target
           touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
+
+          # 파이프라인 종료 로그
           echo "[`date '+%Y-%m-%d %H:%M:%S%z'`] pipeline.end (ALL STEPS ATTEMPTED)" \
             | tee "${LOG_DIR}/99_pipeline_end.log"
+
+          # 마지막 러너 상태 한 번 더 캡처
+          {
+            echo "=== RUNNER SNAPSHOT (FINAL) ==="
+            uname -a || true
+            df -h || true
+            free -m || true
+            docker ps -a || true
+            docker images || true
+          } | tee "${LOG_DIR}/98_runner_snapshot_final.log"
 
       - name: Upload ALL logs/final snapshot
         if: always()
