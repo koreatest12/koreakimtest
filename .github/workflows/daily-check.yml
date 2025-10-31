@@ -1,0 +1,58 @@
+# 파일 경로: .github/workflows/daily-check.yml
+name: Daily System Checks (일일 시스템 점검)
+
+on:
+  # 매일 한국 시간 오전 1시에 실행 (Cron 표현식: 0 1 * * *)
+  schedule:
+    - cron: '0 1 * * *'
+  # 수동 실행 가능하도록 설정
+  workflow_dispatch:
+
+jobs:
+  daily_checks:
+    # Linux 환경에서 실행
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 1. Linux 시스템 상태 점검 (예시)
+      - name: Run basic Linux system health check
+        run: |
+          echo "--- Disk Usage ---"
+          df -h
+          echo "--- Memory Usage ---"
+          free -m
+          # 필요에 따라 다른 Linux 명령어(예: systemctl status service_name) 추가
+
+      # 2. Java 환경 설정 (Maven 프로젝트 빌드/테스트를 위한 환경)
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      # 3. Maven 빌드 및 테스트 실행 (예시)
+      - name: Maven Build and Test
+        run: mvn clean install -DskipTests
+        
+      # 4. DB/SQL 연결 및 유효성 점검 (실제 환경에 맞게 수정 필요)
+      - name: DB Connection and SQL Validation Check
+        # 이 단계는 실제 DB 접속 정보(secrets)와 테스트용 SQL 쿼리가 필요합니다.
+        # DB 연결 정보를 GitHub Secrets에 저장하고 사용해야 합니다.
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          # 예시: 특정 DB 툴을 사용하여 연결 테스트 및 간단한 SELECT 쿼리 실행
+          echo "Attempting DB connection and simple query..."
+          # 실제 DB 환경에 맞는 스크립트 실행 또는 외부 툴 사용 (예: psql, mysql 등)
+          # ./scripts/run_db_health_check.sh
+          echo "DB check completed."
+
+      # 5. Docker 이미지 빌드 테스트 (컨테이너화된 앱 점검)
+      - name: Docker Build Test
+        run: docker build . --tag my-app:test-check
