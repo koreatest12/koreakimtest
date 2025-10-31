@@ -16,19 +16,19 @@ on:
     inputs:
       release_tag:
         description: "Release tag (e.g. v1.2.3). If empty, no Release."
-        required: false
+        required: true
         default: ""
       image_tag:
         description: "Docker image tag (default: sha)."
-        required: false
+        required: true
         default: ""
       upgrade:
         description: "Run remote upgrade via SSH (true/false)."
-        required: false
-        default: "false"
+        required: true
+        default: "true"
       distro_image:
         description: "Base distro image to build (ubuntu|ubi|none)."
-        required: false
+        required: true
         default: "none"
 
 permissions:
