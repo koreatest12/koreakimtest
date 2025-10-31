@@ -59,7 +59,7 @@ env:
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
 
-  # DB env for integration test
+  # DB env for integration test (공통으로 step에서 사용)
   PSQL_HOST: localhost
   PSQL_PORT: "5432"
   PSQL_DB: testdb
@@ -85,6 +85,7 @@ jobs:
   prepare-env:
     name: "📦 Prepare Workspace / Env Snapshot"
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -92,6 +93,7 @@ jobs:
       - name: Create log/artifact directories + dummy assets
         run: |
           set -Eeuo pipefail
+
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" tmp/temp-logs data/processed assets/images
           echo "임시 로그 데이터" > tmp/temp-logs/app.log
           touch assets/images/placeholder.png
@@ -180,8 +182,7 @@ jobs:
   #########################################################
   # JOB 2: Build & Test (Java + Python + DB) + Coverage + Lint
   #
-  # NOTE:
-  #  - matrix 제거 (동적값 불가) → 대신 job env에서 입력값 사용
+  # matrix는 제거하고 env로 입력값을 넣는 구조
   #########################################################
   build-and-test:
     name: "🛠 Build/Test w/ Postgres, Coverage, Lint"
@@ -197,13 +198,14 @@ jobs:
       postgres:
         image: postgres:15
         env:
-          POSTGRES_USER: ${{ env.PSQL_USER }}
-          POSTGRES_PASSWORD: ${{ env.PSQL_PASS }}
-          POSTGRES_DB: ${{ env.PSQL_DB }}
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: testdb
         ports:
           - 5432:5432
+        # services.options 는 literal만 허용된다고 보는 게 안전
         options: >-
-          --health-cmd "pg_isready -U ${{ env.PSQL_USER }} -d ${{ env.PSQL_DB }}"
+          --health-cmd "pg_isready -U runner -d testdb"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -217,11 +219,11 @@ jobs:
         run: |
           echo "Waiting for Postgres to be ready..."
           for i in {1..30}; do
-            pg_isready -h ${{ env.PSQL_HOST }} -p ${{ env.PSQL_PORT }} && break
+            pg_isready -h "${PSQL_HOST}" -p "${PSQL_PORT}" && break
             echo "Postgres not ready yet ($i)..."
             sleep 2
           done
-          pg_isready -h ${{ env.PSQL_HOST }} -p ${{ env.PSQL_PORT }}
+          pg_isready -h "${PSQL_HOST}" -p "${PSQL_PORT}"
 
       # --- Java Setup ---
       - name: Set up JDK
@@ -390,15 +392,19 @@ jobs:
         run: |
           echo "===== systemctl is-active nginx ====="  > server_status_snapshot.txt
           systemctl is-active nginx                  >> server_status_snapshot.txt 2>&1 || true
+
           echo "===== systemctl is-active redis =====" >> server_status_snapshot.txt
           systemctl is-active redis-server           >> server_status_snapshot.txt 2>&1 || true
 
           echo "===== ps aux | head -n 20 ====="     >> server_status_snapshot.txt
           ps aux | head -n 20                        >> server_status_snapshot.txt || true
+
           echo "===== df -h ====="                   >> server_status_snapshot.txt
           df -h                                      >> server_status_snapshot.txt || true
+
           echo "===== uname -a ====="                >> server_status_snapshot.txt
           uname -a                                   >> server_status_snapshot.txt || true
+
           echo "===== lsb_release -a ====="          >> server_status_snapshot.txt
           lsb_release -a                             >> server_status_snapshot.txt 2>&1 || true
 
@@ -467,10 +473,6 @@ jobs:
 
   #########################################################
   # JOB 5: Docker Build / Push / Security Scan / SmokeTest
-  #
-  # NOTE:
-  # - depends ONLY on server-setup-upgrade, not sbom-and-licenses
-  #   (sbom job may be skipped)
   #########################################################
   docker-build-push:
     name: "🐳 Docker Build & Push & Scan & SmokeTest"
