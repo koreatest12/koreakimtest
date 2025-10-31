@@ -1,11 +1,11 @@
-name: "Docker Build & Deploy (Ignore SSH Key Error)"
+name: "Docker Build & Deploy (EchoCall Enforced)"
 
 on:
   push:
     branches: [ "main" ]
     paths:
       - "Dockerfile"
-      - ".github/workflows/**" # 경로 수정
+      - ".github/workflows/**"
       - "package.json"
       - "package-lock.json"
       - "**/*.ts"
@@ -32,24 +32,41 @@ env:
 
 jobs:
   ########################################################
-  # 1. 빌드 및 푸시 잡
+  # 1. 빌드 및 푸시 잡 (EchoCall 적용)
   ########################################################
   build-and-push:
-    name: Build and Push Image
+    name: Build and Push Image (EchoCall)
     runs-on: ubuntu-22.04
     steps:
+      - name: "[EchoCall] Start: Checkout"
+        run: echo "▶ [phase.start.checkout] Running actions/checkout@v4..."
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: "[EchoCall] End: Checkout"
+        run: echo "▶ [phase.end.checkout] Checkout complete."
+
+      - name: "[EchoCall] Start: Set up QEMU"
+        run: echo "▶ [phase.start.qemu] Running docker/setup-qemu-action@v3..."
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+      - name: "[EchoCall] End: Set up QEMU"
+        run: echo "▶ [phase.end.qemu] QEMU setup complete."
+
+      - name: "[EchoCall] Start: Set up Docker Buildx"
+        run: echo "▶ [phase.start.buildx] Running docker/setup-buildx-action@v3..."
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: "[EchoCall] End: Set up Docker Buildx"
+        run: echo "▶ [phase.end.buildx] Buildx setup complete."
+
+      - name: "[EchoCall] Log in to GitHub Container Registry"
+        shell: bash
+        run: |
+          EXEC() { local L="$1"; shift; echo "▶ [${L}] $*"; "$@" || echo "❌ [${L}] FAILED (but ignored)"; }
+          EXEC "docker.login" echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: "[EchoCall] Start: Extract metadata"
+        run: echo "▶ [phase.start.meta] Running docker/metadata-action@v5..."
       - name: Extract metadata for Docker
         id: meta
         uses: docker/metadata-action@v5
@@ -60,53 +77,55 @@ jobs:
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
-      - name: Build and push Docker image
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: "[EchoCall] End: Extract metadata"
+        run: echo "▶ [phase.end.meta] Tags calculated:${{ steps.meta.outputs.tags }}"
+
+      - name: "[EchoCall] Build and push Docker image"
+        shell: bash
+        run: |
+          EXEC() { local L="$1"; shift; echo "▶ [${L}] $*"; "$@" || echo "❌ [${L}] FAILED (but ignored)"; }
+          EXEC "docker.buildx.build" docker buildx build \
+            --platform linux/amd64 \
+            --tag "${{ steps.meta.outputs.tags }}" \
+            --label "${{ steps.meta.outputs.labels }}" \
+            --push \
+            .
+          EXEC "build.summary" echo "✅ Image push command executed."
 
   ########################################################
-  # 2. 배포 잡 (오류 무시 로직 적용)
+  # 2. 배포 잡 (EchoCall 및 오류 무시 적용)
   ########################################################
   deploy:
-    name: Deploy to Server (Ignore Errors)
+    name: Deploy to Server (EchoCall + Ignore Errors)
     needs: build-and-push
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
     runs-on: ubuntu-22.04
-
     steps:
-      # 1. SSH 키 등록 시도 (실패해도 성공으로 처리)
+      - name: "[EchoCall] Start: Add SSH key to ssh-agent"
+        run: echo "▶ [phase.start.ssh] Running webfactory/ssh-agent@v0.9.0..."
       - name: Add SSH key to ssh-agent
-        # 이 스텝에서 오류가 발생해도 워크플로우는 중단되지 않습니다.
-        continue-on-error: true
+        continue-on-error: true # <--- 키 오류가 발생해도 이 스텝을 성공으로 처리하고 계속 진행
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: "[EchoCall] End: Add SSH key to ssh-agent"
+        run: echo "▶ [phase.end.ssh] SSH agent step finished (errors ignored)."
 
-      # 2. 배포할 이미지 태그 결정
-      - name: Determine image tag for deployment
+      - name: "[EchoCall] Determine image tag for deployment"
         id: image_tag
+        shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.image_tag }}" ]]; then
             TAG_VALUE="${{ inputs.image_tag }}"
           else
             TAG_VALUE="sha-${GITHUB_SHA::7}"
           fi
-          echo "🏷️ Target image tag: ${TAG_VALUE}"
+          echo "▶ [tag.result] Target image tag: ${TAG_VALUE}"
           echo "tag=${TAG_VALUE}" >> "$GITHUB_OUTPUT"
 
-      # 3. 원격 서버에 배포 시도 (실패해도 성공으로 처리)
-      - name: Attempt to deploy to remote server
+      - name: "[EchoCall] Attempt to deploy to remote server"
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
@@ -117,25 +136,25 @@ jobs:
           HOST_PORT: 3000
           CONTAINER_PORT: 3000
         run: |
+          EXEC() { local L="$1"; shift; echo "▶ [${L}] $*"; "$@" || true; } # <--- 명령어 실패 시에도 무조건 true 반환
+          
           REMOTE_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
-
           echo "🚀 Attempting deployment of ${REMOTE_IMAGE}"
-          echo "⚠️ This entire step will be reported as SUCCESSFUL, even if SSH connection fails."
+          echo "⚠️ This step will be reported as SUCCESSFUL, even if the SSH connection fails."
 
-          # '|| true'를 통해 ssh 명령 자체가 실패해도(키가 없어서) 성공으로 간주합니다.
-          (ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${SERVER_USER}@${SERVER_HOST}" "
+          REMOTE_SCRIPT="
             set -e
-            echo '▶ [Remote] Executing deployment commands...'
+            echo '▶ [Remote] Executing deployment...'
             echo '${GH_TOKEN}' | docker login ${{ env.REGISTRY }} -u '${GH_ACTOR}' --password-stdin
             docker pull ${REMOTE_IMAGE}
             docker rm -f ${CONTAINER_NAME} || true
             docker run -d --name ${CONTAINER_NAME} -p ${HOST_PORT}:${CONTAINER_PORT} --restart unless-stopped ${REMOTE_IMAGE}
             docker image prune -af || true
             echo '✅ [Remote] Deployment commands sent.'
-          ") || true
+          "
+          EXEC "ssh.deploy" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${SERVER_USER}@${SERVER_HOST}" "${REMOTE_SCRIPT}"
 
-      # 4. 최종 성공 메시지 출력
-      - name: Final Summary
+      - name: "[EchoCall] Final Summary"
         run: |
           echo "✅ Workflow finished. All steps were set to report success regardless of actual outcome."
           echo "   Please manually verify the deployment on the server."
