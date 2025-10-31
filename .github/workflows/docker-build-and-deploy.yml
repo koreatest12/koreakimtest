@@ -1,4 +1,4 @@
-name: "Docker Build & Deploy (Total EchoCall Enforcement)"
+name: "Docker Build & Deploy (Total EchoCall + Syntax Fix)"
 
 on:
   push:
@@ -34,10 +34,10 @@ env:
 
 jobs:
   ########################################################
-  # 1. 빌드 및 푸시 잡 (모든 스텝 EchoCall 적용)
+  # 1. 빌드 및 푸시 잡 (모든 스텝 EchoCall 강제)
   ########################################################
   build-and-push:
-    name: Build / Push (Total EchoCall)
+    name: Build / Push (Total EchoCall Enforcement)
     runs-on: ubuntu-22.04
 
     steps:
@@ -54,7 +54,8 @@ jobs:
           set -e
           EXEC() { local L="$1"; shift; echo "▶ [${L}] $*"; "$@"; }
           EXEC "mkdir.ledger" mkdir -p ".github/ledger_out"
-          EXEC "gen.ledger" "echo 'timestamp,tx_id,status\n2025-10-31T10:36:14,tx_11a2,confirmed' > .github/ledger_out/ledger.csv"
+          # ❗ 수정: 리디렉션(>)이 포함된 명령어는 bash -c로 감싸야 합니다.
+          EXEC "gen.ledger" bash -c "echo 'timestamp,tx_id,status\n2025-10-31T10:37:42,tx_b33f,confirmed' > .github/ledger_out/ledger.csv"
           EXEC "log.simdone" echo "✅ Ledger simulation complete."
 
       - name: "[EchoCall] BEFORE: Set up QEMU"
@@ -74,8 +75,10 @@ jobs:
       - name: "[EchoCall] STEP 5: Login to GHCR"
         shell: bash
         run: |
+          set -e
           EXEC() { local L="$1"; shift; echo "▶ [${L}] $*"; "$@" || { echo "❌ [${L}] FAILED!"; exit 1; }; }
-          EXEC "docker.login" echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+          # ❗ 수정: 파이프(|)가 포함된 명령어는 sh -c로 감싸야 합니다.
+          EXEC "docker.login" sh -c "echo '${{ secrets.GITHUB_TOKEN }}' | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
           echo "✅ [completed] Login to GHCR"
 
       - name: "[EchoCall] BEFORE: Extract metadata"
@@ -95,6 +98,7 @@ jobs:
       - name: "[EchoCall] STEP 7: Build and push Docker image"
         shell: bash
         run: |
+          set -e
           EXEC() { local L="$1"; shift; echo "▶ [${L}] $*"; "$@" || { echo "❌ [${L}] FAILED!"; exit 1; }; }
           EXEC "docker.buildx.build" docker buildx build \
             --platform linux/amd64 \
@@ -128,13 +132,14 @@ jobs:
         id: image_tag
         shell: bash
         run: |
+          set -e
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.image_tag }}" ]]; then
             TAG_VALUE="${{ inputs.image_tag }}"
           else
-            TAG_VALUE="${GITHUB_SHA::7}"
+            TAG_VALUE="sha-${GITHUB_SHA::7}"
           fi
-          echo "▶ [tag.result] Target image tag: sha-${TAG_VALUE}"
-          echo "tag=sha-${TAG_VALUE}" >> "$GITHUB_OUTPUT"
+          echo "▶ [tag.result] Target image tag: ${TAG_VALUE}"
+          echo "tag=${TAG_VALUE}" >> "$GITHUB_OUTPUT"
           echo "✅ [completed] Image tag determined."
 
       - name: "[EchoCall] STEP 3: Attempt to deploy"
@@ -145,9 +150,6 @@ jobs:
         run: |
           echo "▶ [ssh.deploy] Attempting to deploy image ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
           echo "⚠️ This step will succeed even if the SSH connection fails."
-          # SSH 명령은 키가 없을 경우 실패하므로, 실패를 무시하도록 || true 처리
+          # SSH 명령은 키가 없을 경우 실패하므로, || true 처리
           (ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "${SERVER_USER}@${SERVER_HOST}" "echo 'Remote deployment script would run here'") || true
           echo "✅ [completed] Deployment attempt finished."
-
-      - name: "[EchoCall] STEP 4: Final Summary"
-        run: echo "✅ Workflow finished. All steps were forced to report success."
