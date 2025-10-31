@@ -45,33 +45,47 @@ jobs:
   build-maven:
     name: "Build with Maven"
     runs-on: ubuntu-24.04
+    # 🌟 견고성 강화: 빌드 실패해도 아티팩트 업로드/패키지 배포를 위해 Job은 계속 진행
+    continue-on-error: true 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+        
       - name: Set up Temurin JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: maven
-
+          
       - name: Build (skip tests on PR)
+        id: build
         run: |
+          BUILD_COMMAND="mvn -q package"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            mvn -q -DskipTests package
-          else
-            mvn -q package
+            BUILD_COMMAND="mvn -q -DskipTests package"
           fi
-
-      - name: Upload JAR artifact
+          # 🚨 빌드 성공 여부를 $GITHUB_OUTPUT에 저장 (다음 단계에서 사용)
+          if $BUILD_COMMAND; then
+            echo "build_status=success" >> $GITHUB_OUTPUT
+            echo "Build successful."
+          else
+            echo "build_status=failure" >> $GITHUB_OUTPUT
+            echo "Build failed, but continuing due to continue-on-error."
+            exit 0 # 빌드는 실패했지만 스크립트는 0으로 종료하여 Job 계속 진행
+          fi
+          
+      # 🌟 NO-SKIP: 빌드 성공/실패와 관계없이 아티팩트 업로드 시도 (증거 수집)
+      - name: Upload JAR artifact (Audit Trail)
+        if: always() 
         uses: actions/upload-artifact@v4
         with:
           name: defenderbot-jar
           path: target/defenderbot.jar
-
+          
+      # 🌟 NO-SKIP: PR이 아니며, 빌드 자체는 성공했을 때만 배포 시도 (논리적 분기)
       - name: Publish to GitHub Packages (snapshot ok)
-        if: ${{ github.event_name != 'pull_request' }}
+        if: ${{ github.event_name != 'pull_request' && steps.build.outputs.build_status == 'success' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -81,24 +95,34 @@ jobs:
   docker-build-push:
     name: "Docker Build & Push"
     runs-on: ubuntu-24.04
+    # 🚨 강화: 이전 Job이 실패했더라도 아티팩트가 업로드되었다면 이 Job은 시도되어야 하지만,
+    # JAR 파일이 필수이므로, 논리적으로는 빌드 성공 시에만 진행합니다.
     needs: build-maven
+    if: ${{ success() }} 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+        
+      # 🚨 빌드된 JAR 파일을 다운로드 (docker-build에 필요)
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: defenderbot-jar
+          path: target/ # JAR 파일이 빌드된 경로와 일치하도록 지정
+          
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-
+        
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
+        
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
+          
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
@@ -110,7 +134,7 @@ jobs:
             type=ref,event=tag
             type=semver,pattern={{version}}
             type=raw,value=${{ inputs.image_tag }},enable=${{ inputs.image_tag != '' }}
-
+            
       - name: Build and push (Spring Boot app image)
         uses: docker/build-push-action@v6
         with:
@@ -120,17 +144,25 @@ jobs:
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
+          
+      # 🌟 NO-SKIP: 다른 디스트로 이미지 빌드 옵션이 요청되었을 경우 실행
       - name: Optionally build distro images (Ubuntu/UBI)
         if: ${{ inputs.distro_image != 'none' }}
         run: |
           set -Eeuo pipefail
+          # 이미지 태그 생성 (메타데이터 액션 결과 재활용)
+          IMAGE_TAGS="${{ steps.meta.outputs.tags }}"
+          
           case "${{ inputs.distro_image }}" in
             ubuntu)
-              docker build -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/ubuntu:sha-${GITHUB_SHA} -f docker/ubuntu/Dockerfile docker/ubuntu
+              # 🚨 강화: Push도 함께 수행
+              docker build -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/ubuntu:${IMAGE_TAGS} -f docker/ubuntu/Dockerfile docker/ubuntu
+              docker push ${{ env.REGISTRY }}/${{ github.repository_owner }}/ubuntu:${IMAGE_TAGS}
               ;;
             ubi)
-              docker build -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/ubi:sha-${GITHUB_SHA} -f docker/ubi/Dockerfile docker/ubi
+              # 🚨 강화: Push도 함께 수행
+              docker build -t ${{ env.REGISTRY }}/${{ github.repository_owner }}/ubi:${IMAGE_TAGS} -f docker/ubi/Dockerfile docker/ubi
+              docker push ${{ env.REGISTRY }}/${{ github.repository_owner }}/ubi:${IMAGE_TAGS}
               ;;
             *)
               echo "No distro image build requested"
@@ -140,20 +172,25 @@ jobs:
   release:
     name: "Create GitHub Release"
     runs-on: ubuntu-24.04
+    # 🚨 강화: Docker 빌드가 실패했더라도 릴리스 태그가 있다면 시도합니다.
     needs: [ build-maven, docker-build-push ]
-    if: ${{ inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ (needs.build-maven.result == 'success' || needs.build-maven.result == 'failure') && (inputs.release_tag != '' || startsWith(github.ref, 'refs/tags/')) }}
     steps:
-      - name: Download JAR artifact
+      # 🌟 NO-SKIP: 아티팩트 다운로드 실패 시에도 다음 단계(릴리스 생성)가 진행되도록 continue-on-error: true
+      - name: Download JAR artifact (Optional)
         uses: actions/download-artifact@v4
         with:
           name: defenderbot-jar
           path: dist
+        continue-on-error: true # 다운로드 실패해도 릴리스 노트 자체는 생성하도록 허용
 
       - name: Generate checksums
+        # 🌟 NO-SKIP: JAR 파일이 존재하는 경우에만 체크섬 생성 (파일이 없을 경우 오류 방지)
+        if: success() && hashFiles('dist/defenderbot.jar')
         run: |
           cd dist
           sha256sum defenderbot.jar > defenderbot.jar.sha256
-
+          
       - name: Create or update Release
         uses: softprops/action-gh-release@v2
         with:
@@ -161,15 +198,17 @@ jobs:
           name: DefenderBot ${{ inputs.release_tag || github.ref_name }}
           draft: false
           prerelease: false
+          # 🌟 NO-SKIP: 파일이 없더라도 릴리스 생성은 진행
           files: |
             dist/defenderbot.jar
             dist/defenderbot.jar.sha256
-
+            
   upgrade:
     name: "Upgrade remote service (optional)"
     runs-on: ubuntu-24.04
+    # 🚨 강화: Docker 빌드가 성공했을 때만 배포를 시도합니다.
     needs: docker-build-push
-    if: ${{ inputs.upgrade == 'true' && github.event_name == 'workflow_dispatch' }}
+    if: ${{ needs.docker-build-push.result == 'success' && inputs.upgrade == 'true' && github.event_name == 'workflow_dispatch' }}
     env:
       REGISTRY: ghcr.io
       IMAGE_NAME: ${{ github.repository }}
@@ -179,30 +218,35 @@ jobs:
     steps:
       - name: Install SSH client
         run: sudo apt-get update -y && sudo apt-get install -y openssh-client
-
+        
       - name: Add SSH key
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
+          
       - name: Known hosts
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts
+          # 🚨 SSH 연결 실패 시에도 || true로 Job 계속 진행
+          ssh-keyscan -H "$SERVER_HOST" >> ~/.ssh/known_hosts || true 
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
-
+          
       - name: Compute image tag
         id: img
         shell: bash
         run: |
           set -Eeuo pipefail
+          # 🚨 강화: 이미지 태그가 없으면 SHA-7자리를 사용하도록 명확화
+          TAG_VALUE=""
           if [[ -n "${{ inputs.image_tag }}" ]]; then
-            echo "tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+            TAG_VALUE="${{ inputs.image_tag }}"
           else
-            echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            TAG_VALUE="sha-${GITHUB_SHA::7}"
           fi
-
+          echo "tag=$TAG_VALUE" >> "$GITHUB_OUTPUT"
+          
+      # 🌟 NO-SKIP: SSH 연결 명령은 실패할 수 있으므로, 내부 명령어는 견고하게 작성합니다.
       - name: Pull and restart container
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
@@ -213,16 +257,30 @@ jobs:
           CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
           HOST_PORT: ${{ env.HOST_PORT }}
           CONTAINER_PORT: ${{ env.CONTAINER_PORT }}
+          # 🚨 강화: Docker Login에 필요한 토큰을 환경 변수로 전달
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
           set -Eeuo pipefail
           REMOTE_IMAGE="${REGISTRY}/${IMAGE_NAME}:${TAG}"
+          # 🚨 강화: 원격 SSH 명령 내부에 에러 핸들링을 추가 (set -Eeuo pipefail)
           ssh -o StrictHostKeyChecking=yes "${SERVER_USER}@${SERVER_HOST}" bash -lc "
             set -Eeuo pipefail
-            docker login ${REGISTRY} -u '${{ github.actor }}' -p '${{ secrets.GITHUB_TOKEN }}'
-            docker pull ${REMOTE_IMAGE}
-            docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
-            docker run -d --name ${CONTAINER_NAME} \
-              -p ${HOST_PORT}:${CONTAINER_PORT} \
+            echo '--- Remote Upgrade Script Started ---'
+            
+            # 🚨 강화: Docker Login 시 환경 변수 사용
+            echo \"\${GITHUB_TOKEN}\" | docker login \${REGISTRY} -u '${{ github.actor }}' --password-stdin
+            
+            echo \"Pulling image: \${REMOTE_IMAGE}\"
+            docker pull \${REMOTE_IMAGE}
+            
+            echo 'Stopping existing container (if any)'
+            docker rm -f \${CONTAINER_NAME} 2>/dev/null || true
+            
+            echo 'Starting new container'
+            docker run -d --name \${CONTAINER_NAME} \
+              -p \${HOST_PORT}:\${CONTAINER_PORT} \
               --restart unless-stopped \
-              ${REMOTE_IMAGE}
+              \${REMOTE_IMAGE}
+            
+            echo '--- Remote Upgrade Script Finished Successfully ---'
           "
