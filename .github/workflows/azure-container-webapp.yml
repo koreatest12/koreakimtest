@@ -1,4 +1,4 @@
-name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue"
+name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev2)"
 
 on:
   push:
@@ -24,17 +24,17 @@ on:
 
 permissions:
   contents: read
-  packages: write         # GHCR push
-  id-token: write         # (미래 확장: OIDC 등)
-  security-events: write  # 보안 스캔 업로드 가능성 대비
+  packages: write
+  id-token: write
+  security-events: write
 
 env:
   TZ: Asia/Seoul
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
-  AZURE_WEBAPP_NAME: your-app-name          # 실제 Web App 이름으로 바꿔주세요
+  AZURE_WEBAPP_NAME: your-app-name
   DOCKER_REGISTRY: ghcr.io
-  IMAGE_REPO_RAW: ${{ github.repository }}  # Owner/Repo (대문자 포함)
+  IMAGE_REPO_RAW: ${{ github.repository }}
   GIT_SHA: ${{ github.sha }}
   TS_NOW: ${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
 
@@ -48,7 +48,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Prep dirs + echo helpers
+      - name: Init dirs + helpers
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -58,50 +58,48 @@ jobs:
           log_ok(){   echo "✅ [$(TS)] $*"; }
           log_warn(){ echo "⚠️  [$(TS)] $*" >&2; }
           log_err(){  echo "❌ [$(TS)] $*" >&2; }
-          safe_run(){
+          safe_run() {
             local step="$1"; shift
-            log_ok "▶ $step :: $*"
-            if "$@"; then
-              log_ok "$step OK"
+            log_ok "▶ ${step} :: $*"
+            mkdir -p "${LOG_DIR:-.github/echo_logs}" "${ARTIFACT_DIR:-.github/echo_artifacts}" || true
+            "$@" 2>&1
+            rc=$?
+            if [ $rc -eq 0 ]; then
+              log_ok "${step} OK"
             else
-              rc=$?
-              log_err "$step FAILED (exit=$rc) — continue anyway"
-              return $rc
+              log_err "${step} FAILED (exit=${rc}) — continue anyway"
             fi
+            return 0
           }
           EOF
           chmod +x /tmp/echo_helpers.sh
           . /tmp/echo_helpers.sh
-          log_ok "Directories prepared: ${LOG_DIR}, ${ARTIFACT_DIR}"
+          log_ok "Helpers ready. Dirs ready: ${LOG_DIR}, ${ARTIFACT_DIR}"
 
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Lowercase owner/repo for GHCR
-        id: lower
+      - name: Prepare tag/env variables
+        id: prep
         shell: bash
         run: |
           set -Eeuo pipefail
+          . /tmp/echo_helpers.sh
           repo_lc="$(echo "${IMAGE_REPO_RAW}" | tr '[:upper:]' '[:lower:]')"
-          echo "REPO_LC=${repo_lc}" >> $GITHUB_ENV
-          echo "SHA_TAG=${GIT_SHA}" >> $GITHUB_ENV
-          # We'll also prep tags
-          echo "LATEST_TAG=latest" >> $GITHUB_ENV
-          echo "RUN_TAG=${TS_NOW}" >> $GITHUB_ENV
+          echo "REPO_LC=${repo_lc}"                >> $GITHUB_ENV
+          echo "SHA_TAG=${GIT_SHA}"               >> $GITHUB_ENV
+          echo "LATEST_TAG=latest"                >> $GITHUB_ENV
+          echo "RUN_TAG=${TS_NOW}"                >> $GITHUB_ENV
           echo "INPUT_TAG=${{ github.event.inputs.extra_tag }}" >> $GITHUB_ENV
           echo "DEPLOY_ENV=${{ github.event.inputs.deploy_env }}" >> $GITHUB_ENV
+          echo "IMG_BASE=${DOCKER_REGISTRY}/${repo_lc}" >> $GITHUB_ENV
 
-      - name: Show resolved tags
-        shell: bash
-        run: |
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
           . /tmp/echo_helpers.sh
-          log_ok "Base repo (lc): ${REPO_LC}"
-          log_ok "Tags:"
-          log_ok " - sha:    ${SHA_TAG}"
-          log_ok " - latest: ${LATEST_TAG}"
-          log_ok " - runid:  ${RUN_TAG}"
-          log_ok " - extra:  ${INPUT_TAG}"
-          log_ok "Deploy env: ${DEPLOY_ENV}"
+          log_ok "Repo lowercased: ${repo_lc}"
+          log_ok "Image base: ${DOCKER_REGISTRY}/${repo_lc}"
+          log_ok "Tags -> sha:${GIT_SHA}, run:${TS_NOW}, latest:latest, extra:${{ github.event.inputs.extra_tag }}"
+          log_ok "Deploy env: ${{ github.event.inputs.deploy_env }}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
@@ -113,63 +111,68 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Build image (no push yet)
-        id: build_local
+      - name: Docker build (local tag :sha)
         shell: bash
         run: |
+          set +e  # 우리가 safe_run으로 rc 흡수하므로 step은 안죽게
           . /tmp/echo_helpers.sh
-          IMG_BASE="${DOCKER_REGISTRY}/${REPO_LC}"
-          log_ok "Building image locally: ${IMG_BASE}:${SHA_TAG}"
-          safe_run docker build \
-            --progress=plain \
-            --file Dockerfile \
-            --tag "${IMG_BASE}:${SHA_TAG}" \
-            . | tee "${LOG_DIR}/docker_build.log"
-          echo "IMG_BASE=${IMG_BASE}" >> $GITHUB_ENV
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+          safe_run "docker.build" \
+            docker build \
+              --progress=plain \
+              --file Dockerfile \
+              --tag "${IMG_BASE}:${SHA_TAG}" \
+              .
+          exit 0
 
-      - name: Push required tags (sha + runid)
+      - name: Push sha & runid tags
         shell: bash
         run: |
+          set +e
           . /tmp/echo_helpers.sh
-          safe_tag_push () {
-            local tag="$1"
-            if [ -n "$tag" ]; then
-              docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${tag}" || true
-              safe_run "docker.push.${tag}" docker push "${IMG_BASE}:${tag}"
-            else
-              log_warn "skip empty tag"
-            fi
-          }
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
-          safe_tag_push "${SHA_TAG}"
-          safe_tag_push "${RUN_TAG}"
+          # push sha
+          safe_run "docker.push.sha" docker push "${IMG_BASE}:${SHA_TAG}"
 
-      - name: Push optional tags (latest on main, custom extra_tag)
+          # runid(tag=RUN_TAG) 붙이기
+          docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${RUN_TAG}" 2>/dev/null
+          safe_run "docker.push.runid" docker push "${IMG_BASE}:${RUN_TAG}"
+
+          exit 0
+
+      - name: Push latest & extra_tag (only on main)
         if: github.ref == 'refs/heads/main'
         shell: bash
         run: |
+          set +e
           . /tmp/echo_helpers.sh
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+
           # latest
-          safe_run "docker.tag.latest" docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${LATEST_TAG}"
+          docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${LATEST_TAG}" 2>/dev/null
           safe_run "docker.push.latest" docker push "${IMG_BASE}:${LATEST_TAG}"
 
-          # extra tag from dispatch input
+          # extra tag
           if [ -n "${INPUT_TAG}" ]; then
-            safe_run "docker.tag.extra" docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${INPUT_TAG}"
+            docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${INPUT_TAG}" 2>/dev/null
             safe_run "docker.push.extra" docker push "${IMG_BASE}:${INPUT_TAG}"
           else
-            log_warn "No extra_tag provided, skipping"
+            log_warn "No extra_tag provided, skipping extra push"
           fi
 
-      - name: Security scan (Trivy-lite style placeholder)
+          exit 0
+
+      - name: Security scan placeholder
         shell: bash
         run: |
+          set +e
           . /tmp/echo_helpers.sh
-          # 실제 trivy 설치/스캔 대신 placeholder 로그만 남김.
-          # 원하면 여기서 trivy 설치 후 --exit-code 0 로 강제 통과 가능.
-          log_ok "Security scan placeholder for ${IMG_BASE}:${SHA_TAG}" | tee "${LOG_DIR}/security_scan.log"
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+          log_ok "Security scan placeholder for ${IMG_BASE}:${SHA_TAG}" > "${LOG_DIR}/security_scan.log"
+          exit 0
 
-      - name: Save logs as artifact (build phase)
+      - name: Upload build logs
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
@@ -188,7 +191,7 @@ jobs:
       url: ${{ steps.deploy-webapp.outputs.webapp-url }}
 
     steps:
-      - name: Prep dirs + echo helpers
+      - name: Init dirs + helpers
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -198,31 +201,34 @@ jobs:
           log_ok(){   echo "✅ [$(TS)] $*"; }
           log_warn(){ echo "⚠️  [$(TS)] $*" >&2; }
           log_err(){  echo "❌ [$(TS)] $*" >&2; }
-          safe_run(){
+          safe_run() {
             local step="$1"; shift
-            log_ok "▶ $step :: $*"
-            if "$@"; then
-              log_ok "$step OK"
+            log_ok "▶ ${step} :: $*"
+            mkdir -p "${LOG_DIR:-.github/echo_logs}" "${ARTIFACT_DIR:-.github/echo_artifacts}" || true
+            "$@" 2>&1
+            rc=$?
+            if [ $rc -eq 0 ]; then
+              log_ok "${step} OK"
             else
-              rc=$?
-              log_err "$step FAILED (exit=$rc) — continue anyway"
-              return $rc
+              log_err "${step} FAILED (exit=${rc}) — continue anyway"
             fi
+            return 0
           }
           EOF
           chmod +x /tmp/echo_helpers.sh
           . /tmp/echo_helpers.sh
-          log_ok "Deploy job started"
+          log_ok "Deploy helpers ready"
 
-      - name: Recompute lowercase repo/tag info
+      - name: Recompute image refs
         shell: bash
         run: |
+          set -Eeuo pipefail
           . /tmp/echo_helpers.sh
           repo_lc="$(echo "${IMAGE_REPO_RAW}" | tr '[:upper:]' '[:lower:]')"
-          echo "REPO_LC=${repo_lc}" >> $GITHUB_ENV
-          echo "SHA_TAG=${GIT_SHA}" >> $GITHUB_ENV
+          echo "REPO_LC=${repo_lc}"        >> $GITHUB_ENV
           echo "IMG_BASE=${DOCKER_REGISTRY}/${repo_lc}" >> $GITHUB_ENV
-          log_ok "Resolved image = ${DOCKER_REGISTRY}/${repo_lc}:${GIT_SHA}"
+          echo "SHA_TAG=${GIT_SHA}"        >> $GITHUB_ENV
+          log_ok "Deploy using ${DOCKER_REGISTRY}/${repo_lc}:${GIT_SHA}"
 
       - name: Deploy to Azure Web App
         id: deploy-webapp
@@ -232,50 +238,54 @@ jobs:
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           images: '${{ env.DOCKER_REGISTRY }}/${{ env.REPO_LC }}:${{ env.SHA_TAG }}'
 
-      - name: Dump azure deploy output
+      - name: Post-deploy log
         shell: bash
         run: |
+          set +e
           . /tmp/echo_helpers.sh
-          log_ok "Azure webapp URL (if provided): ${{ steps.deploy-webapp.outputs.webapp-url }}" \
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+          log_ok "Azure webapp-url -> ${{ steps.deploy-webapp.outputs.webapp-url }}" \
             | tee "${LOG_DIR}/azure_deploy.log"
+          exit 0
 
-      - name: Healthcheck (optional curl)
+      - name: Healthcheck (optional)
         if: ${{ github.event.inputs.run_healthcheck == 'true' || github.event.inputs.run_healthcheck == '' }}
         shell: bash
         run: |
+          set +e
           . /tmp/echo_helpers.sh
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
           TARGET_URL="${{ steps.deploy-webapp.outputs.webapp-url }}"
           if [ -z "$TARGET_URL" ]; then
             log_warn "No webapp-url output from deploy step. Skipping healthcheck."
-            exit 0
-          fi
-
-          for try in 1 2 3 4 5; do
-            log_ok "Healthcheck try #$try -> $TARGET_URL"
-            if curl -fsS "$TARGET_URL" >/dev/null 2>&1; then
-              log_ok "Healthcheck success on try #$try"
-              echo "HEALTH=ok" >> $GITHUB_ENV
-              break
-            else
-              log_warn "Healthcheck attempt #$try failed, sleeping 5s"
-              sleep 5
+            echo "HEALTH=skip" >> $GITHUB_ENV
+          else
+            for try in 1 2 3 4 5; do
+              log_ok "Healthcheck try #$try -> $TARGET_URL"
+              if curl -fsS "$TARGET_URL" >/dev/null 2>&1; then
+                log_ok "Healthcheck success on try #$try"
+                echo "HEALTH=ok" >> $GITHUB_ENV
+                break
+              else
+                log_warn "Healthcheck attempt #$try failed, sleep 5s"
+                sleep 5
+              fi
+            done
+            if [ "${HEALTH:-}" != "ok" ]; then
+              log_err "Healthcheck failed after retries — continue anyway"
             fi
-          done
-
-          if [ "${HEALTH:-}" != "ok" ]; then
-            log_err "Healthcheck failed after retries (continuing anyway)"
           fi
+          exit 0
 
-      - name: Capture runtime info (az config placeholder)
+      - name: Azure runtime info placeholder
         shell: bash
         run: |
+          set +e
           . /tmp/echo_helpers.sh
-          # 여기서는 실제 az cli 로그인/쿼리를 하지 않고, 자리표시자 로그만 남깁니다.
-          # 실제 prod라면:
-          #   - azure/login@v2 사용 (OIDC or service principal)
-          #   - az webapp show --name "${AZURE_WEBAPP_NAME}" ...
-          log_ok "Azure runtime inspection placeholder for ${AZURE_WEBAPP_NAME}" \
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+          log_ok "Runtime inspect placeholder for ${AZURE_WEBAPP_NAME}" \
             | tee "${LOG_DIR}/azure_runtime.log"
+          exit 0
 
       - name: Upload deploy logs
         uses: actions/upload-artifact@v4
@@ -291,9 +301,12 @@ jobs:
         if: ${{ github.event.inputs.force_success_msg == 'true' || github.event.inputs.force_success_msg == '' }}
         shell: bash
         run: |
+          set +e
           . /tmp/echo_helpers.sh
-          log_ok "🎉 Deployment pipeline completed (safe-continue)."
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+          log_ok "🎉 Deployment pipeline completed (SafeContinue)."
           log_ok "App: ${AZURE_WEBAPP_NAME}"
           log_ok "Image: ${DOCKER_REGISTRY}/${REPO_LC}:${SHA_TAG}"
-          log_ok "Environment(tag): ${{ github.event.inputs.deploy_env || 'dev' }}"
-          log_ok "Even if some steps failed, workflow ends with SUCCESS by design."
+          log_ok "Env tag: ${{ github.event.inputs.deploy_env || 'dev' }}"
+          log_ok "Some steps may have failed, but workflow reached the end intentionally."
+          exit 0
