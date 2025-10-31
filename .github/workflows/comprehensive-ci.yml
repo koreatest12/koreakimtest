@@ -135,6 +135,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: prepare-env
     if: ${{ github.event.inputs.run_security != 'false' }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -178,17 +179,19 @@ jobs:
 
   #########################################################
   # JOB 2: Build & Test (Java + Python + DB) + Coverage + Lint
+  #
+  # NOTE:
+  #  - matrix 제거 (동적값 불가) → 대신 job env에서 입력값 사용
   #########################################################
   build-and-test:
     name: "🛠 Build/Test w/ Postgres, Coverage, Lint"
     runs-on: ubuntu-latest
-    needs: [prepare-env, security-scan]
+    needs: prepare-env
 
-    strategy:
-      fail-fast: false
-      matrix:
-        java_version: [ ${{ github.event.inputs.java_version || '17' }} ]
-        python_version: [ ${{ github.event.inputs.python_version || '3.10' }} ]
+    env:
+      JAVA_VERSION: ${{ github.event.inputs.java_version || '17' }}
+      PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
+      FORCE_CONTINUE: ${{ github.event.inputs.force_continue || 'true' }}
 
     services:
       postgres:
@@ -224,7 +227,7 @@ jobs:
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          java-version: ${{ matrix.java_version }}
+          java-version: ${{ env.JAVA_VERSION }}
           distribution: temurin
 
       - name: Cache Maven repo
@@ -237,7 +240,7 @@ jobs:
 
       # Java Lint / Style (soft fail)
       - name: Java Lint / Style Check
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           echo "[Java lint placeholder] mvn spotless:check || mvn checkstyle:check || true"
 
@@ -254,19 +257,18 @@ jobs:
           echo "Maven tests complete."
           ls -R target || true
 
-      # 🔁 FIXED: dependency-submission-action 경로 수정 및 안정화
+      # Dependency Graph (Java)
       - name: Submit Java Dependency Graph
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         uses: actions/dependency-submission-action@v5
         with:
-          # build-root-directory만 주고 manifest-path는 강제하지 않음
           build-root-directory: ${{ github.workspace }}
 
       # --- Python Setup ---
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python_version }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -283,7 +285,7 @@ jobs:
           pip install pytest pytest-cov flake8 || true
 
       - name: Python Lint (flake8 soft fail)
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           if [ -f requirements.txt ]; then
             echo "Running flake8..."
@@ -298,9 +300,9 @@ jobs:
           pytest --cov=. --cov-report=xml --cov-report=term || true
           ls -R || true
 
-      # 🔁 FIXED: dependency-submission-action 경로 수정 및 안정화
+      # Dependency Graph (Python)
       - name: Submit Python Dependency Graph
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         uses: actions/dependency-submission-action@v5
         with:
           build-root-directory: ${{ github.workspace }}
@@ -331,12 +333,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-and-test
 
+    env:
+      FORCE_CONTINUE: ${{ github.event.inputs.force_continue || 'true' }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install core server packages (nginx, redis-server, postgresql-client)
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           set -Eeuo pipefail
           echo "[ServerSetup] apt-get update..."
@@ -346,7 +351,7 @@ jobs:
           sudo apt-get install -y nginx redis-server postgresql-client curl || true
 
           echo "[ServerSetup] enable and check services (where applicable)..."
-          sudo systemctl status nginx    || true
+          sudo systemctl status nginx        || true
           sudo systemctl status redis-server || true
 
           echo "[ServerSetup] nginx version:"  > server_setup_report.txt
@@ -357,7 +362,7 @@ jobs:
           psql --version                     >> server_setup_report.txt 2>&1 || true
 
       - name: Configure unattended-upgrades (auto security updates)
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           set -Eeuo pipefail
           echo "[Upgrade] Installing unattended-upgrades / update-notifier-common..."
@@ -370,7 +375,7 @@ jobs:
           echo "[Upgrade] unattended-upgrades enabled at $(date +'%Y-%m-%d %H:%M:%S%z')" >> server_setup_report.txt
 
       - name: System upgrade (dist-upgrade + cleanup)
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           set -Eeuo pipefail
           echo "[Upgrade] apt-get upgrade -y && dist-upgrade -y"
@@ -387,6 +392,7 @@ jobs:
           systemctl is-active nginx                  >> server_status_snapshot.txt 2>&1 || true
           echo "===== systemctl is-active redis =====" >> server_status_snapshot.txt
           systemctl is-active redis-server           >> server_status_snapshot.txt 2>&1 || true
+
           echo "===== ps aux | head -n 20 ====="     >> server_status_snapshot.txt
           ps aux | head -n 20                        >> server_status_snapshot.txt || true
           echo "===== df -h ====="                   >> server_status_snapshot.txt
@@ -415,6 +421,10 @@ jobs:
     needs: build-and-test
     if: ${{ github.event.inputs.run_sbom != 'false' }}
 
+    env:
+      JAVA_VERSION: ${{ github.event.inputs.java_version || '17' }}
+      FORCE_CONTINUE: ${{ github.event.inputs.force_continue || 'true' }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -422,17 +432,17 @@ jobs:
       - name: Set up Java for SBOM
         uses: actions/setup-java@v4
         with:
-          java-version: ${{ github.event.inputs.java_version || '17' }}
+          java-version: ${{ env.JAVA_VERSION }}
           distribution: temurin
 
       - name: Generate CycloneDX SBOM (Java)
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           mvn -B org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom || true
           ls -R target || true
 
       - name: Generate Python license list / audit
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           python3 -m pip install --upgrade pip pip-licenses pip-audit || true
           pip-licenses --format=json > python-licenses.json || true
@@ -457,11 +467,18 @@ jobs:
 
   #########################################################
   # JOB 5: Docker Build / Push / Security Scan / SmokeTest
+  #
+  # NOTE:
+  # - depends ONLY on server-setup-upgrade, not sbom-and-licenses
+  #   (sbom job may be skipped)
   #########################################################
   docker-build-push:
     name: "🐳 Docker Build & Push & Scan & SmokeTest"
     runs-on: ubuntu-latest
-    needs: [ server-setup-upgrade, sbom-and-licenses ]
+    needs: server-setup-upgrade
+
+    env:
+      FORCE_CONTINUE: ${{ github.event.inputs.force_continue || 'true' }}
 
     steps:
       - name: Checkout repository
@@ -530,7 +547,7 @@ jobs:
 
       - name: Install Trivy (image vulnerability scan)
         if: ${{ github.event.inputs.run_security != 'false' }}
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           sudo apt-get update -y
           sudo apt-get install -y wget apt-transport-https gnupg lsb-release
@@ -542,7 +559,7 @@ jobs:
 
       - name: Run Trivy Scan on Image
         if: ${{ github.event.inputs.run_security != 'false' }}
-        continue-on-error: ${{ github.event.inputs.force_continue == 'true' }}
+        continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           IMG="${{ steps.picktag.outputs.PRIMARY_TAG }}"
           echo "Scanning image $IMG"
