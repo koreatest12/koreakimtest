@@ -18,7 +18,7 @@ jobs:
       postgres:
         image: postgres:14
         env:
-          POSTGRE_USER: db_user
+          POSTGRES_USER: db_user
           POSTGRES_PASSWORD: db_password
           POSTGRES_DB: test_db
         ports:
@@ -33,16 +33,12 @@ jobs:
       - name: 1. 코드 체크아웃
         uses: actions/checkout@v4
 
-      # ----------------------------------------
-      # ⚠️ [오류 수정] 디버깅 단계 추가
-      # ----------------------------------------
       - name: 1-1. (디버깅) Java 작업 파일 목록 확인
         run: |
           echo "--- Java Job: 현재 작업 디렉토리: $(pwd) ---"
-          echo "--- 전체 파일 목록 (ls -R) ---"
+          echo "--- ‼️ 여기서 Java용 Dockerfile의 실제 경로와 파일명을 확인하세요 ‼️ ---"
           ls -R
           echo "--------------------------------"
-        # 이 단계의 로그를 확인하여 'Dockerfile.java'의 실제 경로와 파일명을 확인하세요.
 
       - name: 2. JDK 17 설정
         uses: actions/setup-java@v4
@@ -87,14 +83,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ----------------------------------------
-      # ⚠️ [오류 수정] Dockerfile 경로 수정
-      # ----------------------------------------
       - name: 9. Docker 빌드 및 푸시 (Java)
         uses: docker/build-push-action@v5
         with:
           context: .
-          # ‼️ [오류 수정 지점] ‼️
+          # ‼️ [1번 수정 지점] ‼️
           # '1-1. (디버깅)' 단계의 로그를 보고 실제 Dockerfile 경로로 수정하세요.
           # 예: 파일명이 그냥 'Dockerfile'이라면 -> file: ./Dockerfile
           # 예: 파일이 'java-app/Dockerfile'에 있다면 -> file: ./java-app/Dockerfile
@@ -131,16 +124,12 @@ jobs:
       - name: 1. 코드 체크아웃
         uses: actions/checkout@v4
 
-      # ----------------------------------------
-      # ⚠️ [오류 수정] 디버깅 단계 추가
-      # ----------------------------------------
       - name: 1-1. (디버깅) Python 작업 파일 목록 확인
         run: |
           echo "--- Python Job: 현재 작업 디렉토리: $(pwd) ---"
-          echo "--- 전체 파일 목록 (ls -R) ---"
+          echo "--- ‼️ 여기서 Python 스크립트와 Dockerfile의 실제 경로를 확인하세요 ‼️ ---"
           ls -R
           echo "--------------------------------"
-        # 이 단계의 로그를 확인하여 스크립트와 Dockerfile의 실제 경로를 확인하세요.
 
       - name: 2. Python 3.10 설정 (pip + 캐시)
         uses: actions/setup-python@v5
@@ -155,13 +144,22 @@ jobs:
           pip install -r requirements.txt
 
       - name: 4. Python 스크립트/테스트 실행 (DB 작업)
-        run: python src/my_script.py # <--- ‼️ 이 경로도 '1-1. (디버깅)' 로그를 보고 수정하세요!
+        # ‼️ [2번 수정 지점] ‼️
+        # '1-1. (디버깅)' 단계의 로그를 보고 실제 Python 스크립트 경로로 수정하세요.
+        # 예: python main.py
+        # 예: python my_app/run_script.py
+        run: python src/my_script.py 
         env:
           DB_HOST: localhost
           DB_PORT: 5432
           DB_NAME: test_db
           DB_USER: db_user
           DB_PASSWORD: db_password
+      
+      # ‼️ [3번 수정 지점] ‼️
+      # 만약 requirements.txt 파일이 루트에 없으면 이 경로도 수정해야 합니다.
+      - name: 5. requirements.txt 경로 확인 (예시)
+        run: echo "Checking for requirements.txt at root" && ls requirements.txt
 
       - name: 6. Docker Buildx 설정
         uses: docker/setup-buildx-action@v3
@@ -182,17 +180,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ----------------------------------------
-      # ⚠️ [오류 수정] Dockerfile 경로 수정
-      # ----------------------------------------
       - name: 9. Docker 빌드 및 푸시 (Python)
         uses: docker/build-push-action@v5
         with:
           context: .
-          # ‼️ [오류 수정 지점] ‼️
-          # '1-1. (디버깅)' 단계의 로그를 보고 실제 Dockerfile 경로로 수정하세요.
-          # 예: 파일명이 그냥 'Dockerfile'이라면 -> file: ./Dockerfile
-          # 예: 파일이 'python-app/Dockerfile'에 있다면 -> file: ./python-app/Dockerfile
+          # ‼️ [4번 수정 지점] ‼️
+          # '1-1. (디버깅)' 단계의 로그를 보고 실제 Python용 Dockerfile 경로로 수정하세요.
+          # 예: file: ./Dockerfile
+          # 예: file: ./python_app/Dockerfile
           file: ./Dockerfile.python 
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-python.outputs.tags }}
