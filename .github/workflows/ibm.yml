@@ -1,4 +1,4 @@
-name: Build and Deploy to IKS (rev7)
+name: Build and Deploy to IKS (rev8)
 
 on:
   push:
@@ -12,6 +12,7 @@ on:
 
 # 환경 변수 정의
 env:
+  TZ: Asia/Seoul
   GITHUB_SHA: ${{ github.sha }}
   IBM_CLOUD_REGION: us-south 
   REGISTRY_HOSTNAME: us.icr.io
@@ -20,9 +21,8 @@ env:
   DEPLOYMENT_NAME: iks-test
   PORT: 5001
   
-  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }} # OIDC 관련 변수들은 이 워크플로우에선 사용 안 함
-  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}            # IBM Cloud 워크플로우이므로 무시됩니다.
-  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  # 최종 결과 출력을 위한 변수 초기화
+  SERVICE_URL_FINAL: 'N/A'
 
 jobs:
   # --- [ JOB 1: IKS 클러스터 업그레이드 ] ---
@@ -182,13 +182,42 @@ jobs:
         docker push $REGISTRY_HOSTNAME/$ICR_NAMESPACE/$IMAGE_NAME:$GITHUB_SHA
       continue-on-error: true
         
-    # --- [ 배포 및 공용 주소 추출 로직 (수정 및 추가) ] ---
+    # --- [ IKS Config 재시도 및 배포 로직 (수정 및 추가) ] ---
+    - name: IKS Cluster Config (Retries)
+      if: env.AUTH_SUCCESS == 'true'
+      id: iks_config
+      shell: bash
+      run: |
+        MAX_RETRIES=3
+        CONFIG_SUCCESS=false
+
+        for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i/$MAX_RETRIES: Configuring IKS cluster..."
+            ibmcloud ks cluster config --cluster $IKS_CLUSTER
+            # kubectl이 컨텍스트를 성공적으로 인식하는지 테스트
+            if kubectl config current-context 2>/dev/null | grep -q "$IKS_CLUSTER"; then
+                echo "✅ IKS cluster config successful."
+                CONFIG_SUCCESS=true
+                break
+            else
+                echo "❌ IKS config failed (or context not found). Retrying in 5 seconds..." >&2
+                sleep 5
+            fi
+        done
+        
+        if [ "$CONFIG_SUCCESS" = "true" ]; then
+            echo "IKS_CONFIG_OK=true" >> $GITHUB_ENV
+        else
+            echo "IKS_CONFIG_OK=false" >> $GITHUB_ENV
+            echo "--- Final IKS Config Failure after $MAX_RETRIES retries. ---" >&2
+            exit 1 # 스텝 실패로 플래그 설정
+        fi
+      continue-on-error: true
+      
     - name: Deploy to IKS
-      if: env.AUTH_SUCCESS == 'true' && env.BUILD_SUCCESS == 'true'
+      if: env.AUTH_SUCCESS == 'true' && env.BUILD_SUCCESS == 'true' && env.IKS_CONFIG_OK == 'true'
       run: |
         echo "Attempting IKS Deployment..."
-        ibmcloud ks cluster config --cluster $IKS_CLUSTER
-        kubectl config current-context
         
         IMAGE_TAG="$REGISTRY_HOSTNAME/$ICR_NAMESPACE/$IMAGE_NAME:$GITHUB_SHA"
         
@@ -206,16 +235,15 @@ jobs:
 
     - name: Get Service Public Hostname and Healthcheck
       id: get_host_health
-      if: always() && env.AUTH_SUCCESS == 'true' # 👈 인증 성공 시에만 시도 (배포 실패 여부와 무관)
+      # 👈 인증과 IKS 설정이 성공했을 때만 호스트명 확인 시도 (kubectl 명령어의 성공을 보장하기 위함)
+      if: always() && env.AUTH_SUCCESS == 'true' && env.IKS_CONFIG_OK == 'true'
       shell: bash
       run: |
         SERVICE_HOST=""
         MAX_TRIES=10
         
-        # 1. 공용 IP가 할당될 때까지 재시도
         for i in $(seq 1 $MAX_TRIES); do
           echo "Attempt $i/$MAX_TRIES: Getting public service IP..."
-          # 외부 IP (EXTERNAL-IP) 컬럼에서 pending이 아닌 값을 추출
           SERVICE_HOST=$(kubectl get services $DEPLOYMENT_NAME -o jsonpath="{.status.loadBalancer.ingress[0].hostname}" 2>/dev/null)
           
           if [ -z "$SERVICE_HOST" ]; then
@@ -238,12 +266,10 @@ jobs:
           exit 0
         fi
 
-        # 2. curl 헬스 체크
         echo "--- Running Healthcheck ---"
         CURL_URL="http://$SERVICE_HOST:$PORT"
         echo "Checking $CURL_URL..."
         
-        # 3번 재시도
         for i in 1 2 3; do
           if curl -fsS "$CURL_URL" > /dev/null; then
             echo "✅ Healthcheck successful (try $i)."
@@ -260,9 +286,11 @@ jobs:
         exit 0
       continue-on-error: true
       
-    # --- [ 최종 결과 출력 ] ---
     - name: Final Deployment Status
       run: |
+        # 이전 스텝에서 설정된 SERVICE_URL_FINAL 값을 사용합니다.
+        FINAL_URL="${{ env.SERVICE_URL_FINAL }}"
+        
         echo "======================================================"
         echo "🎉 W O R K F L O W   C O M P L E T E D (SafeContinue)"
         echo "======================================================"
@@ -270,6 +298,6 @@ jobs:
         echo "Deployment Name: ${DEPLOYMENT_NAME}"
         echo "IKS Cluster: ${IKS_CLUSTER}"
         echo "--- Service Endpoint ---"
-        echo "**FINAL SERVICE URL: ${{ env.SERVICE_URL_FINAL || 'N/A' }}**"
+        echo "**FINAL SERVICE URL: ${FINAL_URL}**"
         echo "======================================================"
       if: ${{ github.event.inputs.force_success_msg == 'true' || github.event.inputs.force_success_msg == '' }}
