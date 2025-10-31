@@ -7,6 +7,7 @@ on:
 
 jobs:
   run-pipeline:
+    # Use different databases in parallel
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,12 +42,15 @@ jobs:
           set -euxo pipefail
           case "$DB" in
             postgres)
+              # Use port 5432
               docker run -d --name pgdb -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=bank -p 5432:5432 postgres:16
               ;;
             mysql)
+              # Use port 3306
               docker run -d --name mysqldb -e MYSQL_ROOT_PASSWORD=password -e MYSQL_DATABASE=bank -p 3306:3306 mysql:8
               ;;
             mariadb)
+              # Use port 3307 (host) mapped to 3306 (container)
               docker run -d --name mariadb -e MARIADB_ROOT_PASSWORD=password -e MARIADB_DATABASE=bank -p 3307:3306 mariadb:11
               ;;
             sqlite|duckdb)
@@ -77,7 +81,7 @@ jobs:
           DB_USER: ${{ matrix.db == 'postgres' && 'postgres' || 'root' }}
           DB_PASSWORD: ${{ matrix.db == 'postgres' && 'postgres' || 'password' }}
           DB_HOST: localhost
-          # CRITICAL FIX: Set port to '0' for file-based DBs instead of an empty string
+          # Set port to '0' for file-based DBs, preventing ValueError in Python
           DB_PORT: ${{ matrix.db == 'postgres' && '5432' || (matrix.db == 'mysql' && '3306' || (matrix.db == 'mariadb' && '3307' || '0') ) }}
           DB_NAME: bank
         run: |
