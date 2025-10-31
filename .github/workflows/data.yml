@@ -1,0 +1,76 @@
+name: Teradata Workflow with Echo Commands
+
+# 수동 실행 (workflow_dispatch) 및 main 브랜치 푸시 시 실행
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  # 데이터 처리를 위한 루트 디렉토리 설정
+  DATA_ROOT: /home/runner/td_data
+  
+jobs:
+  teradata_pipeline_job:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: 📥 코드 체크아웃 및 시작 로깅
+        uses: actions/checkout@v4
+        run: echo "::notice::Teradata 통합 워크플로우를 시작합니다."
+
+      # --- 1단계: 디렉토리 대량 생성 (echo 및 Shell Script 활용) ---
+      - name: 📂 디렉토리 생성 및 환경 설정 확인
+        run: |
+          # echo를 사용하여 디버그 메시지 출력
+          echo "::debug::DATA_ROOT 환경 변수 값 확인: $DATA_ROOT"
+          
+          # mkdir 명령과 echo를 사용하여 디렉토리 생성 로깅
+          echo "디렉토리 구조 생성 중..."
+          mkdir -p $DATA_ROOT/{source_files,landing_zone,logs,archive,extract_out}
+          
+          # 생성된 디렉토리 목록을 echo로 출력
+          echo "생성된 디렉토리 확인:"
+          ls -F $DATA_ROOT/
+
+      # --- 2단계: Teradata 정보 생성 (DDL 실행 시뮬레이션) ---
+      - name: 📊 Teradata 테이블(정보) 및 서비스 생성 시뮬레이션
+        # 실제 환경에서는 BTEQ, TPT 또는 Python/JDBC를 사용합니다.
+        run: |
+          echo "::group::DDL 및 SP 생성 단계"
+          echo "Teradata 접속 및 DDL 파일 (create_schema.sql) 실행 중..."
+          # DDL 실행 성공 가정하고 로그 출력
+          echo "테이블 'STG_DATA' 및 'FINAL_DATA' 생성 완료."
+          echo "저장 프로시저 'LOAD_AND_MERGE' 서비스 생성 완료."
+          echo "::endgroup::"
+          
+          # 다음 단계에서 사용될 환경 변수 설정 (::set-output 대신 GITHUB_ENV 사용)
+          echo "TARGET_TABLE=FINAL_DATA" >> $GITHUB_ENV
+          
+      # --- 3단계: 데이터 로드 및 서비스 실행 (핵심 파이프라인) ---
+      - name: 🔄 데이터 로드 및 변환/병합 실행
+        run: |
+          echo "원본 파일 $DATA_ROOT/landing_zone 에서 TPT 로드 시작..."
+          # TPT 로드 완료 가정 및 로깅
+          echo "TPT Bulk Load 완료. 500000 행 로드됨."
+          
+          # 저장 프로시저 호출 시뮬레이션 (서비스 실행)
+          echo "CALL Stored Procedure 'LOAD_AND_MERGE' 실행 중..."
+          
+          # 환경 변수 사용 로그 출력
+          echo "${{ env.TARGET_TABLE }} 테이블에 데이터 병합 완료."
+
+      # --- 4단계: 결과 파일 생성 및 아카이빙 ---
+      - name: 📤 결과 파일 추출 및 아카이빙
+        run: |
+          RESULT_FILE_NAME="report_$(date +%Y%m%d).csv"
+          
+          # echo 명령으로 추출된 결과 파일을 생성
+          echo "Extracted Data, Analysis Complete" > $DATA_ROOT/extract_out/$RESULT_FILE_NAME
+          
+          # 최종 결과 파일 생성 확인
+          echo "최종 결과 파일 생성 완료: $RESULT_ROOT/extract_out/$RESULT_FILE_NAME"
+          
+          # 성공 메시지 출력
+          echo "::notice file=$RESULT_FILE_NAME::워크플로우가 성공적으로 완료되었습니다."
