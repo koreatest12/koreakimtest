@@ -1,4 +1,4 @@
-name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev9)"
+name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev10)"
 
 on:
   push:
@@ -29,7 +29,7 @@ permissions:
   security-events: write
 
 env:
-  TZ: Asia: Seoul
+  TZ: Asia/Seoul # 👈 'rev9'의 오타 (Asia: Seoul) 수정
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
   
@@ -166,17 +166,17 @@ jobs:
           echo "IMAGE_TO_DEPLOY=${{ needs.build-and-push.outputs.image_sha_tag }}" >> $GITHUB_ENV
           
           log_ok "Will deploy image: ${{ needs.build-and-push.outputs.image_sha_tag }}"
-          log_ok "Target WebApp: ${{ env.AZURE_WEBAPP_NAME }}" # 👈 'Target WebApp' 로그 복원
+          log_ok "Target WebApp: ${{ env.AZURE_WEBAPP_NAME }}"
 
       #################################################################
-      # Gate: 'rev9'에서 의도적으로 제거됨 (스킵 없는 실행을 위해)
+      # Gate: 'rev9'/'rev10'에서 의도적으로 제거됨 (스킵 없는 실행을 위해)
       #################################################################
       
       #################################################################
       # 실제 컨테이너 이미지 배포 (azure/webapps-deploy@v3 사용)
       #################################################################
       - name: Deploy to Azure Web App (publish-profile mode)
-        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'에서 제거됨
+        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'/'rev10'에서 제거됨
         id: deploy-webapp
         uses: azure/webapps-deploy@v3
         with:
@@ -185,7 +185,7 @@ jobs:
           images: '${{ env.IMAGE_TO_DEPLOY }}'
 
       - name: Record deploy output
-        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'에서 제거됨
+        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'/'rev10'에서 제거됨
         shell: bash
         run: |
           set +e
@@ -233,7 +233,7 @@ jobs:
           exit 0
 
       - name: Azure runtime info placeholder
-        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'에서 제거됨
+        # if: env.DEPLOY_ENABLED == 'true'  <-- 'rev9'/'rev10'에서 제거됨
         shell: bash
         run: |
           set +e
