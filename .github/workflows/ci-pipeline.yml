@@ -36,7 +36,7 @@ jobs:
       - name: 1-1. (디버깅) Java 작업 파일 목록 확인
         run: |
           echo "--- Java Job: 현재 작업 디렉토리: $(pwd) ---"
-          echo "--- ‼️ 여기서 Java용 Dockerfile의 실제 경로와 파일명을 확인하세요 ‼️ ---"
+          echo "--- ‼️ 중요: 여기서 Java용 Dockerfile의 실제 경로와 파일명을 확인하세요 ‼️ ---"
           ls -R
           echo "--------------------------------"
 
@@ -87,10 +87,10 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          # ‼️ [1번 수정 지점] ‼️
-          # '1-1. (디버깅)' 단계의 로그를 보고 실제 Dockerfile 경로로 수정하세요.
-          # 예: 파일명이 그냥 'Dockerfile'이라면 -> file: ./Dockerfile
-          # 예: 파일이 'java-app/Dockerfile'에 있다면 -> file: ./java-app/Dockerfile
+          # ‼️ [1번 수정 필수 지점] ‼️
+          # '1-1. (디버깅)' 로그에서 확인한 실제 Java Dockerfile 경로로 수정하세요.
+          # 예: file: ./Dockerfile (만약 파일명이 그냥 Dockerfile 이라면)
+          # 예: file: ./backend/Dockerfile (만약 backend 폴더 안에 있다면)
           file: ./Dockerfile.java 
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-java.outputs.tags }}
@@ -127,7 +127,7 @@ jobs:
       - name: 1-1. (디버깅) Python 작업 파일 목록 확인
         run: |
           echo "--- Python Job: 현재 작업 디렉토리: $(pwd) ---"
-          echo "--- ‼️ 여기서 Python 스크립트와 Dockerfile의 실제 경로를 확인하세요 ‼️ ---"
+          echo "--- ‼️ 중요: 여기서 Python 스크립트와 Dockerfile의 실제 경로를 확인하세요 ‼️ ---"
           ls -R
           echo "--------------------------------"
 
@@ -136,18 +136,24 @@ jobs:
         with:
           python-version: '3.10'
           cache: 'pip'
+          # ‼️ [2번 수정 필수 지점] ‼️
+          # requirements.txt 파일의 실제 경로로 수정하세요.
+          # 예: cache-dependency-path: '**/requirements.txt' (루트에 있을 경우)
+          # 예: cache-dependency-path: '**/python-app/requirements.txt' (폴더 안에 있을 경우)
           cache-dependency-path: '**/requirements.txt'
 
       - name: 3. Python 종속성 설치 (pip)
         run: |
           python -m pip install --upgrade pip
+          # ‼️ [참고] requirements.txt 파일이 루트에 없다면 이 경로도 수정해야 합니다.
+          # 예: pip install -r python-app/requirements.txt
           pip install -r requirements.txt
 
       - name: 4. Python 스크립트/테스트 실행 (DB 작업)
-        # ‼️ [2번 수정 지점] ‼️
-        # '1-1. (디버깅)' 단계의 로그를 보고 실제 Python 스크립트 경로로 수정하세요.
+        # ‼️ [3번 수정 필수 지점] ‼️
+        # '1-1. (디버깅)' 로그에서 확인한 실제 Python 스크립트 경로로 수정하세요.
         # 예: python main.py
-        # 예: python my_app/run_script.py
+        # 예: python app/run.py
         run: python src/my_script.py 
         env:
           DB_HOST: localhost
@@ -155,11 +161,6 @@ jobs:
           DB_NAME: test_db
           DB_USER: db_user
           DB_PASSWORD: db_password
-      
-      # ‼️ [3번 수정 지점] ‼️
-      # 만약 requirements.txt 파일이 루트에 없으면 이 경로도 수정해야 합니다.
-      - name: 5. requirements.txt 경로 확인 (예시)
-        run: echo "Checking for requirements.txt at root" && ls requirements.txt
 
       - name: 6. Docker Buildx 설정
         uses: docker/setup-buildx-action@v3
@@ -184,10 +185,10 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          # ‼️ [4번 수정 지점] ‼️
-          # '1-1. (디버깅)' 단계의 로그를 보고 실제 Python용 Dockerfile 경로로 수정하세요.
-          # 예: file: ./Dockerfile
-          # 예: file: ./python_app/Dockerfile
+          # ‼️ [4번 수정 필수 지점] ‼️
+          # '1-1. (디버깅)' 로그에서 확인한 실제 Python Dockerfile 경로로 수정하세요.
+          # 예: file: ./Dockerfile (만약 파일명이 그냥 Dockerfile 이라면)
+          # 예: file: ./frontend/Dockerfile (만약 frontend 폴더 안에 있다면)
           file: ./Dockerfile.python 
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-python.outputs.tags }}
