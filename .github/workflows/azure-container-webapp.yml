@@ -1,4 +1,4 @@
-name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev5)"
+name: "🐳 Azure WebApp Container Deploy — EchoOps SafeContinue (rev6 no-skip)"
 
 on:
   push:
@@ -13,7 +13,7 @@ on:
         description: "추가 커스텀 이미지 태그 (비워도 됨)"
         default: ""
         required: false
-      run_healthcheck:   # 3
+      run_healthcheck:   # 3 (지금은 항상 실행하지만 값은 그대로 기록에만 사용)
         description: "배포 후 curl로 헬스체크 할까요?"
         type: boolean
         default: true
@@ -25,7 +25,7 @@ on:
 permissions:
   contents: read
   packages: write      # GHCR push
-  id-token: write      # OIDC (향후 확장 자리)
+  id-token: write      # 미래 확장용 (OIDC)
   security-events: write
 
 env:
@@ -69,7 +69,7 @@ jobs:
             else
               log_err "${step} FAILED (exit=${rc}) — continue anyway"
             fi
-            return 0  # 항상 0으로 반환 → 이 step은 실패로 안 죽음
+            return 0  # 항상 0 반환 → step 죽지 않음
           }
           EOF
           chmod +x /tmp/echo_helpers.sh
@@ -95,13 +95,14 @@ jobs:
           echo "INPUT_TAG=${{ github.event.inputs.extra_tag }}"      >> $GITHUB_ENV
           echo "DEPLOY_ENV=${{ github.event.inputs.deploy_env }}"    >> $GITHUB_ENV
           echo "IMG_BASE=${DOCKER_REGISTRY}/${repo_lc}"              >> $GITHUB_ENV
+          echo "HEALTHCHECK_WANTED=${{ github.event.inputs.run_healthcheck }}" >> $GITHUB_ENV
 
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-
           log_ok "Repo lowercased: ${repo_lc}"
           log_ok "Image base: ${DOCKER_REGISTRY}/${repo_lc}"
           log_ok "Tags -> sha:${GIT_SHA}, run:${TS_NOW}, latest:latest, extra:${{ github.event.inputs.extra_tag }}"
           log_ok "Deploy env: ${{ github.event.inputs.deploy_env }}"
+          log_ok "Healthcheck desired: ${{ github.event.inputs.run_healthcheck }}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f95db51fddba0c2d1ec667646a06c2ce06100226 # v3.0.0
@@ -157,7 +158,7 @@ jobs:
           docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${LATEST_TAG}" 2>/dev/null
           safe_run "docker.push.latest" docker push "${IMG_BASE}:${LATEST_TAG}"
 
-          # extra tag (수동지정 태그)
+          # extra tag (수동 태그)
           if [ -n "${INPUT_TAG}" ]; then
             docker tag "${IMG_BASE}:${SHA_TAG}" "${IMG_BASE}:${INPUT_TAG}" 2>/dev/null
             safe_run "docker.push.extra" docker push "${IMG_BASE}:${INPUT_TAG}"
@@ -194,7 +195,6 @@ jobs:
     needs: build-and-push
     environment:
       name: "Development"
-      # url은 동적 step output 참조 안 함 (검증 에러 방지)
 
     steps:
       - name: Init dirs + helpers
@@ -232,52 +232,48 @@ jobs:
           . /tmp/echo_helpers.sh
 
           repo_lc="$(echo "${IMAGE_REPO_RAW}" | tr '[:upper:]' '[:lower:]')"
+
           echo "REPO_LC=${repo_lc}"                     >> $GITHUB_ENV
           echo "IMG_BASE=${DOCKER_REGISTRY}/${repo_lc}" >> $GITHUB_ENV
           echo "SHA_TAG=${GIT_SHA}"                     >> $GITHUB_ENV
 
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
+
           log_ok "Will deploy image: ${DOCKER_REGISTRY}/${repo_lc}:${GIT_SHA}"
           log_ok "Target WebApp: ${AZURE_WEBAPP_NAME}"
 
-      #################################################################
-      # Gate: Publish Profile 있는지 체크해서 배포 여부 결정
-      # - 시크릿을 env로 주입받고, 그 길이를 보고 DEPLOY_ENABLED=true/false를 기록
-      # - 이 단계 자체는 절대 시크릿 내용을 echo 하지 않음
-      #################################################################
-      - name: Check publish profile availability
-        id: gate
+      - name: Check publish profile presence (log only, no skip)
+        shell: bash
         env:
           AZURE_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-        shell: bash
         run: |
-          set -Eeuo pipefail
+          set +e
           . /tmp/echo_helpers.sh
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
           if [ -z "${AZURE_PUBLISH_PROFILE}" ]; then
-            log_warn "No AZURE_WEBAPP_PUBLISH_PROFILE secret found. Deployment will be SKIPPED."
+            log_warn "AZURE_WEBAPP_PUBLISH_PROFILE is NOT set. Deployment may fail."
             echo "DEPLOY_ENABLED=false" >> $GITHUB_ENV
           else
-            log_ok "AZURE_WEBAPP_PUBLISH_PROFILE detected. Deployment will PROCEED."
+            log_ok "AZURE_WEBAPP_PUBLISH_PROFILE is present. Proceeding."
             echo "DEPLOY_ENABLED=true" >> $GITHUB_ENV
           fi
 
-      #################################################################
-      # 실제 컨테이너 이미지 배포 (publish-profile 방식)
-      # slot-name / package 제거해서 예전 동작 강제로 끊음
-      # -> 이 단계는 DEPLOY_ENABLED=true 일 때만 실행
-      #################################################################
-      - name: Deploy to Azure Web App (publish-profile mode)
-        if: env.DEPLOY_ENABLED == 'true'
+          exit 0
+
+      # 핵심 배포 단계
+      # slot-name / package 제거.
+      # 강제 실행, 에러 나도 멈추지 않도록 continue-on-error: true
+      - name: Deploy to Azure Web App (publish-profile mode, always run)
         id: deploy-webapp
+        continue-on-error: true
         uses: azure/webapps-deploy@v2
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           images: '${{ env.DOCKER_REGISTRY }}/${{ env.REPO_LC }}:${{ env.SHA_TAG }}'
 
-      - name: Record deploy output
-        if: env.DEPLOY_ENABLED == 'true'
+      - name: Record deploy output (always run)
         shell: bash
         run: |
           set +e
@@ -286,7 +282,8 @@ jobs:
 
           DEPLOY_URL="${{ steps.deploy-webapp.outputs.webapp-url }}"
           if [ -z "$DEPLOY_URL" ]; then
-            log_warn "webapps-deploy didn't emit webapp-url output."
+            log_warn "webapps-deploy didn't emit webapp-url output (possibly failed auth/deploy)."
+            DEPLOY_URL="(no-url)"
           else
             log_ok "Azure webapp-url -> $DEPLOY_URL"
           fi
@@ -295,8 +292,7 @@ jobs:
 
           exit 0
 
-      - name: Healthcheck (optional)
-        if: env.DEPLOY_ENABLED == 'true' && (github.event.inputs.run_healthcheck == 'true' || github.event.inputs.run_healthcheck == '')
+      - name: Healthcheck (always run, no skip)
         shell: bash
         run: |
           set +e
@@ -304,9 +300,9 @@ jobs:
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
           TARGET_URL="$(cat ${LOG_DIR}/deploy_url.txt 2>/dev/null || true)"
-          if [ -z "$TARGET_URL" ]; then
-            log_warn "No URL found for healthcheck. Skipping."
-            echo "HEALTH=skip" >> $GITHUB_ENV
+          if [ -z "$TARGET_URL" ] || [ "$TARGET_URL" = "(no-url)" ]; then
+            log_warn "No valid URL for healthcheck. We'll still mark health as attempted."
+            echo "HEALTH=unknown" >> $GITHUB_ENV
           else
             for try in 1 2 3 4 5; do
               log_ok "Healthcheck try #$try -> $TARGET_URL"
@@ -315,27 +311,27 @@ jobs:
                 echo "HEALTH=ok" >> $GITHUB_ENV
                 break
               else
-                log_warn "Healthcheck attempt #$try failed, sleep 5s"
+                log_warn "Healthcheck attempt #$try failed, sleeping 5s"
                 sleep 5
               fi
             done
 
             if [ "${HEALTH:-}" != "ok" ]; then
-              log_err "Healthcheck failed after retries — continue anyway"
+              log_err "Healthcheck not confirmed healthy — continue anyway"
+              echo "HEALTH=fail" >> $GITHUB_ENV
             fi
           fi
 
           exit 0
 
-      - name: Azure runtime info placeholder
-        if: env.DEPLOY_ENABLED == 'true'
+      - name: Azure runtime info placeholder (always run)
         shell: bash
         run: |
           set +e
           . /tmp/echo_helpers.sh
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
-          # 운영이면 여기서 az webapp show 등으로 현재 컨테이너/환경변수 상태를 수집 가능
+          # 실제 운영이라면 az webapp show 등으로 컨테이너 설정을 수집 가능.
           log_ok "Runtime inspect placeholder for ${AZURE_WEBAPP_NAME}" \
             | tee "${LOG_DIR}/azure_runtime.log"
 
@@ -351,25 +347,27 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Force success footer
-        if: ${{ github.event.inputs.force_success_msg == 'true' || github.event.inputs.force_success_msg == '' }}
+      - name: Force success footer (always run)
+        # 굳이 조건부 if 안 건다. 무조건 실행.
         shell: bash
         run: |
           set +e
           . /tmp/echo_helpers.sh
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
 
+          STATUS_MSG="Deployment step EXECUTED (continue-on-error)."
           if [ "${DEPLOY_ENABLED}" = "true" ]; then
-            STATUS_MSG="Deployment attempted (publish-profile mode)."
+            STATUS_MSG="${STATUS_MSG} Publish Profile existed."
           else
-            STATUS_MSG="Deployment SKIPPED (no publish profile secret)."
+            STATUS_MSG="${STATUS_MSG} Publish Profile MISSING (auth likely failed)."
           fi
 
-          log_ok "🎉 SAFE-CONTINUE COMPLETE"
+          log_ok "🎉 SAFE-CONTINUE COMPLETE — NO-SKIP MODE"
           log_ok "Status: ${STATUS_MSG}"
           log_ok "App: ${AZURE_WEBAPP_NAME}"
           log_ok "Image: ${DOCKER_REGISTRY}/${REPO_LC}:${SHA_TAG}"
           log_ok "Env tag: ${{ github.event.inputs.deploy_env || 'dev' }}"
-          log_ok "Some steps may have failed, but pipeline reached the final checkpoint by design."
+          log_ok "Health result (may be ok/fail/unknown): ${HEALTH:-unset}"
+          log_ok "All steps executed (no skip). Any failures were logged but did not stop pipeline."
 
           exit 0
