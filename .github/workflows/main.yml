@@ -136,7 +136,7 @@ jobs:
       # checkout이 워크스페이스를 초기화하면서 우리가 만든 LOG_DIR을 지울 수 있으므로
       # checkout을 항상 먼저 하고, 그 다음 다시 mkdir -p
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prep dirs (post-checkout)
         shell: bash
@@ -234,7 +234,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prep dirs (post-checkout)
         shell: bash
