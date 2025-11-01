@@ -2,7 +2,7 @@ name: "Dependency Security Check"
 
 on:
   schedule:
-    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC
+    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC (한국시간 월요일 정오쯤)
   workflow_dispatch:
   pull_request:
     paths:
@@ -29,44 +29,38 @@ env:
   REPORT_DIR: .github/sec_report
   LOG_DIR: .github/sec_report/logs
   ARTIFACT_DIR: .github/sec_report/artifacts
+  PERM_DIR: .github/sec_report/permissions
 
 jobs:
 
   ##########################################################################
-  # Node.js audit
+  # 0. 공통 Bootstrap: 디렉토리 / 권한 파일 / helpers.sh / 보안 스냅샷
   ##########################################################################
-  node-security:
-    name: "Node.js Dependency Check"
+  security-bootstrap:
+    name: "Security Bootstrap (Dirs, Permissions, Helpers)"
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        project:
-          - anthropic-cost-tracker/nodejs
-          - mcp-hello-js
-          - mcp-fs
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare dirs and helper script (no heredoc)
-        id: prep_node
+      - name: Init security dirs, helper scripts, permission docs
+        id: sec_boot
         shell: bash
         run: |
           set -Eeo pipefail
 
-          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}" "${PERM_DIR}"
 
-          # helpers.sh 생성 (printf 사용. CRLF/EOF 이슈 회피)
+          # helpers.sh (printf로 생성)
           HELPER_PATH="${REPORT_DIR}/helpers.sh"
-
           printf '%s\n' '#!/usr/bin/env bash'                           >  "$HELPER_PATH"
           printf '%s\n' 'set -Eeo pipefail'                              >> "$HELPER_PATH"
           printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' '# fallback LOG_DIR if not exported'            >> "$HELPER_PATH"
+          printf '%s\n' '# LOG_BASE fallback'                           >> "$HELPER_PATH"
           printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"'>> "$HELPER_PATH"
           printf '%s\n' ''                                              >> "$HELPER_PATH"
+          printf '%s\n' '# safe_run helper'                             >> "$HELPER_PATH"
           printf '%s\n' 'safe_run() {'                                  >> "$HELPER_PATH"
           printf '%s\n' '  local label="$1"; shift || true'             >> "$HELPER_PATH"
           printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'    >> "$HELPER_PATH"
@@ -81,6 +75,7 @@ jobs:
           printf '%s\n' '  fi'                                          >> "$HELPER_PATH"
           printf '%s\n' '}'                                             >> "$HELPER_PATH"
           printf '%s\n' ''                                              >> "$HELPER_PATH"
+          printf '%s\n' '# apt_fix: unlock apt/dpkg and retry update'   >> "$HELPER_PATH"
           printf '%s\n' 'apt_fix() {'                                   >> "$HELPER_PATH"
           printf '%s\n' '  local logfile="${LOG_BASE}/apt.fix.log"'     >> "$HELPER_PATH"
           printf '%s\n' '  echo "[fix] apt_fix start" | tee -a "$logfile"' >> "$HELPER_PATH"
@@ -91,7 +86,133 @@ jobs:
 
           chmod +x "$HELPER_PATH"
 
+          # 권한/정책 문서 생성
+          printf '%s\n' "# Global Security / Permission Policy"           >  "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
+          printf '%s\n' "Generated at: $(date '+%Y-%m-%d %H:%M:%S%z')"     >> "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
+          printf '%s\n' ""                                                >> "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
+          printf '%s\n' "- CI writes only under ${REPORT_DIR}"            >> "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
+          printf '%s\n' "- ${ARTIFACT_DIR} is for audit artifacts"        >> "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
+          printf '%s\n' "- ${LOG_DIR} may contain vuln scan logs"         >> "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
+          printf '%s\n' "- Never commit secrets here."                    >> "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
+
+          printf '%s\n' "# Node Service Permission Notes"                 >  "${PERM_DIR}/PERMISSIONS_NODE.txt"
+          printf '%s\n' "Generated at: $(date '+%Y-%m-%d %H:%M:%S%z')"     >> "${PERM_DIR}/PERMISSIONS_NODE.txt"
+          printf '%s\n' ""                                                >> "${PERM_DIR}/PERMISSIONS_NODE.txt"
+          printf '%s\n' "Intended Scopes:"                                >> "${PERM_DIR}/PERMISSIONS_NODE.txt"
+          printf '%s\n' "- Read-only package.json / package-lock.json"    >> "${PERM_DIR}/PERMISSIONS_NODE.txt"
+          printf '%s\n' "- Run npm audit locally in CI only"              >> "${PERM_DIR}/PERMISSIONS_NODE.txt"
+          printf '%s\n' "- No external publish unless explicitly allowed" >> "${PERM_DIR}/PERMISSIONS_NODE.txt"
+
+          printf '%s\n' "# Python Service Permission Notes"               >  "${PERM_DIR}/PERMISSIONS_PYTHON.txt"
+          printf '%s\n' "Generated at: $(date '+%Y-%m-%d %H:%M:%S%z')"     >> "${PERM_DIR}/PERMISSIONS_PYTHON.txt"
+          printf '%s\n' ""                                                >> "${PERM_DIR}/PERMISSIONS_PYTHON.txt"
+          printf '%s\n' "Intended Scopes:"                                >> "${PERM_DIR}/PERMISSIONS_PYTHON.txt"
+          printf '%s\n' "- Read-only requirements.txt"                    >> "${PERM_DIR}/PERMISSIONS_PYTHON.txt"
+          printf '%s\n' "- Run pip-audit / safety / bandit only in CI"    >> "${PERM_DIR}/PERMISSIONS_PYTHON.txt"
+          printf '%s\n' "- No production secrets in requirements.txt"     >> "${PERM_DIR}/PERMISSIONS_PYTHON.txt"
+
+          printf '%s\n' "# SECURITY POLICY"                               >  "${PERM_DIR}/SECURITY_POLICY.md"
+          printf '%s\n' "This repo is scanned automatically for:"        >> "${PERM_DIR}/SECURITY_POLICY.md"
+          printf '%s\n' "- Vulnerable dependencies (npm audit, pip-audit, safety)" >> "${PERM_DIR}/SECURITY_POLICY.md"
+          printf '%s\n' "- Static analysis (bandit)"                      >> "${PERM_DIR}/SECURITY_POLICY.md"
+          printf '%s\n' "- Dependency review on PRs"                      >> "${PERM_DIR}/SECURITY_POLICY.md"
+          printf '%s\n' ""                                               >> "${PERM_DIR}/SECURITY_POLICY.md"
+          printf '%s\n' "High/Critical findings must be fixed on SLA."   >> "${PERM_DIR}/SECURITY_POLICY.md"
+
+          printf '%s\n' "Internal Security Readme"                       >  "${PERM_DIR}/SECURITY_README.txt"
+          printf '%s\n' "Created: $(date '+%Y-%m-%d %H:%M:%S%z')"        >> "${PERM_DIR}/SECURITY_README.txt"
+          printf '%s\n' "This folder documents security scans, perms."  >> "${PERM_DIR}/SECURITY_README.txt"
+
+          # 러너/권한 스냅샷
+          {
+            echo "=== RUNTIME SECURITY SNAPSHOT (bootstrap) ==="
+            echo "Timestamp: $(date '+%Y-%m-%d %H:%M:%S%z')"
+            echo "Runner ID / UID / GID:"
+            id
+            echo
+            echo "umask:"
+            umask
+            echo
+            echo "REPORT_DIR tree:"
+            ls -R "${REPORT_DIR}"
+            echo
+            echo "stat on REPORT_DIR (top-level dirs):"
+            find "${REPORT_DIR}" -maxdepth 2 -type d -exec stat {} \; || true
+          } | tee "${LOG_DIR}/security_snapshot_bootstrap.log"
+
+      - name: Upload security bootstrap snapshot/artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-bootstrap-${{ github.run_number }}
+          path: |
+            .github/sec_report/permissions
+            .github/sec_report/logs/security_snapshot_bootstrap.log
+            .github/sec_report/helpers.sh
+          if-no-files-found: warn
+          retention-days: 30
+
+
+  ##########################################################################
+  # 1. Node.js audit (서비스별 아티팩트 업로드 확장)
+  ##########################################################################
+  node-security:
+    name: "Node.js Dependency Check"
+    runs-on: ubuntu-latest
+    needs: [security-bootstrap]
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - anthropic-cost-tracker/nodejs
+          - mcp-hello-js
+          - mcp-fs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure dirs/helpers from bootstrap (self-heal)
+        id: prep_node
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}" "${PERM_DIR}"
+          if [ ! -f "${REPORT_DIR}/helpers.sh" ]; then
+            HELPER_PATH="${REPORT_DIR}/helpers.sh"
+            printf '%s\n' '#!/usr/bin/env bash' > "$HELPER_PATH"
+            printf '%s\n' 'set -Eeo pipefail'  >> "$HELPER_PATH"
+            printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"' >> "$HELPER_PATH"
+            printf '%s\n' 'safe_run() { local label="$1"; shift||true; local logfile="${LOG_BASE}/${label}.log"; echo "▶ [$label] $(date "+%Y-%m-%d %H:%M:%S%z") START"|tee -a "$logfile"; if "$@" >>"$logfile" 2>&1; then echo "✅ [$label] OK"|tee -a "$logfile"; else rc=$?; echo "❌ [$label] FAILED exit=${rc}"|tee -a "$logfile"; return $rc; fi; }' >> "$HELPER_PATH"
+            printf '%s\n' 'apt_fix(){ local logfile="${LOG_BASE}/apt.fix.log"; echo "[fix] apt_fix start"|tee -a "$logfile"; sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*||true; sudo dpkg --configure -a||true; sudo apt-get update -y||sudo apt-get update -y||true; }' >> "$HELPER_PATH"
+            chmod +x "$HELPER_PATH"
+          fi
+
+          SERVICE_SAFE_NAME="${{ matrix.project//\//- }}"
           echo "Node scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
+
+          # 서비스별 권한 기록 append
+          {
+            echo "---- $(date '+%Y-%m-%d %H:%M:%S%z') NODE matrix.project=${{ matrix.project }} ----"
+            echo "Intended read paths: ${{ matrix.project }}/package.json"
+            echo "Intended write paths: ${REPORT_DIR}, ${LOG_DIR}, ${ARTIFACT_DIR}"
+          } >> "${PERM_DIR}/PERMISSIONS_NODE.txt"
+
+          # 서비스별 스냅샷 로그
+          SNAP_LOG="${LOG_DIR}/security_snapshot_node_${SERVICE_SAFE_NAME}.log"
+          {
+            echo "=== NODE JOB SECURITY SNAPSHOT ==="
+            echo "Project: ${{ matrix.project }}"
+            echo "id:"; id
+            echo
+            echo "umask:"; umask
+            echo
+            echo "REPORT_DIR tree:"; ls -R "${REPORT_DIR}"
+            echo
+            echo "stat on REPORT_DIR:"; stat "${REPORT_DIR}" || true
+          } | tee "${SNAP_LOG}"
+
+          echo "SNAP_LOG=${SNAP_LOG}" >> "$GITHUB_OUTPUT"
+          echo "SERVICE_SAFE_NAME=${SERVICE_SAFE_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Check project/package.json
         id: node_exists
@@ -136,14 +257,11 @@ jobs:
         shell: bash
         run: |
           set -Eeo pipefail
-
           echo "## NPM Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
 
-          # 항상 continue
           npm audit --json > audit.json || true
           npm audit >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
 
-          # 심각도 카운트
           if command -v jq >/dev/null 2>&1 && [ -f audit.json ]; then
             HIGH_COUNT=$(jq '.metadata.vulnerabilities.high // 0' audit.json)
             CRIT_COUNT=$(jq '.metadata.vulnerabilities.critical // 0' audit.json)
@@ -151,30 +269,36 @@ jobs:
             HIGH_COUNT=0
             CRIT_COUNT=0
           fi
-
           echo "High severity: $HIGH_COUNT"
           echo "Critical severity: $CRIT_COUNT"
-
           echo "HIGH_COUNT=${HIGH_COUNT}" >> "$GITHUB_OUTPUT"
           echo "CRIT_COUNT=${CRIT_COUNT}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Node audit artifact
+      - name: Upload Node service artifact (full package for this service)
         if: steps.node_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          # 슬래시(/)는 보기 불편해서 - 로 치환. matrix.project 은 문자열이라 join() 미사용
-          name: npm-audit-${{ github.run_number }}-${{ matrix.project }} 
-          path: ${{ matrix.project }}/audit.json
+          # 아티팩트 이름은 서비스 단위
+          name: node-sec-${{ github.run_number }}-${{ steps.prep_node.outputs.SERVICE_SAFE_NAME }}
+          # 이 서비스 감사 패키지에 필요한 모든 것 포함
+          path: |
+            ${{ matrix.project }}/audit.json
+            .github/sec_report/logs/security_snapshot_node_${{ steps.prep_node.outputs.SERVICE_SAFE_NAME }}.log
+            .github/sec_report/permissions/PERMISSIONS_NODE.txt
+            .github/sec_report/permissions/PERMISSIONS_GLOBAL.txt
+            .github/sec_report/permissions/SECURITY_POLICY.md
+            .github/sec_report/SUMMARY_node.txt
           if-no-files-found: warn
           retention-days: 30
 
 
   ##########################################################################
-  # Python audit
+  # 2. Python audit (서비스별 아티팩트 업로드 확장)
   ##########################################################################
   python-security:
     name: "Python Dependency Check"
     runs-on: ubuntu-latest
+    needs: [security-bootstrap]
     strategy:
       fail-fast: false
       matrix:
@@ -189,46 +313,48 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare dirs and helper script (no heredoc)
+      - name: Ensure dirs/helpers from bootstrap (self-heal)
         id: prep_py
         shell: bash
         run: |
           set -Eeo pipefail
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}" "${PERM_DIR}"
+          if [ ! -f "${REPORT_DIR}/helpers.sh" ]; then
+            HELPER_PATH="${REPORT_DIR}/helpers.sh"
+            printf '%s\n' '#!/usr/bin/env bash' > "$HELPER_PATH"
+            printf '%s\n' 'set -Eeo pipefail'  >> "$HELPER_PATH"
+            printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"' >> "$HELPER_PATH"
+            printf '%s\n' 'safe_run() { local label="$1"; shift||true; local logfile="${LOG_BASE}/${label}.log"; echo "▶ [$label] $(date "+%Y-%m-%d %H:%M:%S%z") START"|tee -a "$logfile"; if "$@" >>"$logfile" 2>&1; then echo "✅ [$label] OK"|tee -a "$logfile"; else rc=$?; echo "❌ [$label] FAILED exit=${rc}"|tee -a "$logfile"; return $rc; fi; }' >> "$HELPER_PATH"
+            printf '%s\n' 'apt_fix(){ local logfile="${LOG_BASE}/apt.fix.log"; echo "[fix] apt_fix start"|tee -a "$logfile"; sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*||true; sudo dpkg --configure -a||true; sudo apt-get update -y||sudo apt-get update -y||true; }' >> "$HELPER_PATH"
+            chmod +x "$HELPER_PATH"
+          fi
 
-          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
-
-          HELPER_PATH="${REPORT_DIR}/helpers.sh"
-          # 같은 helpers.sh 이름으로 덮어써도됨. 내용 동일.
-          printf '%s\n' '#!/usr/bin/env bash'                           >  "$HELPER_PATH"
-          printf '%s\n' 'set -Eeo pipefail'                              >> "$HELPER_PATH"
-          printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"'>> "$HELPER_PATH"
-          printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' 'safe_run() {'                                  >> "$HELPER_PATH"
-          printf '%s\n' '  local label="$1"; shift || true'             >> "$HELPER_PATH"
-          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'    >> "$HELPER_PATH"
-          printf '%s\n' '  echo "▶ [$label] $(date "+%Y-%m-%d %H:%M:%S%z") START" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '  if "$@" >> "$logfile" 2>&1 ; then'           >> "$HELPER_PATH"
-          printf '%s\n' '    echo "✅ [$label] OK" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '    return 0'                                  >> "$HELPER_PATH"
-          printf '%s\n' '  else'                                        >> "$HELPER_PATH"
-          printf '%s\n' '    local rc=$?'                               >> "$HELPER_PATH"
-          printf '%s\n' '    echo "❌ [$label] FAILED exit=${rc}" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '    return $rc'                                >> "$HELPER_PATH"
-          printf '%s\n' '  fi'                                          >> "$HELPER_PATH"
-          printf '%s\n' '}'                                             >> "$HELPER_PATH"
-          printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' 'apt_fix() {'                                   >> "$HELPER_PATH"
-          printf '%s\n' '  local logfile="${LOG_BASE}/apt.fix.log"'     >> "$HELPER_PATH"
-          printf '%s\n' '  echo "[fix] apt_fix start" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true' >> "$HELPER_PATH"
-          printf '%s\n' '  sudo dpkg --configure -a || true'            >> "$HELPER_PATH"
-          printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
-          printf '%s\n' '}'                                             >> "$HELPER_PATH"
-
-          chmod +x "$HELPER_PATH"
-
+          SERVICE_SAFE_NAME="${{ matrix.project//\//- }}"
           echo "Python scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
+
+          # 서비스별 권한 기록 append
+          {
+            echo "---- $(date '+%Y-%m-%d %H:%M:%S%z') PY matrix.project=${{ matrix.project }} ----"
+            echo "Intended read paths: ${{ matrix.project }}/requirements.txt"
+            echo "Intended write paths: ${REPORT_DIR}, ${LOG_DIR}, ${ARTIFACT_DIR}"
+          } >> "${PERM_DIR}/PERMISSIONS_PYTHON.txt"
+
+          # 서비스별 스냅샷 로그
+          SNAP_LOG="${LOG_DIR}/security_snapshot_py_${SERVICE_SAFE_NAME}.log"
+          {
+            echo "=== PYTHON JOB SECURITY SNAPSHOT ==="
+            echo "Project: ${{ matrix.project }}"
+            echo "id:"; id
+            echo
+            echo "umask:"; umask
+            echo
+            echo "REPORT_DIR tree:"; ls -R "${REPORT_DIR}"
+            echo
+            echo "stat on REPORT_DIR:"; stat "${REPORT_DIR}" || true
+          } | tee "${SNAP_LOG}"
+
+          echo "SNAP_LOG=${SNAP_LOG}" >> "$GITHUB_OUTPUT"
+          echo "SERVICE_SAFE_NAME=${SERVICE_SAFE_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -270,7 +396,6 @@ jobs:
         shell: bash
         run: |
           set -Eeo pipefail
-
           echo "## Pip Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
 
           pip-audit -r "${{ matrix.project }}/requirements.txt" --format json > "${{ matrix.project }}/pip-audit.json" || true
@@ -283,10 +408,8 @@ jobs:
             HIGH=0
             CRIT=0
           fi
-
           echo "High severity vulns: $HIGH"
           echo "Critical severity vulns: $CRIT"
-
           echo "HIGH_COUNT=${HIGH}" >> "$GITHUB_OUTPUT"
           echo "CRIT_COUNT=${CRIT}" >> "$GITHUB_OUTPUT"
 
@@ -309,21 +432,28 @@ jobs:
           echo "## Bandit Security Scan for $TARGET_DIR" >> "$GITHUB_STEP_SUMMARY"
           bandit -r "$TARGET_DIR" || echo "Bandit found issues" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Python audit artifact
+      - name: Upload Python service artifact (full package for this service)
         if: steps.py_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: python-audit-${{ github.run_number }}-${{ matrix.project }}
+          # 서비스 단위 아티팩트 이름
+          name: python-sec-${{ github.run_number }}-${{ steps.prep_py.outputs.SERVICE_SAFE_NAME }}
+          # 이 서비스 스캔/권한/스냅샷 전부
           path: |
             ${{ matrix.project }}/pip-audit.json
             ${{ matrix.project }}/safety.json
             ${{ matrix.project }}/bandit.json
+            .github/sec_report/logs/security_snapshot_py_${{ steps.prep_py.outputs.SERVICE_SAFE_NAME }}.log
+            .github/sec_report/permissions/PERMISSIONS_PYTHON.txt
+            .github/sec_report/permissions/PERMISSIONS_GLOBAL.txt
+            .github/sec_report/permissions/SECURITY_POLICY.md
+            .github/sec_report/SUMMARY_py.txt
           if-no-files-found: warn
           retention-days: 30
 
 
   ##########################################################################
-  # GitHub advisory gate on PR
+  # 3. GitHub advisory gate on PR
   ##########################################################################
   dependency-review:
     name: "Dependency Review (PR gate)"
@@ -342,7 +472,7 @@ jobs:
 
 
   ##########################################################################
-  # Weekly scheduled run -> if any job failed, open issue
+  # 4. Weekly scheduled run -> if any job failed, open issue
   ##########################################################################
   create-issue-on-weekly-failure:
     name: "Create Issue on Weekly Failure"
@@ -371,8 +501,8 @@ jobs:
                 "",
                 `Run details: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
                 "",
-                "Artifacts (npm-audit-*, python-audit-*)를 확인하여",
-                "취약한 패키지 및 문제 지점을 업데이트/조치해 주세요."
+                "Artifacts (node-sec-*, python-sec-*)를 확인하여",
+                "각 서비스별 취약 패키지 / 권한 스냅샷 / SECURITY_POLICY.md를 검토해 주세요."
               ].join("\n");
 
               await github.rest.issues.create({
