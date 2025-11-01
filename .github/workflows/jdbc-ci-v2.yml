@@ -1,17 +1,13 @@
-name: "🔐 Java JDBC Repository CI + DB Smoke (V2 - EOF Fix)"
+name: "🔐 Spring Boot JDBC CI + DB Test (V3 - Spring Boot)"
 
 on:
   push:
     branches: [ "main", "develop", "feature/**" ]
   pull_request:
     branches: [ "main" ]
+  # workflow_dispatch: 10개 이하 요구사항 만족 (총 4개)
   workflow_dispatch:
     inputs:
-      # 5개의 입력 (10개 제한 만족)
-      run_smoke:
-        description: "DB smoke 테스트도 실행할까요? (true/false)"
-        type: boolean
-        default: true
       mysql_user:
         description: "MySQL 유저 (기본 root)"
         required: false
@@ -36,14 +32,16 @@ env:
 
 jobs:
   build-and-test:
-    name: "Build + MySQL Init + JDBC Smoke"
+    name: "Build + MySQL Init + Spring Boot Test"
     runs-on: ubuntu-22.04
 
+    # GitHub Actions에서 MySQL 컨테이너를 서비스로 띄움
     services:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: password
+          # 서비스 시작 시 사용할 고정값 (dispatch input을 사용해도 무방)
+          MYSQL_ROOT_PASSWORD: password 
           MYSQL_DATABASE: mydb
         ports:
           - 3306:3306
@@ -54,6 +52,9 @@ jobs:
           --health-retries=20
 
     steps:
+      #################################################################
+      # 0. 준비: 체크아웃 + 로그 디렉토리 확보
+      #################################################################
       - name: "[echo] Checkout repo"
         uses: actions/checkout@v4
 
@@ -65,8 +66,12 @@ jobs:
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
           echo "runner.os=$(uname -a)"        | tee    "${LOG_DIR}/runner_info.log"
           echo "pwd=$(pwd)"                  | tee -a "${LOG_DIR}/runner_info.log"
+          echo "ls -R top-level:"            | tee -a "${LOG_DIR}/runner_info.log"
           ls -R .                            | tee -a "${LOG_DIR}/runner_info.log"
 
+      #################################################################
+      # 1. JDK / Maven 세팅
+      #################################################################
       - name: "[echo] Setup Temurin Java 17"
         uses: actions/setup-java@v4
         with:
@@ -81,19 +86,21 @@ jobs:
           java -version            | tee "${LOG_DIR}/java_version.log"
           mvn -v                   | tee "${LOG_DIR}/maven_version.log" || true
 
+      #################################################################
+      # 2. MySQL health 대기 + 스키마 생성
+      #################################################################
       - name: "[echo] Wait for MySQL service to be healthy"
         shell: bash
         run: |
           set -Eeuo pipefail
           echo "Waiting for mysql service health..."
           for i in {1..30}; do
-            if docker ps --format '{{.Names}} {{.Status}}' | grep mysql; then
-              HEALTH=$(docker inspect --format='{{json .State.Health.Status}}' ${{ job.services.mysql.id }})
-              echo "[$i] MySQL health: $HEALTH" | tee -a "${LOG_DIR}/mysql_wait.log"
-              if [ "$HEALTH" = "\"healthy\"" ]; then
-                echo "MySQL is healthy." | tee -a "${LOG_DIR}/mysql_wait.log"
-                break
-              fi
+            # 서비스 ID를 직접 참조하여 헬스체크
+            HEALTH=$(docker inspect --format='{{json .State.Health.Status}}' ${{ job.services.mysql.id }})
+            echo "[$i] MySQL health: $HEALTH" | tee -a "${LOG_DIR}/mysql_wait.log"
+            if [ "$HEALTH" = "\"healthy\"" ]; then
+              echo "MySQL is healthy." | tee -a "${LOG_DIR}/mysql_wait.log"
+              break
             fi
             sleep 2
           done
@@ -106,13 +113,11 @@ jobs:
           sudo apt-get install -y mysql-client
           mysql --version | tee "${LOG_DIR}/mysql_client_version.log"
 
-      # ===============================================================
-      #  [FIX] EOF 구문 오류 수정 (Heredoc -> -e 플래그)
-      # ===============================================================
       - name: "[echo] Init schema (CREATE TABLE users)"
         shell: bash
         run: |
           set -Eeuo pipefail
+          # workflow_dispatch 입력을 사용하거나 서비스의 고정값 사용
           DB_USER="${{ github.event.inputs.mysql_user || 'root' }}"
           DB_PASS="${{ github.event.inputs.mysql_pass || 'password' }}"
           DB_NAME="${{ github.event.inputs.mysql_db   || 'mydb' }}"
@@ -130,6 +135,7 @@ jobs:
           
           echo "Executing SQL: ${SQL_CREATE}" | tee -a "${LOG_DIR}/mysql_schema_init.log"
           
+          # [Warning]은 mysql client의 표준 경고이므로 무시합니다.
           mysql -h 127.0.0.1 -P 3306 -u"${DB_USER}" -p"${DB_PASS}" "${DB_NAME}" -e "${SQL_CREATE}" \
             2>&1 | tee -a "${LOG_DIR}/mysql_schema_init.log"
           
@@ -139,119 +145,41 @@ jobs:
           mysql -h 127.0.0.1 -P 3306 -u"${DB_USER}" -p"${DB_PASS}" "${DB_NAME}" -e "SHOW TABLES;" \
             2>&1 | tee -a "${LOG_DIR}/mysql_schema_init.log"
 
-      - name: "[echo] mvn -B -q clean package (full multimodule)"
+      #################################################################
+      # 3. Maven Build (Spring Boot Test 포함)
+      #################################################################
+      - name: "[echo] mvn -B clean package (Spring Boot Test with DB)"
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "[BUILD] mvn clean package start" | tee "${LOG_DIR}/maven_build.log"
-          mvn -B -q clean package                     2>&1 | tee -a "${LOG_DIR}/maven_build.log"
+          echo "[BUILD] mvn clean package start (with Test DB Context)" | tee "${LOG_DIR}/maven_build.log"
+          
+          # Spring Boot Test가 이 환경 변수를 자동으로 인식하여 127.0.0.1:3306 DB에 연결합니다.
+          # (src/test/resources/application.properties보다 우선순위가 높음)
+          export SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/${{ github.event.inputs.mysql_db   || 'mydb' }}?useSSL=false&serverTimezone=UTC"
+          export SPRING_DATASOURCE_USERNAME="${{ github.event.inputs.mysql_user || 'root' }}"
+          export SPRING_DATASOURCE_PASSWORD="${{ github.event.inputs.mysql_pass || 'password' }}"
+
+          echo "Injecting Spring Test Datasource:" | tee -a "${LOG_DIR}/maven_build.log"
+          echo "SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL}" | tee -a "${LOG_GDIR}/maven_build.log"
+          echo "SPRING_DATASOURCE_USERNAME=${SPRING_DATASOURCE_USERNAME}" | tee -a "${LOG_DIR}/maven_build.log"
+
+          # -B (배치 모드)로 실행. -q(quiet)는 로그를 위해 제거
+          mvn -B clean package 2>&1 | tee -a "${LOG_DIR}/maven_build.log"
+          
           BUILD_RC=${PIPESTATUS[0]}
           echo "[BUILD] mvn RC=${BUILD_RC}"      | tee -a "${LOG_DIR}/maven_build.log"
           if [ "${BUILD_RC}" != "0" ]; then
-            echo "[BUILD] Maven build failed ❌" | tee -a "${LOG_DIR}/maven_build.log"
+            echo "[BUILD] Maven build failed (Test failed or Compile error) ❌" | tee -a "${LOG_DIR}/maven_build.log"
             exit 1
           else
-            echo "[BUILD] Maven build OK ✅"     | tee -a "${LOG_DIR}/maven_build.log"
+            echo "[BUILD] Maven build OK (Test OK) ✅"     | tee -a "${LOG_DIR}/maven_build.log"
           fi
 
-      # ===============================================================
-      #  [FIX] EOF 구문 오류 수정 (cat <<EOF -> printf)
-      # ===============================================================
-      - name: "[echo] JDBC Smoke Test (INSERT -> SELECT)" 
-        shell: bash
-        continue-on-error: true
-        if: github.event.inputs.run_smoke == 'true'
-        run: |
-          set -Eeuo pipefail
-          DB_URL="jdbc:mysql://localhost:3306/mydb?useSSL=false&serverTimezone=UTC"
-          DB_USER="${{ github.event.inputs.mysql_user || 'root' }}"
-          DB_PASS="${{ github.event.inputs.mysql_pass || 'password' }}"
-
-          # 'cat <<EOF'는 YAML 들여쓰기 문제로 오류가 발생할 수 있으므로
-          # printf를 사용해 파일을 안정적으로 생성합니다.
-          printf '%s\n' \
-            'import java.sql.*;' \
-            '' \
-            'public class JdbcSmokeTest {' \
-            '    public static void main(String[] args) throws Exception {' \
-            '        String url  = System.getenv("DB_URL");' \
-            '        String user = System.getenv("DB_USER");' \
-            '        String pass = System.getenv("DB_PASS");' \
-            '' \
-            '        try (Connection conn = DriverManager.getConnection(url, user, pass)) {' \
-            '            System.out.println("[SMOKE] Connection successful.");' \
-            '' \
-            '            // INSERT (PreparedStatement 사용 - 안전)' \
-            '            try (PreparedStatement pstmt = conn.prepareStatement(' \
-            '                    "INSERT INTO users (name, age) VALUES (?, ?)",' \
-            '                    Statement.RETURN_GENERATED_KEYS' \
-            '                )) {' \
-            '                pstmt.setString(1, "SmokeTester");' \
-            '                pstmt.setInt(2, 99);' \
-            '                int rows = pstmt.executeUpdate();' \
-            '                System.out.println("[SMOKE] inserted rows=" + rows);' \
-            '' \
-            '                try (ResultSet keys = pstmt.getGeneratedKeys()) {' \
-            '                    while (keys.next()) {' \
-            '                        System.out.println("[SMOKE] new id=" + keys.getInt(1));' \
-            '                    }' \
-            '                }' \
-            '            }' \
-            '' \
-            '            // SELECT (PreparedStatement로 ? 바인딩)' \
-            '            try (PreparedStatement pstmt = conn.prepareStatement(' \
-            '                    "SELECT id, name, age FROM users WHERE name = ?"' \
-            '                )) {' \
-            '                pstmt.setString(1, "SmokeTester");' \
-            '                try (ResultSet rs = pstmt.executeQuery()) {' \
-            '                    while (rs.next()) {' \
-            '                        System.out.println(' \
-            '                            "[SMOKE] row => id=" + rs.getInt("id")' \
-            '                            + ", name="   + rs.getString("name")' \
-            '                            + ", age="    + rs.getInt("age")' \
-            '                        );' \
-            '                    }' \
-            '                }' \
-            '            }' \
-            '        } catch (SQLException e) {' \
-            '            System.err.println("[SMOKE] SQL Exception: " + e.getMessage());' \
-            '            e.printStackTrace();' \
-            '            throw e;' \
-            '        }' \
-            '    }' \
-            '}' \
-            > JdbcSmokeTest.java
-
-          echo "[SMOKE] JdbcSmokeTest.java file created." | tee "${LOG_DIR}/smoke.log"
-
-          # Maven Classpath 가져오기
-          mvn -q -pl core-db dependency:build-classpath -Dmdep.outputFile=/tmp/classpath.txt >/dev/null
-          export MVN_CP=$(cat /tmp/classpath.txt)
-
-          echo "[SMOKE] compiling JdbcSmokeTest.java" | tee -a "${LOG_DIR}/smoke.log"
-          javac -cp ".:$(pwd)/core-db/target/classes:$(pwd)/app-cli/target/classes:${MVN_CP}" \
-                JdbcSmokeTest.java 2>&1 | tee -a "${LOG_DIR}/smoke.log"
-          
-          COMPILE_RC=${PIPESTATUS[0]}
-          if [ "${COMPILE_RC}" != "0" ]; then
-            echo "[SMOKE] Java compile failed ❌" | tee -a "${LOG_DIR}/smoke.log"
-            exit 1
-          fi
-
-          echo "[SMOKE] running JdbcSmokeTest" | tee -a "${LOG_DIR}/smoke.log"
-          DB_URL="${DB_URL}" DB_USER="${DB_USER}" DB_PASS="${DB_PASS}" \
-          java -cp ".:$(pwd)/core-db/target/classes:$(pwd)/app-cli/target/classes:${MVN_CP}" \
-               JdbcSmokeTest 2>&1 | tee -a "${LOG_DIR}/smoke.log"
-          
-          RUN_RC=${PIPESTATUS[0]}
-          if [ "${RUN_RC}" != "0" ]; then
-            echo "[SMOKE] Java run failed ❌" | tee -a "${LOG_DIR}/smoke.log"
-            exit 1
-          fi
-
-          echo "[SMOKE] done" | tee -a "${LOG_DIR}/smoke.log"
-
-      - name: "[echo] Collect logs/artifacts"
+      #################################################################
+      # 4. 결과 아티팩트 업로드 (증적 수집)
+      #################################################################
+      - name: "[echo] Collect logs/artifacts (with Test Reports)"
         if: always() # 실패 여부와 관계없이 항상 실행
         shell: bash
         run: |
@@ -259,13 +187,18 @@ jobs:
           echo "Copying logs into artifact dir..."
           cp -r "${LOG_DIR}" "${ARTIFACT_DIR}/logs" || true
           
+          echo "Copying JARs into artifact dir..."
           mkdir -p "${ARTIFACT_DIR}/build_jars"
           find . -name "*.jar" -exec cp {} "${ARTIFACT_DIR}/build_jars" \; 2>/dev/null || true
+          
+          echo "Copying Maven test reports..."
+          mkdir -p "${ARTIFACT_DIR}/test-reports"
+          cp -r target/surefire-reports "${ARTIFACT_DIR}/test-reports" 2>/dev/null || true
 
       - name: "[echo] Upload echo logs & jars"
         if: always() # 실패 여부와 관계없이 항상 실행
         uses: actions/upload-artifact@v4
         with:
-            name: jdbc-ci-artifacts-${{ github.run_id }}
+            name: spring-ci-artifacts-${{ github.run_id }}
             path: ${{ env.ARTIFACT_DIR }}
             if-no-files-found: warn
