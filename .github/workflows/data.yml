@@ -11,35 +11,42 @@ on:
         type: choice
         options: [full, lite]
         default: full
+
       gen_rows:             # 2
         description: "생성할 가상 데이터 행 수 (빈값이면 기본 GEN_ROWS)"
         required: false
         default: ""
+
       expected_rows:        # 3
         description: "품질검증 기대 로우 수 (빈값이면 기본 EXPECTED_ROWCOUNT)"
         required: false
         default: ""
+
       dr_backup:            # 4
         description: "DR(외부) 백업 시도 여부 (true/false)"
         type: choice
         options: ["true", "false"]
         default: "false"
-      include_masking_audit:# 5
+
+      include_masking_audit:  # 5
         description: "민감필드 마스킹 정책 로그 포함 여부"
         type: choice
         options: ["true", "false"]
         default: "true"
-      include_healthcheck:  # 6
+
+      include_healthcheck:    # 6
         description: "시스템 헬스/보안 점검 로그 포함 여부"
         type: choice
         options: ["true", "false"]
         default: "true"
-      include_schema_diff:  # 7
+
+      include_schema_diff:    # 7
         description: "DDL/TPT 변경 diff 기록 여부"
         type: choice
         options: ["true", "false"]
         default: "true"
-      sla_tracking:         # 8
+
+      sla_tracking:           # 8
         description: "SLA/SLO 시간 측정, 재시도 기록 여부"
         type: choice
         options: ["true", "false"]
@@ -83,10 +90,10 @@ jobs:
       #######################################################################
       # 0. 코드 체크아웃 + 시작 알림
       #######################################################################
-      - name: 📥 코드 체크아웃
+      - name: "📥 코드 체크아웃"
         uses: actions/checkout@v4
 
-      - name: 📝 워크플로우 시작 로깅
+      - name: "📝 워크플로우 시작 로깅"
         run: |
           echo "::notice::Teradata 통합 워크플로우 시작 (야간배치/수동실행/Push 공통)."
           echo "::debug::DATA_ROOT=${DATA_ROOT}, TARGET_TABLE=${TARGET_TABLE}, GEN_ROWS=${GEN_ROWS}"
@@ -96,7 +103,7 @@ jobs:
       #######################################################################
       # 0.2 SLA 타이머 시작 (SLA/SLO 추적용)
       #######################################################################
-      - name: ⏱ SLA 타이머 시작
+      - name: "⏱ SLA 타이머 시작"
         run: |
           mkdir -p "${DATA_ROOT}/logs" "${DATA_ROOT}/history"
           date +%s > "${DATA_ROOT}/logs/start_epoch.txt"
@@ -106,7 +113,7 @@ jobs:
       # 0.5 러너 환경 업그레이드 (apt upgrade 등)
       #     실패해도 계속. 결과는 업그레이드 로그로 남김
       #######################################################################
-      - name: 🔄 러너 패키지 업그레이드 (시스템 업데이트 & 업그레이드)
+      - name: "🔄 러너 패키지 업그레이드 (시스템 업데이트 & 업그레이드)"
         continue-on-error: true
         run: |
           set +e
@@ -114,7 +121,9 @@ jobs:
           UPG_LOG="${DATA_ROOT}/logs/system_upgrade.log"
           BEFORE_LIST="${DATA_ROOT}/logs/pkg_list_before.txt"
           AFTER_LIST="${DATA_ROOT}/logs/pkg_list_after.txt"
+
           dpkg -l > "$BEFORE_LIST" 2>/dev/null || true
+
           {
             echo "===== SYSTEM UPGRADE START ====="
             date
@@ -130,21 +139,24 @@ jobs:
             lsb_release -a 2>/dev/null || echo "lsb_release not available"
             echo "===== SYSTEM UPGRADE END ====="
           } > "$UPG_LOG" 2>&1
+
           dpkg -l > "$AFTER_LIST" 2>/dev/null || true
           diff -u "$BEFORE_LIST" "$AFTER_LIST" > "${DATA_ROOT}/logs/pkg_upgrade_diff.txt" || true
+
           echo "::notice::시스템 업그레이드(패키지 최신화) 시도 완료. 상세 내용은 $UPG_LOG 및 pkg_upgrade_diff.txt 참고."
           set -e
 
       #######################################################################
       # 1. 디렉토리 준비 + 구조 생성
       #######################################################################
-      - name: 📂 디렉토리 생성 및 환경 초기화
+      - name: "📂 디렉토리 생성 및 환경 초기화"
         run: |
           set -e
           echo "디렉토리 구조 생성 중..."
           mkdir -p "${DATA_ROOT}"/{source_files,landing_zone,logs,archive,extract_out,tmp,quality,release,history,governance,health,dr_backup}
           echo "생성된 디렉토리 확인:"
           ls -R "${DATA_ROOT}" || true
+
           # 파티션/보존 정책 시뮬 로그(데이터 보존/아카이브 전략 기록)
           cat > "${DATA_ROOT}/logs/retention_policy.log" <<'EOF'
           [RETENTION POLICY SIMULATION]
@@ -159,7 +171,7 @@ jobs:
       # 1.5 가상 데이터 대량 생성 (landing_zone 에 대용량 CSV 생성)
       #     dispatch 입력값(gen_rows)이 있으면 우선 사용
       #######################################################################
-      - name: 🏗 가상 데이터 대량 생성
+      - name: "🏗 가상 데이터 대량 생성"
         run: |
           set -e
           # rows 결정 (dispatch override 우선)
@@ -169,7 +181,9 @@ jobs:
           else
             ROWS="${GEN_ROWS}"
           fi
+
           SRC_FILE="${DATA_ROOT}/landing_zone/input_$(date +%Y%m%d).csv"
+
           echo "COL1,COL2,AMOUNT,LOAD_TS" > "$SRC_FILE"
           echo "가상 데이터 ${ROWS}행 생성 중..."
           i=1
@@ -177,25 +191,29 @@ jobs:
             # 랜덤 금액 (100 ~ 999900 사이)
             AMT=$(( (RANDOM % 999800) + 100 ))
             MERCH=$(( (RANDOM % 9000) + 1000 ))
-            # 이상 거래 시뮬: 아주 큰 금액은 'FLAG-HIGH' 메모를 붙여서 품질 보고에 사용
+
+            # 이상 거래 시뮬: 아주 큰 금액은 'FLAG-HIGH'
             if [ $AMT -gt 900000 ]; then
               NOTE="MERCHANT_${MERCH}_FLAG-HIGH_${i}"
             else
               NOTE="MERCHANT_${MERCH}_NOTE_${i}"
             fi
+
             echo "${i},${NOTE},${AMT},$(date +%Y-%m-%dT%H:%M:%S%z)" >> "$SRC_FILE"
             i=$((i+1))
           done
+
           ls -lh "$SRC_FILE"
           head -n 5 "$SRC_FILE"
           tail -n 5 "$SRC_FILE"
+
           echo "${ROWS}" > "${DATA_ROOT}/tmp/generated_rowcount.txt"
           echo "::notice::가상 CSV 생성 완료 (${ROWS} rows) -> $SRC_FILE"
 
       #######################################################################
       # 2. 환경 스냅샷 (보안/감사용 런타임 증빙)
       #######################################################################
-      - name: 🔍 런타임 환경 스냅샷 저장
+      - name: "🔍 런타임 환경 스냅샷 저장"
         run: |
           SNAP="${DATA_ROOT}/logs/env_snapshot.txt"
           {
@@ -222,7 +240,7 @@ jobs:
       #######################################################################
       # 2.5 시스템 헬스/보안 점검 (네트워크, dmesg, 포트 등)
       #######################################################################
-      - name: 🩺 시스템 헬스 및 보안 점검
+      - name: "🩺 시스템 헬스 및 보안 점검"
         if: ${{ github.event.inputs.include_healthcheck != 'false' }}
         run: |
           HEALTH_LOG="${DATA_ROOT}/health/system_health.log"
@@ -241,7 +259,7 @@ jobs:
             echo "--- I/O stat (iostat if available) ---"
             iostat 2>/dev/null || echo "iostat not available"
             echo
-            echo "--- 네트워크 외부 연결 테스트 (차단 여부 확인용) ---"
+            echo "--- 네트워크 외부 연결 테스트 ---"
             curl -I https://example.com 2>&1 | head -n 5 || echo "curl external check failed or blocked"
           } > "$HEALTH_LOG"
           echo "::notice::시스템 헬스 체크 로그 생성 완료 -> $HEALTH_LOG"
@@ -249,11 +267,12 @@ jobs:
       #######################################################################
       # 3. DDL / TPT / 쿼리 정의 백업
       #######################################################################
-      - name: 🧱 DDL/TPT/쿼리 스크립트 백업 (각 서비스별 table / query)
+      - name: "🧱 DDL/TPT/쿼리 스크립트 백업 (각 서비스별 table / query)"
         run: |
           set -e
           mkdir -p "${DATA_ROOT}/source_files/sql"
           mkdir -p "${DATA_ROOT}/source_files/tpt"
+
           # 테이블 정의
           cat > "${DATA_ROOT}/source_files/sql/create_tables.sql" <<'SQL'
           -- [STAGING TABLE] (원천 덤프를 그대로 적재)
@@ -264,6 +283,7 @@ jobs:
             LOAD_TS    TIMESTAMP,
             BATCH_ID   VARCHAR(40)
           );
+
           -- [FINAL TABLE] (정제/변환/중복제거 후 운영영역)
           CREATE TABLE FINAL_DATA (
             COL1       INTEGER,
@@ -273,6 +293,7 @@ jobs:
             ETL_TS     TIMESTAMP,
             SRC_BATCH  VARCHAR(40)
           );
+
           -- [AUDIT TABLE] (배치 적재 이력/품질 검증 결과)
           CREATE TABLE LOAD_AUDIT_LOG (
             AUDIT_TS        TIMESTAMP,
@@ -284,6 +305,7 @@ jobs:
             STATUS_MESSAGE  VARCHAR(2000),
             OPERATOR        VARCHAR(128)
           );
+
           -- 인덱스 예시
           CREATE INDEX IDX_FINAL_DATA_COL1 ON FINAL_DATA (COL1);
           CREATE INDEX IDX_AUDIT_BATCH     ON LOAD_AUDIT_LOG (BATCH_ID);
@@ -307,6 +329,7 @@ jobs:
               p_batch_id
             FROM STG_DATA
             WHERE BATCH_ID = p_batch_id;
+
             /* 2) AUDIT LOG 에 이력 축적 */
             INSERT INTO LOAD_AUDIT_LOG (
               AUDIT_TS, BATCH_ID, SRC_FILE,
@@ -337,6 +360,7 @@ jobs:
               AMOUNT     BIGINT,
               LOAD_TS    VARCHAR(30)
             );
+
             DEFINE OPERATOR FILE_READER
             TYPE DATACONNECTOR PRODUCER
             SCHEMA STG_SCHEMA
@@ -345,16 +369,18 @@ jobs:
               FileName = '/home/runner/td_data/landing_zone/input_YYYYMMDD.csv',
               Format   = 'Delimited'
             );
+
             DEFINE OPERATOR TPT_INSERTER
             TYPE STREAM
             TARGET TABLE STG_DATA
             ATTRIBUTES
             (
-              TdpId    = 'TERADATA_SID',
-              UserName = 'ETL_USER',
+              TdpId        = 'TERADATA_SID',
+              UserName     = 'ETL_USER',
               UserPassword = 'ETL_PASS',
-              LogTable = 'ETL_LOG_TABLE'
+              LogTable     = 'ETL_LOG_TABLE'
             );
+
             APPLY
             (
               'INSERT INTO STG_DATA (COL1, COL2, AMOUNT, LOAD_TS, BATCH_ID)
@@ -373,10 +399,12 @@ jobs:
           SELECT COUNT(*) AS CNT_STG
           FROM STG_DATA
           WHERE BATCH_ID = :BATCH_ID;
+
           -- 최종 FINAL_DATA 반영 건수
           SELECT COUNT(*) AS CNT_FINAL
           FROM FINAL_DATA
           WHERE SRC_BATCH = :BATCH_ID;
+
           -- 품질: NULL 메모 비율, 고액 거래 비율 등
           SELECT
             SUM(CASE WHEN COL2 IS NULL OR TRIM(COL2) = '' THEN 1 ELSE 0 END) AS NULL_MEMO_ROWS,
@@ -386,6 +414,7 @@ jobs:
             AVG(AMOUNT) AS AVG_AMOUNT
           FROM FINAL_DATA
           WHERE SRC_BATCH = :BATCH_ID;
+
           -- 최근 AUDIT 로그 (배치별 최신 히스토리)
           SELECT *
           FROM LOAD_AUDIT_LOG
@@ -400,27 +429,28 @@ jobs:
       #######################################################################
       # 3.5 스키마 변경 감시 (schema diff)
       #######################################################################
-      - name: 🧾 스키마 변경 diff 기록
+      - name: "🧾 스키마 변경 diff 기록"
         if: ${{ github.event.inputs.include_schema_diff != 'false' }}
         run: |
-          # 지난 실행 때 저장해뒀던 스냅샷과 비교
           PREV_SCHEMA="${DATA_ROOT}/history/last_create_tables.sql"
           CURR_SCHEMA="${DATA_ROOT}/source_files/sql/create_tables.sql"
           DIFF_LOG="${DATA_ROOT}/logs/schema_diff.log"
+
           if [ -f "$PREV_SCHEMA" ]; then
             diff -u "$PREV_SCHEMA" "$CURR_SCHEMA" > "$DIFF_LOG" || true
           else
             echo "[first run or no prev schema]" > "$DIFF_LOG"
           fi
+
           cp "$CURR_SCHEMA" "$PREV_SCHEMA" 2>/dev/null || cp "$CURR_SCHEMA" "$PREV_SCHEMA"
+
           echo "::notice::스키마 diff 결과 -> $DIFF_LOG"
           head -n 200 "$DIFF_LOG" || true
 
       #######################################################################
       # 4. 데이터 적재 & 병합 시뮬
-      #    재시도/복구 시나리오도 기록(SLA_tracking==true일 때)
       #######################################################################
-      - name: 🔄 데이터 로드 및 변환/병합 실행 (대량 가상데이터 / 실패해도 계속)
+      - name: "🔄 데이터 로드 및 변환/병합 실행 (대량 가상데이터 / 실패해도 계속)"
         continue-on-error: true
         run: |
           set +e
@@ -430,6 +460,7 @@ jobs:
           STATUS_FILE="${DATA_ROOT}/logs/pipeline_status.log"
 
           GENERATED_COUNT=$(cat "${DATA_ROOT}/tmp/generated_rowcount.txt" 2>/dev/null || echo "${GEN_ROWS}")
+
           EXPECTED_IN="${{ github.event.inputs.expected_rows || '' }}"
           if [ -n "$EXPECTED_IN" ]; then
             EXPECTED_LOCAL="$EXPECTED_IN"
@@ -477,14 +508,15 @@ jobs:
 
       #######################################################################
       # 5. 품질 검증 / QC 로그 생성
-      #    고액 거래 비중, NULL 비율, 전일 대비 증감률 등도 기록
       #######################################################################
-      - name: ✅ 품질 검증 및 QC 로그 생성
+      - name: "✅ 품질 검증 및 QC 로그 생성"
         run: |
           QUALITY_LOG="${DATA_ROOT}/quality/quality_check.log"
           STATUS_FILE="${DATA_ROOT}/logs/pipeline_status.log"
-          EXPECTED="$(grep '^ROW_EXPECTED=' \"$STATUS_FILE\" 2>/dev/null | cut -d= -f2)"
-          ACTUAL="$(grep '^ROW_LOADED='   \"$STATUS_FILE\" 2>/dev/null | cut -d= -f2)"
+
+          EXPECTED="$(grep '^ROW_EXPECTED=' "$STATUS_FILE" 2>/dev/null | cut -d= -f2)"
+          ACTUAL="$(grep '^ROW_LOADED='   "$STATUS_FILE" 2>/dev/null | cut -d= -f2)"
+
           [ -z "$EXPECTED" ] && EXPECTED="${EXPECTED_ROWCOUNT}"
           [ -z "$ACTUAL" ] && ACTUAL="0"
 
@@ -493,7 +525,7 @@ jobs:
             ROW_COUNT_OK="true"
           fi
 
-          # 고액 거래 ("FLAG-HIGH") 건수 / 비율
+          # 고액 거래 비율
           HIGH_COUNT=$(grep 'FLAG-HIGH' "${DATA_ROOT}/landing_zone"/input_*.csv | wc -l || echo "0")
           if [ "$ACTUAL" -gt 0 ]; then
             HIGH_RATIO=$(echo "$HIGH_COUNT * 100 / $ACTUAL" | bc 2>/dev/null || echo "0")
@@ -501,7 +533,7 @@ jobs:
             HIGH_RATIO="0"
           fi
 
-          # 전일 대비 증감률(단순 시뮬): 이전 run history 확인
+          # 전일 대비 증감률
           LAST_HIST="${DATA_ROOT}/history/last_run_stats.txt"
           PREV_ROWS="N/A"
           GROWTH="N/A"
@@ -547,7 +579,7 @@ jobs:
       #######################################################################
       # 5.5 민감 필드 마스킹/토큰화 정책 감사 로그
       #######################################################################
-      - name: 🛡 민감 데이터 마스킹 정책 감사 로그
+      - name: "🛡 민감 데이터 마스킹 정책 감사 로그"
         if: ${{ github.event.inputs.include_masking_audit != 'false' }}
         run: |
           MASK_LOG="${DATA_ROOT}/logs/masking_audit.log"
@@ -559,13 +591,14 @@ jobs:
             echo "- ACCESS CONTROL: ANALYST_ROLE 은 마스킹된 컬럼만 SELECT 가능"
             echo "- 변경 승인자(DATA_OWNER_X) 승인일=$(date +%Y-%m-%dT%H:%M:%S%z)"
           } > "$MASK_LOG"
+
           echo "::notice::민감 데이터 마스킹 정책 로그 생성 완료 -> $MASK_LOG"
           head -n 40 "$MASK_LOG" || true
 
       #######################################################################
-      # 6. 권한/접근제어 감사 기록 (ROLE/GRANT/REVOKE + row/column-level 통제 설명)
+      # 6. 권한/접근제어 감사 기록
       #######################################################################
-      - name: 🔐 권한/접근제어 감사 기록 생성
+      - name: "🔐 권한/접근제어 감사 기록 생성"
         run: |
           ACL_LOG="${DATA_ROOT}/logs/acl_audit.sql"
           {
@@ -588,19 +621,22 @@ jobs:
             echo "-- COMMIT_SHA=$GITHUB_SHA"
             echo "-- BRANCH=$GITHUB_REF_NAME"
           } > "$ACL_LOG"
+
           echo "::debug::권한 감사 로그 생성 완료 -> $ACL_LOG"
           head -n 60 "$ACL_LOG" || true
 
       #######################################################################
       # 7. 릴리즈 스냅샷 & 압축본 생성 (tar.gz) + 무결성 해시
       #######################################################################
-      - name: 🗜 결과물 tar.gz 스냅샷 생성
+      - name: "🗜 결과물 tar.gz 스냅샷 생성"
         run: |
           SNAP_TAG="td-snapshot-$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA:0:8}"
           SNAP_DIR="${DATA_ROOT}/release"
           SNAP_FILE="${SNAP_DIR}/${SNAP_TAG}.tar.gz"
+
           echo "SNAP_TAG=$SNAP_TAG"    | tee "${DATA_ROOT}/logs/snapshot_tag.txt"
           echo "SNAP_FILE=$SNAP_FILE"  | tee -a "${DATA_ROOT}/logs/snapshot_tag.txt"
+
           mkdir -p "$SNAP_DIR"
           tar -czf "$SNAP_FILE" \
             -C "${DATA_ROOT}" \
@@ -613,8 +649,10 @@ jobs:
             health \
             governance \
             || true
+
           # 무결성 해시 기록
           sha256sum "$SNAP_FILE" > "${DATA_ROOT}/logs/snapshot_hash.txt" 2>/dev/null || echo "hash_failed" > "${DATA_ROOT}/logs/snapshot_hash.txt"
+
           echo "::notice::스냅샷 아카이브 생성 -> $SNAP_FILE"
           ls -lh "$SNAP_FILE" || true
           head -n 5 "${DATA_ROOT}/logs/snapshot_hash.txt" || true
@@ -622,7 +660,7 @@ jobs:
       #######################################################################
       # 7.5 DR(재해복구) 외부 업로드 시뮬 (선택)
       #######################################################################
-      - name: 🌐 DR(재해복구) 백업 시도
+      - name: "🌐 DR(재해복구) 백업 시도"
         if: ${{ github.event.inputs.dr_backup == 'true' }}
         continue-on-error: true
         env:
@@ -632,6 +670,7 @@ jobs:
           SNAP_INFO="${DATA_ROOT}/logs/snapshot_tag.txt"
           SNAP_TAG=$(grep '^SNAP_TAG=' "$SNAP_INFO" | cut -d= -f2)
           SNAP_FILE=$(grep '^SNAP_FILE=' "$SNAP_INFO" | cut -d= -f2)
+
           DR_LOG="${DATA_ROOT}/logs/dr_backup_attempt.log"
           {
             echo "[DR BACKUP SIMULATION]"
@@ -647,13 +686,14 @@ jobs:
               echo "UPLOAD_STATUS=FAILED(no credentials)"
             fi
           } > "$DR_LOG"
+
           echo "::warning::DR 백업 시뮬 결과 -> $DR_LOG"
           head -n 50 "$DR_LOG" || true
 
       #######################################################################
       # 8. GitHub Release 업로드 시도 (옵션)
       #######################################################################
-      - name: 🚀 GitHub Release(스냅샷) 업로드 시도
+      - name: "🚀 GitHub Release(스냅샷) 업로드 시도"
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -663,6 +703,7 @@ jobs:
             SNAP_TAG=$(grep '^SNAP_TAG=' "$SNAP_INFO" | cut -d= -f2)
             SNAP_FILE=$(grep '^SNAP_FILE=' "$SNAP_INFO" | cut -d= -f2)
           fi
+
           if [ -n "${SNAP_TAG:-}" ] && [ -f "${SNAP_FILE:-}" ]; then
             echo "::notice::릴리즈 태그 $SNAP_TAG, 파일 $SNAP_FILE 업로드 시도 중"
             gh release create "$SNAP_TAG" "$SNAP_FILE" \
@@ -676,7 +717,7 @@ jobs:
       #######################################################################
       # 8.5 거버넌스/책임추적 문서 (승인자, 온콜 담당자 등)
       #######################################################################
-      - name: 🧑‍💼 거버넌스 승인 & 담당자 기록
+      - name: "🧑‍💼 거버넌스 승인 & 담당자 기록"
         run: |
           GOV_LOG="${DATA_ROOT}/governance/governance_approval.log"
           {
@@ -690,17 +731,19 @@ jobs:
             echo "SLA_CONTACT=BatchSRE"
             echo "NOTES=배치 실패시 즉시 BatchSRE 호출"
           } > "$GOV_LOG"
+
           echo "::notice::거버넌스/승인/온콜 정보 기록 완료 -> $GOV_LOG"
           head -n 50 "$GOV_LOG" || true
 
       #######################################################################
       # 9. HTML 요약 리포트 생성 (경영/감사용 한 장짜리)
       #######################################################################
-      - name: 🖨 HTML 요약 리포트 생성
+      - name: "🖨 HTML 요약 리포트 생성"
         run: |
           SNAP_INFO="${DATA_ROOT}/logs/snapshot_tag.txt"
           SNAP_TAG="N/A"
           SNAP_FILE="N/A"
+
           if [ -f "$SNAP_INFO" ]; then
             SNAP_TAG=$(grep '^SNAP_TAG=' "$SNAP_INFO" | cut -d= -f2)
             SNAP_FILE=$(grep '^SNAP_FILE=' "$SNAP_INFO" | cut -d= -f2)
@@ -726,17 +769,27 @@ jobs:
             echo "<p><b>Snapshot Tag:</b> $SNAP_TAG</p>"
             echo "<p><b>Snapshot File:</b> $SNAP_FILE</p>"
             echo "<hr />"
+
             echo "<h2>Pipeline Status</h2><pre>"
             cat "$STATUS_FILE" 2>/dev/null || echo "(no pipeline_status.log)"
-            echo "</pre><h2>Quality Check</h2><pre>"
+            echo "</pre>"
+
+            echo "<h2>Quality Check</h2><pre>"
             cat "$QUALITY_LOG" 2>/dev/null || echo "(no quality_check.log)"
-            echo "</pre><h2>System Upgrade (head)</h2><pre>"
+            echo "</pre>"
+
+            echo "<h2>System Upgrade (head)</h2><pre>"
             head -n 40 "$UPG_LOG" 2>/dev/null || echo "(no system_upgrade.log)"
-            echo "</pre><h2>ACL / Access Control</h2><pre>"
+            echo "</pre>"
+
+            echo "<h2>ACL / Access Control</h2><pre>"
             head -n 80 "$ACL_LOG" 2>/dev/null || echo "(no acl_audit.sql)"
-            echo "</pre><h2>Snapshot Integrity Hash</h2><pre>"
+            echo "</pre>"
+
+            echo "<h2>Snapshot Integrity Hash</h2><pre>"
             cat "$HASH_LOG" 2>/dev/null || echo "(no snapshot_hash.txt)"
             echo "</pre>"
+
             echo "<p>-- End of Report --</p>"
             echo "</body></html>"
           } > "$REPORT_HTML"
@@ -747,12 +800,13 @@ jobs:
       #######################################################################
       # 9.5 SLA 타이머 종료 및 실행시간 기록
       #######################################################################
-      - name: ⏱ SLA 타이머 종료 및 실행시간 기록
+      - name: "⏱ SLA 타이머 종료 및 실행시간 기록"
         if: ${{ github.event.inputs.sla_tracking != 'false' }}
         run: |
           END_EPOCH=$(date +%s)
           START_EPOCH=$(cat "${DATA_ROOT}/logs/start_epoch.txt" 2>/dev/null || echo "$END_EPOCH")
           DURATION_SEC=$((END_EPOCH-START_EPOCH))
+
           {
             echo "SLA_END_TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
             echo "SLA_DURATION_SEC=$DURATION_SEC"
@@ -762,9 +816,8 @@ jobs:
 
       #######################################################################
       # 10. 감사 요약 로그 (audit_run_summary.log)
-      #     전체 실행 메타/상태/품질/스냅샷 경로 기록
       #######################################################################
-      - name: 🧾 감사 요약 로그 생성 (audit_run_summary.log)
+      - name: "🧾 감사 요약 로그 생성 (audit_run_summary.log)"
         run: |
           AUDIT_FILE="${DATA_ROOT}/logs/audit_run_summary.log"
           STATUS_FILE="${DATA_ROOT}/logs/pipeline_status.log"
@@ -833,9 +886,9 @@ jobs:
           head -n 200 "$AUDIT_FILE" || true
 
       #######################################################################
-      # 11. Artifact 업로드 (로그/DDL/스냅샷/가상데이터/리포트 등)
+      # 11. Artifact 업로드
       #######################################################################
-      - name: 📦 실행 산출물 업로드 (logs / quality / source / snapshot 등)
+      - name: "📦 실행 산출물 업로드 (logs / quality / source / snapshot 등)"
         uses: actions/upload-artifact@v4
         with:
           name: teradata-run-${{ github.run_id }}
@@ -854,9 +907,9 @@ jobs:
           retention-days: 14
 
       #######################################################################
-      # 12. 최종 종료 (항상 성공으로 종료)
+      # 12. 최종 종료 (항상 성공)
       #######################################################################
-      - name: ✅ 파이프라인 완료 (항상 성공)
+      - name: "✅ 파이프라인 완료 (항상 성공)"
         if: always()
         run: |
           echo "✅ Teradata FinOps Batch 파이프라인 전체 단계 수행 완료."
