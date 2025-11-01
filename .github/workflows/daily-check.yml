@@ -160,7 +160,7 @@ jobs:
 
       - name: Upload Node audit artifact
         if: steps.node_exists.outputs.exists == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           # 슬래시(/)는 보기 불편해서 - 로 치환. matrix.project 은 문자열이라 join() 미사용
           name: npm-audit-${{ github.run_number }}-${{ matrix.project }} 
@@ -311,7 +311,7 @@ jobs:
 
       - name: Upload Python audit artifact
         if: steps.py_exists.outputs.exists == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: python-audit-${{ github.run_number }}-${{ matrix.project }}
           path: |
