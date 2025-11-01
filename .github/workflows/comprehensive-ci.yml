@@ -1,4 +1,4 @@
-name: "🚀 종합 CI/CD 파이프라인 (Java+Python+DB+Docker+Security+SBOM+SmokeTest+ServerSetup+Upgrade)"
+name: "🚀 종합 CI/CD 파이프라인 (Java+Python+DB+Docker+Security+SBOM+SmokeTest+ServerSetup+Upgrade+Cache)"
 
 on:
   push:
@@ -90,11 +90,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 공용 CI 캐시 디렉토리
+      - name: Restore shared CI cache directory
+        uses: actions/cache@v4
+        with:
+          path: .github/ci_cache
+          key: ci-cache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-
+            ci-cache-
+
       - name: Create log/artifact directories + dummy assets
         run: |
           set -Eeuo pipefail
 
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" tmp/temp-logs data/processed assets/images
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" tmp/temp-logs data/processed assets/images .github/ci_cache
           echo "임시 로그 데이터" > tmp/temp-logs/app.log
           touch assets/images/placeholder.png
           touch assets/images/logo.jpg
@@ -152,6 +162,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 공용 CI 캐시 복구
+      - name: Restore shared CI cache directory
+        uses: actions/cache@v4
+        with:
+          path: .github/ci_cache
+          key: ci-cache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-
+            ci-cache-
+
       - name: Init CodeQL
         uses: github/codeql-action/init@v3
         with:
@@ -165,17 +185,13 @@ jobs:
         with:
           category: "/language:${{ matrix.language }}"
 
-      # 항상 codeql_reports 디렉토리를 만들어서
-      # 빈 업로드 경고를 막는다
       - name: Collect CodeQL reports (always create folder)
         if: always()
         run: |
           set -Eeuo pipefail
-          mkdir -p codeql_reports
-
+          mkdir -p codeql_reports .github/ci_cache
           echo "[Collect] Try to gather SARIF / logs for ${{ matrix.language }}"
 
-          # CodeQL 결과물 긁어오기 (있어도 되고 없어도 됨)
           cp -r ./codeql-results*/* codeql_reports/ 2>/dev/null || true
           cp -r ./codeql-results*   codeql_reports/ 2>/dev/null || true
           cp -r *.sarif             codeql_reports/ 2>/dev/null || true
@@ -183,7 +199,6 @@ jobs:
           echo "[Collect] Listing codeql_reports:"
           ls -R codeql_reports || true
 
-          # 비어있으면 README.txt라도 넣어서 업로드 가능하게
           if [ -z "$(ls -A codeql_reports)" ]; then
             echo "no CodeQL SARIF generated for ${{ matrix.language }}" > codeql_reports/README.txt
           fi
@@ -197,17 +212,14 @@ jobs:
           if-no-files-found: ignore
 
   #########################################################
-  # JOB 2: Build & Test (Java + Python + DB) + Coverage + Lint
-  #
-  # - matrix 제거, dispatch 입력값으로 버전 제어
-  # - GitHub Dependency Graph 제출 (공식 액션들 사용)
+  # JOB 2: Build & Test (Java + Python + DB) + Coverage + Lint + Cache
   #########################################################
   build-and-test:
     name: "🛠 Build/Test w/ Postgres, Coverage, Lint"
     runs-on: ubuntu-latest
     needs: prepare-env
 
-    # 이 job은 dependency snapshot 업로드 때문에 contents: write 필요
+    # dependency snapshot 업로드 때문에 contents: write 필요
     permissions:
       contents: write
       security-events: write
@@ -237,7 +249,47 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- DB Wait Guard ---
+      # 공용 CI 캐시 복구
+      - name: Restore shared CI cache directory
+        uses: actions/cache@v4
+        with:
+          path: .github/ci_cache
+          key: ci-cache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-
+            ci-cache-
+
+      # Maven repo 캐시
+      - name: Cache Maven repo
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-
+
+      # pip 캐시
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      # Postgres 캐시 슬롯 (Hosted runner 제약 때문에 placeholder 형태)
+      - name: Placeholder - DB cache key reservation
+        uses: actions/cache@v4
+        with:
+          path: .github/ci_cache/db-info
+          key: db-cache-${{ runner.os }}-${{ env.PSQL_DB }}-${{ env.PSQL_USER }}
+          restore-keys: |
+            db-cache-${{ runner.os }}-
+        run: |
+          mkdir -p .github/ci_cache/db-info
+          echo "DB=${PSQL_DB}, USER=${PSQL_USER}, HOST=${PSQL_HOST}, PORT=${PSQL_PORT}" > .github/ci_cache/db-info/connection.txt || true
+
+      # DB Wait Guard
       - name: Wait for Postgres
         run: |
           echo "Waiting for Postgres to be ready..."
@@ -248,20 +300,12 @@ jobs:
           done
           pg_isready -h "$PSQL_HOST" -p "$PSQL_PORT"
 
-      # --- Java Setup ---
+      # Java Setup
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: temurin
-
-      - name: Cache Maven repo
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          key: maven-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
-          restore-keys: |
-            maven-${{ runner.os }}-
 
       # Java Lint / Style (soft fail)
       - name: Java Lint / Style Check
@@ -282,26 +326,18 @@ jobs:
           echo "Maven tests complete."
           ls -R target || true
 
-      # Java Dependency Graph 제출 (Maven 공식 액션)
+      # Java Dependency Graph 제출
       - name: Submit Maven dependency snapshot to GitHub
         continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         uses: advanced-security/maven-dependency-submission-action@v4
         with:
           directory: ${{ github.workspace }}
 
-      # --- Python Setup ---
+      # Python Setup
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            pip-${{ runner.os }}-
 
       - name: Install Python deps
         run: |
@@ -325,7 +361,7 @@ jobs:
           pytest --cov=. --cov-report=xml --cov-report=term || true
           ls -R || true
 
-      # Python 등 의존성 그래프 제출 (Component Detection)
+      # Python Dependency Graph 제출
       - name: Submit Python dependency snapshot to GitHub
         if: ${{ hashFiles('**/requirements.txt') != '' }}
         continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
@@ -351,7 +387,7 @@ jobs:
           if-no-files-found: ignore
 
   #########################################################
-  # JOB 3: 서버 설치 & 업그레이드 / OS 패치 / 서비스 상태 확인
+  # JOB 3: 서버 설치 & 업그레이드 / OS 패치 / 서비스 상태 확인 + apt 캐시
   #########################################################
   server-setup-upgrade:
     name: "🖥 Server Setup & Upgrade (nginx/redis/psql-client + OS Upgrade)"
@@ -365,17 +401,39 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 공용 CI 캐시 복구
+      - name: Restore shared CI cache directory
+        uses: actions/cache@v4
+        with:
+          path: .github/ci_cache
+          key: ci-cache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-
+            ci-cache-
+
+      # apt 캐시 복구
+      - name: Restore apt cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt
+            /var/lib/apt/lists
+          key: apt-cache-${{ runner.os }}-${{ hashFiles('.github/workflows/comprehensive-ci.yml') }}
+          restore-keys: |
+            apt-cache-${{ runner.os }}-
+
       - name: Install core server packages (nginx, redis-server, postgresql-client)
         continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           set -Eeuo pipefail
+
           echo "[ServerSetup] apt-get update..."
           sudo apt-get update -y || true
 
           echo "[ServerSetup] install nginx, redis-server, postgresql-client, curl..."
           sudo apt-get install -y nginx redis-server postgresql-client curl || true
 
-          echo "[ServerSetup] enable and check services (where applicable)..."
+          echo "[ServerSetup] enable and check services..."
           sudo systemctl status nginx        || true
           sudo systemctl status redis-server || true
 
@@ -458,6 +516,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 공용 CI 캐시 복구
+      - name: Restore shared CI cache directory
+        uses: actions/cache@v4
+        with:
+          path: .github/ci_cache
+          key: ci-cache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-
+            ci-cache-
+
       - name: Set up Java for SBOM
         uses: actions/setup-java@v4
         with:
@@ -497,6 +565,7 @@ jobs:
 
   #########################################################
   # JOB 5: Docker Build / Push / Security Scan / SmokeTest
+  # - 여기 수정됨: Dockerfile 경로 자동 감지
   #########################################################
   docker-build-push:
     name: "🐳 Docker Build & Push & Scan & SmokeTest"
@@ -510,6 +579,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 공용 CI 캐시 복구
+      - name: Restore shared CI cache directory
+        uses: actions/cache@v4
+        with:
+          path: .github/ci_cache
+          key: ci-cache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: |
+            ci-cache-${{ runner.os }}-
+            ci-cache-
+
+      # apt 캐시 복구 (Trivy 설치용)
+      - name: Restore apt cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt
+            /var/lib/apt/lists
+          key: apt-cache-${{ runner.os }}-${{ hashFiles('.github/workflows/comprehensive-ci.yml') }}
+          restore-keys: |
+            apt-cache-${{ runner.os }}-
+
       - name: Set up QEMU (for multi-arch)
         uses: docker/setup-qemu-action@v3
 
@@ -522,6 +612,29 @@ jobs:
           registry: ${{ env.IMAGE_REGISTRY }}
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 🔍 NEW: Dockerfile 경로 자동 탐지
+      - name: Detect Dockerfile path
+        id: detect-dockerfile
+        run: |
+          set -Eeuo pipefail
+          CANDIDATES=("Dockerfile.java" "Dockerfile" "./docker/ubi/Dockerfile" "./docker/Dockerfile")
+          FOUND=""
+          for f in "${CANDIDATES[@]}"; do
+            if [ -f "$f" ]; then
+              FOUND="$f"
+              break
+            fi
+          done
+
+          if [ -z "$FOUND" ]; then
+            echo "❌ Dockerfile not found in any known path" >&2
+            echo "checked: ${CANDIDATES[*]}" >&2
+            exit 1
+          fi
+
+          echo "✅ Using Dockerfile: $FOUND"
+          echo "DOCKERFILE_PATH=$FOUND" >> "$GITHUB_OUTPUT"
 
       - name: Extract Docker metadata
         id: meta
@@ -539,7 +652,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile.java
+          file: ${{ steps.detect-dockerfile.outputs.DOCKERFILE_PATH }}
           push: ${{ github.event_name == 'push' && github.event.inputs.push_image != 'false' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
