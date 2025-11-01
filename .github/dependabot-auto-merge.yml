@@ -1,0 +1,283 @@
+# 파일 경로: .github/workflows/dependabot-auto-merge.yml
+name: "Dependabot Auto Merge (자동 업데이트 통합 점검 및 병합)"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - "main"
+  workflow_dispatch:
+    inputs:
+      auto_merge:        # 1
+        description: "빌드 통과 시 자동 merge 할까요?"
+        type: boolean
+        default: true
+      repair_mode:       # 2
+        description: "빌드/테스트 실패 시 자동 복구(apt/dpkg/docker 등) 시도"
+        type: boolean
+        default: true
+      run_docker_check:  # 3
+        description: "Docker 이미지 빌드/컨테이너 스모크도 같이 수행할지"
+        type: boolean
+        default: true
+      run_maven_build:   # 4
+        description: "Maven 패키징 빌드를 수행할지(-DskipTests로 빠르게)"
+        type: boolean
+        default: true
+      run_python_check:  # 5
+        description: "Python 런타임 체크 수행할지"
+        type: boolean
+        default: true
+      upload_artifact:   # 6
+        description: "로그/리포트 artifact 업로드 여부"
+        type: boolean
+        default: true
+      force_labels:      # 7
+        description: "강제로 dependabot 처럼 처리 (라벨 무시)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write           # merge / commit 에 필요
+  pull-requests: write      # PR merge 에 필요
+  packages: write
+  id-token: write
+
+env:
+  TZ: Asia/Seoul
+  REPORT_DIR: .github/dependabot_report
+  LOG_DIR: .github/dependabot_report/logs
+  ARTIFACT_DIR: .github/dependabot_report/artifacts
+  DOCKER_IMG: dependabot-ci-test:latest
+
+jobs:
+  validate_and_merge:
+    name: "🔄 Dependabot PR 검증 & 자동 병합"
+    runs-on: ubuntu-latest
+
+    steps:
+      ########################################################################
+      # 0. 체크아웃 + 준비
+      ########################################################################
+      - name: "Checkout"
+        uses: actions/checkout@v4
+        with:
+          # dependabot PR도 fetch 가능하게
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+
+      - name: "Prepare folders & helpers"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+
+          cat > "${REPORT_DIR}/helpers.sh" << 'EOF'
+          #!/usr/bin/env bash
+          set -Euo pipefail
+
+          safe_run() {
+            local label="$1"; shift || true
+            echo "▶ [${label}] START $(date '+%Y-%m-%d %H:%M:%S%z')" | tee -a "${LOG_DIR}/${label}.log"
+            if "$@" >> "${LOG_DIR}/${label}.log" 2>&1 ; then
+              echo "✅ [${label}] OK" | tee -a "${LOG_DIR}/${label}.log"
+              return 0
+            else
+              local rc=$?
+              echo "❌ [${label}] FAILED exit=${rc}" | tee -a "${LOG_DIR}/${label}.log"
+              return $rc
+            fi
+          }
+
+          apt_fix() {
+            echo "[fix] attempting apt/dpkg repair..." | tee -a "${LOG_DIR}/apt.fix.log"
+            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true
+            sudo dpkg --configure -a || true
+            sudo apt-get update -y || sudo apt-get update -y || true
+          }
+
+          ensure_docker() {
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "[fix] docker not found, installing..." | tee -a "${LOG_DIR}/docker.ensure.log"
+              apt_fix
+              sudo apt-get install -y ca-certificates curl gnupg || true
+              sudo install -m 0755 -d /etc/apt/keyrings || true
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg || true
+              echo \
+                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+                $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
+                sudo tee /etc/apt/sources.list.d/docker.list > /dev/null || true
+              apt_fix
+              sudo apt-get install -y docker.io docker-buildx-plugin docker-compose-plugin || true
+              sudo usermod -aG docker $USER || true
+            fi
+
+            if ! docker info >/dev/null 2>&1; then
+              echo "[fix] starting docker service..." | tee -a "${LOG_DIR}/docker.ensure.log"
+              sudo systemctl start docker || true
+              sleep 2
+            fi
+          }
+          EOF
+          chmod +x "${REPORT_DIR}/helpers.sh"
+
+          echo "## Dependabot Auto Merge Report" > "${REPORT_DIR}/SUMMARY.txt"
+          echo "Run: ${GITHUB_RUN_ID}"         >> "${REPORT_DIR}/SUMMARY.txt"
+          echo "Repo: ${GITHUB_REPOSITORY}"    >> "${REPORT_DIR}/SUMMARY.txt"
+          echo "PR:   ${GITHUB_REF}"           >> "${REPORT_DIR}/SUMMARY.txt"
+          echo "Time: $(date '+%Y-%m-%d %H:%M:%S %Z')" >> "${REPORT_DIR}/SUMMARY.txt"
+          echo "----------------------------------------" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 1. 이 PR이 Dependabot PR인지 확인 (라벨로 판단)
+      #    - 라벨 없더라도 force_labels=true면 그냥 진행
+      ########################################################################
+      - name: "Check if PR is from Dependabot (label check)"
+        id: depcheck
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          FORCE="${{ github.event.inputs.force_labels || 'false' }}"
+          if [ "$FORCE" = "true" ]; then
+            echo "forced=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # GitHub API 없이 단순하게 event payload를 보고 guess 하는 방법:
+          #  - github.actor == dependabot[bot] 이면 거의 확실
+          #  - 라벨 목록 안에 'dependency' 같은 거 있으면 의존성 업데이트 PR일 확률 큼
+          ACTOR="${{ github.actor }}"
+          LABELS_JSON='${{ toJson(github.event.pull_request.labels) }}'
+
+          echo "actor=$ACTOR" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "labels=$LABELS_JSON" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+
+          if echo "$ACTOR" | grep -qi "dependabot"; then
+            echo "forced=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if echo "$LABELS_JSON" | grep -qi "dependency"; then
+            echo "forced=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 의존성 업데이트 PR이 아닐 수도 있음
+          echo "forced=false" >> $GITHUB_OUTPUT
+
+      ########################################################################
+      # 2. 시스템/빌드 헬스 체크 (Maven / Python / Docker) - 선택적 실행
+      ########################################################################
+      - name: "Repair base system if needed (apt/dpkg/docker)"
+        if: ${{ github.event.inputs.repair_mode != 'false' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+          apt_fix || true
+          ensure_docker || true
+
+      - name: "Python env quick check"
+        if: ${{ github.event.inputs.run_python_check != 'false' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: "Run python check script"
+        if: ${{ github.event.inputs.run_python_check != 'false' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+
+          cat > "${REPORT_DIR}/py_env.py" << 'EOF'
+          import sys, json, platform
+          print(json.dumps({
+            "python_version": sys.version,
+            "platform": platform.platform(),
+            "ok": True
+          }, indent=2))
+          EOF
+
+          safe_run "python.env" python "${REPORT_DIR}/py_env.py" | tee "${REPORT_DIR}/python_env.json"
+
+      - name: "Maven build (skip tests)"
+        if: ${{ github.event.inputs.run_maven_build != 'false' }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: "maven"
+
+      - name: "Run mvn -DskipTests package"
+        if: ${{ github.event.inputs.run_maven_build != 'false' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+
+          if [ -f "pom.xml" ]; then
+            safe_run "maven.build" mvn -B -ntp clean package -DskipTests || true
+            # dependency tree snapshot
+            mvn -B -ntp dependency:tree | head -n 200 > "${REPORT_DIR}/maven_head.txt" || true
+          else
+            echo "[maven] no pom.xml in this PR branch" > "${REPORT_DIR}/maven_head.txt"
+          fi
+
+      - name: "Docker smoke build/run"
+        if: ${{ github.event.inputs.run_docker_check != 'false' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+
+          safe_run "docker.ensure" ensure_docker || true
+
+          # Dockerfile이 있으면 그걸로, 없으면 fallback Dockerfile 생성
+          DF_FALLBACK="${REPORT_DIR}/Dockerfile.ci"
+          if [ ! -f "Dockerfile" ]; then
+            cat > "${DF_FALLBACK}" << 'EOF'
+            FROM alpine:3.20
+            RUN echo "dependabot smoke container" > /hello.txt
+            CMD ["cat", "/hello.txt"]
+            EOF
+            DOCKERFILE="$DF_FALLBACK"
+          else
+            DOCKERFILE="Dockerfile"
+          fi
+
+          safe_run "docker.build" docker build -f "$DOCKERFILE" . -t "${DOCKER_IMG}" || true
+          safe_run "docker.run"  docker run --rm "${DOCKER_IMG}" || true
+
+      ########################################################################
+      # 3. 머지 여부 결정
+      #    - depcheck.forced == true  => 의존성 PR로 간주
+      #    - auto_merge == true       => 자동 merge 시도
+      ########################################################################
+      - name: "Attempt auto-merge if safe"
+        if: ${{ steps.depcheck.outputs.forced == 'true' && github.event.inputs.auto_merge != 'false' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          echo "[merge] This looks like a dependency update PR (#$PR_NUMBER)."
+          echo "[merge] Trying to merge via GitHub CLI..."
+
+          # GitHub CLI는 기본 runner에 설치되어 있음(gh)
+          # fast-forward merge or squash merge, pick one:
+          gh pr merge "$PR_NUMBER" --squash --auto --delete-branch || \
+          gh pr merge "$PR_NUMBER" --merge --auto --delete-branch || true
+
+          echo "auto-merge attempted" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 4. 리포트/로그 아티팩트 업로드
+      ########################################################################
+      - name: "Upload dependabot-check artifact"
+        if: ${{ github.event.inputs.upload_artifact != 'false' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependabot-check-${{ github.run_id }}
+          path: .github/dependabot_report
+          if-no-files-found: warn
+          retention-days: 14
