@@ -1,577 +1,385 @@
-name: "Daily System Checks (일일 시스템 점검 + 자동 복구)"
+name: "Dependency Security Check"
 
 on:
-  # KST(UTC+9) 새벽 1시 실행 -> cron은 UTC 기준, 01:00 KST == 16:00 UTC (전날)
   schedule:
-    - cron: "0 16 * * *"
+    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC
   workflow_dispatch:
-    inputs:
-      mode:                 # 1
-        description: "full(전체 점검) / lite(간단 점검)"
-        type: choice
-        options: [full, lite]
-        default: full
-      repair_mode:          # 2
-        description: "문제 감지 시 자동 복구 시도 여부"
-        type: boolean
-        default: true
-      dirs_count:           # 3
-        description: "서비스별 추가 더미 디렉토리 몇 개 만들지"
-        default: "10"
-      files_count:          # 4
-        description: "서비스별 더미 설정/로그 파일 몇 개 만들지"
-        default: "20"
-      container_count:      # 5
-        description: "서비스 컨테이너 빌드/기동 개수 제한 (알파인 기반)"
-        default: "7"
-      include_security:     # 6
-        description: "security 서비스(보안/감사 폴더)도 포함할지"
-        type: boolean
-        default: true
-      include_pages:        # 7
-        description: "pages 서비스(리포트용 웹출력 폴더)도 포함할지"
-        type: boolean
-        default: true
-      auto_commit:          # 8
-        description: "리포트 결과물 repo에 커밋까지 시도 (권한 필요)"
-        type: boolean
-        default: false
+  pull_request:
+    paths:
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/requirements.txt"
+      - ".github/workflows/dependency-check.yml"
+  push:
+    branches: [ "main" ]
+    paths:
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/requirements.txt"
 
 permissions:
-  contents: write       # auto_commit=true 일 때 커밋 위해 write 필요
-  packages: write
+  contents: write
+  pull-requests: write
+  security-events: read
   id-token: write
+  packages: write
 
 env:
   TZ: Asia/Seoul
-
-  # 리포트/로그/아티팩트 저장 루트
-  REPORT_DIR: .github/daily_report
-  LOG_DIR: .github/daily_report/logs
-  ARTIFACT_DIR: .github/daily_report/artifacts
-  IMG_DIR: .github/daily_report/images
-  JAVA_SRC_DIR: .github/daily_report/java_check
-  PY_SRC_DIR: .github/daily_report/python_check
-  SERVICES_ROOT: .github/daily_report/services
-
-  # 컨테이너/이미지 빌드용 공통 네이밍
-  BASE_IMAGE_TAG: daily-check-test
-  HEALTH_PORT: "8080"
+  REPORT_DIR: .github/sec_report
+  LOG_DIR: .github/sec_report/logs
+  ARTIFACT_DIR: .github/sec_report/artifacts
 
 jobs:
-  daily_checks:
-    name: "🩺 일일 점검 + 디렉토리/이미지/컨테이너 생성 + 자동복구"
+
+  ##########################################################################
+  # Node.js audit
+  ##########################################################################
+  node-security:
+    name: "Node.js Dependency Check"
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - anthropic-cost-tracker/nodejs
+          - mcp-hello-js
+          - mcp-fs
 
     steps:
-      ########################################################################
-      # 0. 체크아웃 및 공통 준비
-      ########################################################################
-      - name: "Checkout repository"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "Prepare folders and helper utilities"
+      - name: Prepare dirs and helper script (no heredoc)
+        id: prep_node
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -Eeo pipefail
 
-          echo "[prep] create base dirs"
-          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}" "${IMG_DIR}" \
-                   "${JAVA_SRC_DIR}" "${PY_SRC_DIR}" "${SERVICES_ROOT}"
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
 
-          echo "[prep] write SUMMARY stub"
-          {
-            echo "Daily Check Summary ($(date '+%Y-%m-%d %H:%M:%S %Z'))"
-            echo "Repo: $GITHUB_REPOSITORY"
-            echo "Run ID: $GITHUB_RUN_ID"
-            echo "--------------------------------------------------"
-          } > "${REPORT_DIR}/SUMMARY.txt"
+          # helpers.sh 생성 (printf 사용. CRLF/EOF 이슈 회피)
+          HELPER_PATH="${REPORT_DIR}/helpers.sh"
 
-          echo "[prep] safe_run + fix helpers"
-          cat > "${REPORT_DIR}/helpers.sh" << 'EOF'
-          #!/usr/bin/env bash
-          set -Euo pipefail
+          printf '%s\n' '#!/usr/bin/env bash'                           >  "$HELPER_PATH"
+          printf '%s\n' 'set -Eeo pipefail'                              >> "$HELPER_PATH"
+          printf '%s\n' ''                                              >> "$HELPER_PATH"
+          printf '%s\n' '# fallback LOG_DIR if not exported'            >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"'>> "$HELPER_PATH"
+          printf '%s\n' ''                                              >> "$HELPER_PATH"
+          printf '%s\n' 'safe_run() {'                                  >> "$HELPER_PATH"
+          printf '%s\n' '  local label="$1"; shift || true'             >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'    >> "$HELPER_PATH"
+          printf '%s\n' '  echo "▶ [$label] $(date "+%Y-%m-%d %H:%M:%S%z") START" | tee -a "$logfile"' >> "$HELPER_PATH"
+          printf '%s\n' '  if "$@" >> "$logfile" 2>&1 ; then'           >> "$HELPER_PATH"
+          printf '%s\n' '    echo "✅ [$label] OK" | tee -a "$logfile"' >> "$HELPER_PATH"
+          printf '%s\n' '    return 0'                                  >> "$HELPER_PATH"
+          printf '%s\n' '  else'                                        >> "$HELPER_PATH"
+          printf '%s\n' '    local rc=$?'                               >> "$HELPER_PATH"
+          printf '%s\n' '    echo "❌ [$label] FAILED exit=${rc}" | tee -a "$logfile"' >> "$HELPER_PATH"
+          printf '%s\n' '    return $rc'                                >> "$HELPER_PATH"
+          printf '%s\n' '  fi'                                          >> "$HELPER_PATH"
+          printf '%s\n' '}'                                             >> "$HELPER_PATH"
+          printf '%s\n' ''                                              >> "$HELPER_PATH"
+          printf '%s\n' 'apt_fix() {'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/apt.fix.log"'     >> "$HELPER_PATH"
+          printf '%s\n' '  echo "[fix] apt_fix start" | tee -a "$logfile"' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo dpkg --configure -a || true'            >> "$HELPER_PATH"
+          printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
+          printf '%s\n' '}'                                             >> "$HELPER_PATH"
 
-          LOG_DIR="${LOG_DIR:-.github/daily_report/logs}"
+          chmod +x "$HELPER_PATH"
 
-          safe_run() {
-            local label="$1"; shift || true
-            echo "▶ [${label}] START $(date '+%Y-%m-%d %H:%M:%S%z')" | tee -a "${LOG_DIR}/${label}.log"
-            if "$@" >> "${LOG_DIR}/${label}.log" 2>&1 ; then
-              echo "✅ [${label}] OK" | tee -a "${LOG_DIR}/${label}.log"
-              return 0
-            else
-              local rc=$?
-              echo "❌ [${label}] FAILED exit=${rc}" | tee -a "${LOG_DIR}/${label}.log"
-              return $rc
-            fi
-          }
+          echo "Node scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
 
-          # apt-get이 lock 걸렸을 때 자동 재시도
-          apt_fix() {
-            echo "[fix] attempting apt fix/retry..."
-            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true
-            sudo dpkg --configure -a || true
-            sudo apt-get update -y || sudo apt-get update -y || true
-          }
-
-          # docker 없거나 daemon 문제면 설치/시작
-          ensure_docker() {
-            if ! command -v docker >/dev/null 2>&1; then
-              echo "[fix] docker not found, installing..."
-              apt_fix
-              sudo apt-get install -y ca-certificates curl gnupg || true
-              sudo install -m 0755 -d /etc/apt/keyrings || true
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg || true
-              echo \
-                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-                $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
-                sudo tee /etc/apt/sources.list.d/docker.list > /dev/null || true
-              apt_fix
-              sudo apt-get install -y docker.io docker-buildx-plugin docker-compose-plugin || true
-              sudo usermod -aG docker $USER || true
-            fi
-
-            # docker daemon 정보 확인 (github-hosted runner는 이미 돌고있을 확률 높음)
-            if ! docker info >/dev/null 2>&1; then
-              echo "[fix] docker daemon not responsive, trying service start..."
-              sudo systemctl start docker || true
-              sleep 2
-            fi
-          }
-
-          # 컨테이너 살아있는지 검사하고 죽었으면 재시작
-          ensure_container_running() {
-            local cname="$1"
-            if docker ps --format '{{.Names}}' | grep -q "^${cname}\$"; then
-              echo "[check] ${cname} is running"
-            else
-              echo "[fix] ${cname} not running, try to start"
-              docker start "${cname}" 2>/dev/null || true
-            fi
-          }
-
-          # DB 헬스 재시도
-          retry_db_check() {
-            local retries=3
-            local delay=2
-            local cmd="$*"
-            local n=1
-            while [ $n -le $retries ]; do
-              if eval "$cmd"; then
-                echo "[db] success on try $n"
-                return 0
-              fi
-              echo "[db] attempt $n failed, waiting ${delay}s..."
-              sleep $delay
-              n=$((n+1))
-            done
-            echo "[db] all retries failed"
-            return 1
-          }
-          EOF
-          chmod +x "${REPORT_DIR}/helpers.sh"
-
-          echo "- helpers ready" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 1. 시스템 점검 (디스크, 메모리, 프로세스, 네트워크 등)
-      ########################################################################
-      - name: "System health snapshot"
+      - name: Check project/package.json
+        id: node_exists
         shell: bash
         run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          set -Eeo pipefail
+          if [ -d "${{ matrix.project }}" ] && [ -f "${{ matrix.project }}/package.json" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
-          safe_run "sys.health" bash -c '
-            {
-              echo "--- DATE ---"
-              date
-              echo
-              echo "--- UNAME ---"
-              uname -a
-              echo
-              echo "--- DISK USAGE (df -h) ---"
-              df -h
-              echo
-              echo "--- MEMORY (free -m) ---"
-              free -m
-              echo
-              echo "--- TOP CPU PROCESSES ---"
-              ps aux --sort=-%cpu | head -n 15
-              echo
-              echo "--- TOP MEM PROCESSES ---"
-              ps aux --sort=-%mem | head -n 15
-              echo
-              echo "--- PORTS LISTENING ---"
-              (ss -tulpen || netstat -tulpen) 2>/dev/null || true
-              echo
-              echo "--- ENV SNAPSHOT ---"
-              printenv | sort
-            } > "${REPORT_DIR}/system_report.txt"
-          '
-
-          echo "- system health collected" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 2. Python 환경 점검
-      ########################################################################
-      - name: "Set up Python 3.x"
-        uses: actions/setup-python@v5
+      - name: Setup Node.js
+        if: steps.node_exists.outputs.exists == 'true'
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.x"
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
 
-      - name: "Python health script (env dump)"
+      - name: Install jq
+        if: steps.node_exists.outputs.exists == 'true'
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -Eeo pipefail
           source "${REPORT_DIR}/helpers.sh"
+          apt_fix || true
+          sudo apt-get install -y jq || true
 
-          cat > "${PY_SRC_DIR}/health_check.py" << 'EOF'
-          import sys, platform, json, time
-          result = {
-              "timestamp": time.strftime("%Y-%m-%d %H:%M:%S %z"),
-              "python_version": sys.version,
-              "platform": platform.platform(),
-              "modules": {}
-          }
-          for lib in ["os", "json", "subprocess", "sqlite3"]:
-              try:
-                  __import__(lib)
-                  result["modules"][lib] = "OK"
-              except Exception as e:
-                  result["modules"][lib] = f"ERROR: {e}"
-          print(json.dumps(result, indent=2))
-          EOF
-
-          safe_run "python.env" python "${PY_SRC_DIR}/health_check.py" | tee "${REPORT_DIR}/python_report.json"
-
-          echo "- python env checked" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 3. Java + Maven 점검 (기존 pom.xml or 임시 프로젝트)
-      ########################################################################
-      - name: "Set up JDK 17 (Temurin)"
-        uses: actions/setup-java@v4
-        with:
-          java-version: "17"
-          distribution: "temurin"
-          cache: "maven"
-
-      - name: "Prepare Maven project (fallback if none)"
+      - name: npm install/ci
+        if: steps.node_exists.outputs.exists == 'true'
+        working-directory: ${{ matrix.project }}
         shell: bash
         run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          set -Eeo pipefail
+          npm ci || npm install
 
-          if [ ! -f "pom.xml" ]; then
-            echo "[java] generating fallback maven project in ${JAVA_SRC_DIR}"
-            mkdir -p "${JAVA_SRC_DIR}/src/main/java/com/example"
-            cat > "${JAVA_SRC_DIR}/pom.xml" << 'EOF'
-            <project xmlns="http://maven.apache.org/POM/4.0.0"
-                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                     xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-              <modelVersion>4.0.0</modelVersion>
-              <groupId>com.example</groupId>
-              <artifactId>daily-check-sample</artifactId>
-              <version>1.0.0-SNAPSHOT</version>
-              <properties>
-                <maven.compiler.source>17</maven.compiler.source>
-                <maven.compiler.target>17</maven.compiler.target>
-              </properties>
-              <build>
-                <plugins>
-                  <plugin>
-                    <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-compiler-plugin</artifactId>
-                    <version>3.11.0</version>
-                    <configuration>
-                      <source>17</source>
-                      <target>17</target>
-                    </configuration>
-                  </plugin>
-                </plugins>
-              </build>
-            </project>
-            EOF
-
-            cat > "${JAVA_SRC_DIR}/src/main/java/com/example/HealthCheck.java" << 'EOF'
-            package com.example;
-            public class HealthCheck {
-                public static void main(String[] args) {
-                    System.out.println("[JAVA] HealthCheck OK - " + System.currentTimeMillis());
-                }
-            }
-            EOF
-          fi
-
-          echo "- java project prepared" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      - name: "Maven build (skip tests)"
+      - name: npm audit
+        if: steps.node_exists.outputs.exists == 'true'
+        id: node_audit
+        working-directory: ${{ matrix.project }}
         shell: bash
         run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          set -Eeo pipefail
 
-          if [ -f "pom.xml" ]; then
-            PROJ="."
+          echo "## NPM Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
+
+          # 항상 continue
+          npm audit --json > audit.json || true
+          npm audit >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+
+          # 심각도 카운트
+          if command -v jq >/dev/null 2>&1 && [ -f audit.json ]; then
+            HIGH_COUNT=$(jq '.metadata.vulnerabilities.high // 0' audit.json)
+            CRIT_COUNT=$(jq '.metadata.vulnerabilities.critical // 0' audit.json)
           else
-            PROJ="${JAVA_SRC_DIR}"
+            HIGH_COUNT=0
+            CRIT_COUNT=0
           fi
 
-          safe_run "maven.build" bash -c "
-            mvn -f \"${PROJ}/pom.xml\" -B -ntp clean package -DskipTests
-          " || true
+          echo "High severity: $HIGH_COUNT"
+          echo "Critical severity: $CRIT_COUNT"
 
-          {
-            echo "=== mvn dependency:tree (head) ==="
-            mvn -f "${PROJ}/pom.xml" -B -ntp dependency:tree | head -n 200 || true
-          } > "${REPORT_DIR}/maven_report.txt"
+          echo "HIGH_COUNT=${HIGH_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "CRIT_COUNT=${CRIT_COUNT}" >> "$GITHUB_OUTPUT"
 
-          echo "- maven build attempted" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 4. 서비스별 대량 디렉토리/파일/이미지(도커 이미지) 준비
-      #    - services 목록에는 python/java/db/docker/security/pages 등
-      #    - 각 서비스마다 디렉토리 생성, README/placeholder/템플릿 파일 생성
-      #    - 각 서비스마다 Dockerfile 생성 -> docker build 로 이미지 대량 생성
-      ########################################################################
-      - name: "Generate service directories / files / Dockerfiles"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-
-          # services 목록 구성 (security/pages는 dispatch input에 따라 포함)
-          SERVICES=("python" "java" "db" "docker")
-          if [ "${{ github.event.inputs.include_security || 'true' }}" = "true" ]; then
-            SERVICES+=("security")
-          fi
-          if [ "${{ github.event.inputs.include_pages || 'true' }}" = "true" ]; then
-            SERVICES+=("pages")
-          fi
-
-          echo "[services] ${SERVICES[*]}"
-
-          for svc in "${SERVICES[@]}"; do
-            BASE="${SERVICES_ROOT}/${svc}"
-            mkdir -p "$BASE"/{logs,artifacts,tmp,conf,docker}
-
-            # README
-            cat > "$BASE/README.md" <<EOF
-            # Service: ${svc}
-            Generated at $(date '+%Y-%m-%d %H:%M:%S %Z')
-            This directory is auto-created by daily-check workflow.
-            EOF
-
-            # 서비스 전용 헬스체크 로그 placeholder
-            cat > "$BASE/logs/health_${svc}.log" <<EOF
-            [${svc}] health log placeholder ($(date '+%Y-%m-%d %H:%M:%S %Z'))
-            EOF
-
-            # 더미 conf 파일 여러 개 생성 (files_count 만큼)
-            COUNT_FILES=${{ github.event.inputs.files_count || '20' }}
-            for i in $(seq 1 "${COUNT_FILES}"); do
-              echo "[${svc}] config file #$i @ $(date '+%s')" > "$BASE/conf/${svc}_conf_${i}.cfg"
-            done
-
-            # 더미 하위 디렉토리 여러 개 생성 (dirs_count 만큼)
-            COUNT_DIRS=${{ github.event.inputs.dirs_count || '10' }}
-            for i in $(seq 1 "${COUNT_DIRS}"); do
-              mkdir -p "$BASE/tmp/batch_${i}"
-              echo "placeholder for ${svc} batch_${i}" > "$BASE/tmp/batch_${i}/.keep"
-            done
-
-            # 각 서비스마다 개별 Dockerfile 작성
-            cat > "$BASE/docker/Dockerfile.${svc}" <<EOF
-            FROM alpine:3.20
-            LABEL daily-check-service="${svc}"
-            RUN echo "service=${svc}"        > /service.info && \
-                echo "generated=$(date '+%Y-%m-%d %H:%M:%S %Z')" >> /service.info
-            CMD ["cat", "/service.info"]
-            EOF
-
-          done
-
-          echo "- service dirs/files/dockerfiles generated" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 5. Docker 설치/확인 -> 다량 이미지 빌드 및 컨테이너 생성/유지
-      ########################################################################
-      - name: "Docker ensure + build/run containers for each service"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-
-          # docker 설치/수리
-          safe_run "docker.ensure" ensure_docker || true
-
-          # 다시 한 번 docker info 로그 수집
-          safe_run "docker.info" bash -c 'docker --version && docker info' || true
-
-          SERVICES=("python" "java" "db" "docker")
-          if [ "${{ github.event.inputs.include_security || 'true' }}" = "true" ]; then
-            SERVICES+=("security")
-          fi
-          if [ "${{ github.event.inputs.include_pages || 'true' }}" = "true" ]; then
-            SERVICES+=("pages")
-          fi
-
-          LIMIT=${{ github.event.inputs.container_count || '7' }}
-          idx=0
-
-          for svc in "${SERVICES[@]}"; do
-            [ $idx -ge $LIMIT ] && break
-            idx=$((idx+1))
-
-            BASE="${SERVICES_ROOT}/${svc}"
-            DF="$BASE/docker/Dockerfile.${svc}"
-            IMG="${BASE_IMAGE_TAG}-${svc}:latest"
-            CNAME="dailycheck_${svc}"
-
-            safe_run "docker.build.${svc}" bash -c "
-              docker build -f \"${DF}\" \"$BASE/docker\" -t \"${IMG}\"
-            " || true
-
-            # 컨테이너 기동 (백그라운드)
-            safe_run "docker.run.${svc}" bash -c "
-              docker rm -f \"${CNAME}\" 2>/dev/null || true
-              docker run -d --name \"${CNAME}\" \"${IMG}\" >/dev/null 2>&1 || true
-            " || true
-
-            # 컨테이너 상태 점검 + 자동 재기동 시도
-            safe_run "docker.health.${svc}" bash -c "
-              docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' | grep \"${CNAME}\" || true
-              ensure_container_running \"${CNAME}\" || true
-              docker logs \"${CNAME}\" --tail 50 || true
-            " || true
-          done
-
-          echo "- docker build/run for services attempted" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 6. DB 연결 헬스체크 (MySQL 기준) + 자동 재시도
-      ########################################################################
-      - name: "Install MySQL client & DB health check with retry"
-        shell: bash
-        env:
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_PORT: ${{ secrets.DB_PORT || '3306' }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASS: ${{ secrets.DB_PASSWORD }}
-          DB_NAME: ${{ secrets.DB_NAME || 'information_schema' }}
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-
-          # MySQL CLI 설치 (잠금 걸리면 apt_fix로 복구 후 다시 시도)
-          if ! command -v mysql >/dev/null 2>&1; then
-            apt_fix
-            sudo apt-get install -y mysql-client || sudo apt-get install -y default-mysql-client || true
-          fi
-
-          cat > "${REPORT_DIR}/db_health.sql" << 'EOSQL'
-          SELECT NOW() AS now_time, USER() AS db_user, DATABASE() AS current_db;
-          SHOW DATABASES;
-          EOSQL
-
-          if [ -n "${DB_HOST:-}" ] && [ -n "${DB_USER:-}" ] && [ -n "${DB_PASS:-}" ]; then
-            retry_db_check "
-              mysql --protocol=tcp \
-                    -h \"${DB_HOST}\" \
-                    -P \"${DB_PORT}\" \
-                    -u \"${DB_USER}\" \
-                    -p\"${DB_PASS}\" \
-                    \"${DB_NAME}\" \
-                    < \"${REPORT_DIR}/db_health.sql\" \
-                    > \"${REPORT_DIR}/db_report.txt\" 2>&1
-            " || true
-          else
-            echo '[db] DB secrets not provided; skipping real DB check' > "${REPORT_DIR}/db_report.txt"
-          fi
-
-          echo "- db health attempted" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 7. 스냅샷 정리 (이미지/요약)
-      ########################################################################
-      - name: "Generate text snapshot (status, heads of logs)"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          SNAP_FILE="${IMG_DIR}/status_snapshot.txt"
-          {
-            echo "Daily Status Snapshot"
-            date
-            echo
-            echo "Summary so far:"
-            cat "${REPORT_DIR}/SUMMARY.txt"
-            echo
-            echo "--- System report head ---"
-            head -n 60 "${REPORT_DIR}/system_report.txt" || true
-            echo
-            echo "--- DB report head ---"
-            head -n 60 "${REPORT_DIR}/db_report.txt" || true
-            echo
-            echo "--- Maven build log head ---"
-            head -n 60 "${LOG_DIR}/maven.build.log" || true
-            echo
-            echo "--- Docker ensure log head ---"
-            head -n 60 "${LOG_DIR}/docker.ensure.log" || true
-            echo
-            echo "--- Docker run logs ---"
-            ls -1 "${LOG_DIR}"/docker.run.*.log 2>/dev/null | while read f; do
-              echo "### $(basename "$f")"
-              head -n 40 "$f" || true
-              echo
-            done
-          } > "${SNAP_FILE}"
-
-      - name: "Finalize SUMMARY.txt"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          {
-            echo
-            echo "Artifacts to review:"
-            echo " - system_report.txt"
-            echo " - python_report.json"
-            echo " - maven_report.txt"
-            echo " - db_report.txt"
-            echo " - services/* (per-service dirs, conf files, Dockerfiles)"
-            echo " - logs/* (per-step logs, docker.ensure.log, etc.)"
-            echo " - images/status_snapshot.txt"
-          } >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 8. (옵션) 자동 커밋 - 사용자가 auto_commit=true 로 실행했을 때만
-      ########################################################################
-      - name: "Optional auto-commit report back to repo"
-        if: ${{ github.event.inputs.auto_commit == 'true' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          git config user.name  "daily-check-bot"
-          git config user.email "daily-check-bot@users.noreply.github.com"
-
-          # 변경사항만 커밋 시도
-          git add "${REPORT_DIR}" || true
-          if git diff --cached --quiet; then
-            echo "[auto-commit] no changes to commit"
-          else
-            git commit -m "chore: daily-check report (run $GITHUB_RUN_ID)" || true
-            git push origin "${GITHUB_REF##*/}" || true
-          fi
-
-      ########################################################################
-      # 9. 전체 결과물 업로드 (감사/증빙용)
-      ########################################################################
-      - name: "Upload daily-check artifact"
+      - name: Upload Node audit artifact
+        if: steps.node_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: daily-check-${{ github.run_id }}
-          path: .github/daily_report
+          # 슬래시(/)는 보기 불편해서 - 로 치환. matrix.project 은 문자열이라 join() 미사용
+          name: npm-audit-${{ github.run_number }}-${{ matrix.project }} 
+          path: ${{ matrix.project }}/audit.json
           if-no-files-found: warn
           retention-days: 30
+
+
+  ##########################################################################
+  # Python audit
+  ##########################################################################
+  python-security:
+    name: "Python Dependency Check"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - anthropic-cost-tracker/python
+          - mcp-hello-py
+          - mcp-python-server
+          - mcp-apache-server
+          - .
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare dirs and helper script (no heredoc)
+        id: prep_py
+        shell: bash
+        run: |
+          set -Eeo pipefail
+
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+
+          HELPER_PATH="${REPORT_DIR}/helpers.sh"
+          # 같은 helpers.sh 이름으로 덮어써도됨. 내용 동일.
+          printf '%s\n' '#!/usr/bin/env bash'                           >  "$HELPER_PATH"
+          printf '%s\n' 'set -Eeo pipefail'                              >> "$HELPER_PATH"
+          printf '%s\n' ''                                              >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"'>> "$HELPER_PATH"
+          printf '%s\n' ''                                              >> "$HELPER_PATH"
+          printf '%s\n' 'safe_run() {'                                  >> "$HELPER_PATH"
+          printf '%s\n' '  local label="$1"; shift || true'             >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'    >> "$HELPER_PATH"
+          printf '%s\n' '  echo "▶ [$label] $(date "+%Y-%m-%d %H:%M:%S%z") START" | tee -a "$logfile"' >> "$HELPER_PATH"
+          printf '%s\n' '  if "$@" >> "$logfile" 2>&1 ; then'           >> "$HELPER_PATH"
+          printf '%s\n' '    echo "✅ [$label] OK" | tee -a "$logfile"' >> "$HELPER_PATH"
+          printf '%s\n' '    return 0'                                  >> "$HELPER_PATH"
+          printf '%s\n' '  else'                                        >> "$HELPER_PATH"
+          printf '%s\n' '    local rc=$?'                               >> "$HELPER_PATH"
+          printf '%s\n' '    echo "❌ [$label] FAILED exit=${rc}" | tee -a "$logfile"' >> "$HELPER_PATH"
+          printf '%s\n' '    return $rc'                                >> "$HELPER_PATH"
+          printf '%s\n' '  fi'                                          >> "$HELPER_PATH"
+          printf '%s\n' '}'                                             >> "$HELPER_PATH"
+          printf '%s\n' ''                                              >> "$HELPER_PATH"
+          printf '%s\n' 'apt_fix() {'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/apt.fix.log"'     >> "$HELPER_PATH"
+          printf '%s\n' '  echo "[fix] apt_fix start" | tee -a "$logfile"' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo dpkg --configure -a || true'            >> "$HELPER_PATH"
+          printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
+          printf '%s\n' '}'                                             >> "$HELPER_PATH"
+
+          chmod +x "$HELPER_PATH"
+
+          echo "Python scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Check requirements.txt
+        id: py_exists
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          if [ -d "${{ matrix.project }}" ] && [ -f "${{ matrix.project }}/requirements.txt" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install security tools
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          python -m pip install --upgrade pip
+          pip install pip-audit safety bandit || true
+
+      - name: Ensure jq (for parsing)
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+          apt_fix || true
+          sudo apt-get install -y jq || true
+
+      - name: pip-audit
+        if: steps.py_exists.outputs.exists == 'true'
+        id: py_audit
+        shell: bash
+        run: |
+          set -Eeo pipefail
+
+          echo "## Pip Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
+
+          pip-audit -r "${{ matrix.project }}/requirements.txt" --format json > "${{ matrix.project }}/pip-audit.json" || true
+          pip-audit -r "${{ matrix.project }}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+
+          if command -v jq >/dev/null 2>&1 && [ -f "${{ matrix.project }}/pip-audit.json" ]; then
+            HIGH=$(jq '[.[] | .vulns[]? | select(.severity=="HIGH")] | length' "${{ matrix.project }}/pip-audit.json" 2>/dev/null || echo 0)
+            CRIT=$(jq '[.[] | .vulns[]? | select(.severity=="CRITICAL")] | length' "${{ matrix.project }}/pip-audit.json" 2>/dev/null || echo 0)
+          else
+            HIGH=0
+            CRIT=0
+          fi
+
+          echo "High severity vulns: $HIGH"
+          echo "Critical severity vulns: $CRIT"
+
+          echo "HIGH_COUNT=${HIGH}" >> "$GITHUB_OUTPUT"
+          echo "CRIT_COUNT=${CRIT}" >> "$GITHUB_OUTPUT"
+
+      - name: safety check
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "## Safety Check for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
+          safety check -r "${{ matrix.project }}/requirements.txt" --json > "${{ matrix.project }}/safety.json" || true
+          safety check -r "${{ matrix.project }}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: bandit static analysis
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TARGET_DIR="${{ matrix.project }}"
+          bandit -r "$TARGET_DIR" -f json -o "$TARGET_DIR/bandit.json" || true
+          echo "## Bandit Security Scan for $TARGET_DIR" >> "$GITHUB_STEP_SUMMARY"
+          bandit -r "$TARGET_DIR" || echo "Bandit found issues" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Python audit artifact
+        if: steps.py_exists.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-audit-${{ github.run_number }}-${{ matrix.project }}
+          path: |
+            ${{ matrix.project }}/pip-audit.json
+            ${{ matrix.project }}/safety.json
+            ${{ matrix.project }}/bandit.json
+          if-no-files-found: warn
+          retention-days: 30
+
+
+  ##########################################################################
+  # GitHub advisory gate on PR
+  ##########################################################################
+  dependency-review:
+    name: "Dependency Review (PR gate)"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+
+
+  ##########################################################################
+  # Weekly scheduled run -> if any job failed, open issue
+  ##########################################################################
+  create-issue-on-weekly-failure:
+    name: "Create Issue on Weekly Failure"
+    runs-on: ubuntu-latest
+    needs: [node-security, python-security]
+    if: github.event_name == 'schedule' && failure()
+
+    steps:
+      - name: Open or reuse security issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'security,dependency-check',
+              state: 'open'
+            });
+
+            if (existing.data.length === 0) {
+              const bodyText = [
+                "🚨 Weekly dependency check reported failures.",
+                "",
+                "일부 보안 점검 단계(npm audit / pip-audit / bandit / safety 등)가 실패했습니다.",
+                "취약 의존성(high/critical) 또는 감사 단계 오류 가능성이 있습니다.",
+                "",
+                `Run details: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                "",
+                "Artifacts (npm-audit-*, python-audit-*)를 확인하여",
+                "취약한 패키지 및 문제 지점을 업데이트/조치해 주세요."
+              ].join("\n");
+
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: "🚨 Dependency Security Check Failure (Weekly Scan)",
+                body: bodyText,
+                labels: ["security", "dependency-check", "automated"]
+              });
+            }
