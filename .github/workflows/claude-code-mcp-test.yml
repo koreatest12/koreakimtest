@@ -68,7 +68,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         continue-on-error: true
 
       - name: Prepare service state (pre-flight harden)
@@ -884,7 +884,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         continue-on-error: true
 
       - name: Prepare service state (pre-flight harden)
@@ -1107,7 +1107,7 @@ jobs:
       REQ_TAG: ${{ inputs.release_tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         continue-on-error: true
 
       - name: Prep bundle dir

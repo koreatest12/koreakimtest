@@ -53,7 +53,7 @@ jobs:
       # 0. 준비: 체크아웃 + 로그 디렉토리 확보
       #################################################################
       - name: "[echo] Checkout repo"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: "[echo] Prepare echo dirs (logs, artifacts)"
         shell: bash
