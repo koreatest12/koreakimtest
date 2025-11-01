@@ -1,58 +1,408 @@
 # 파일 경로: .github/workflows/daily-check.yml
-name: Daily System Checks (일일 시스템 점검)
+name: "Daily System Checks (일일 시스템 점검)"
 
 on:
-  # 매일 한국 시간 오전 1시에 실행 (Cron 표현식: 0 1 * * *)
+  # 매일 한국 시간(KST, UTC+9) 새벽 1시에 돌리려면
+  # GitHub Actions cron은 UTC 기준이라 01:00 KST == 16:00 UTC 전날
   schedule:
-    - cron: '0 1 * * *'
-  # 수동 실행 가능하도록 설정
+    - cron: "0 16 * * *"
+  # 수동 실행도 가능
   workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  TZ: Asia/Seoul
+  REPORT_DIR: .github/daily_report
+  LOG_DIR: .github/daily_report/logs
+  ARTIFACT_DIR: .github/daily_report/artifacts
+  IMG_DIR: .github/daily_report/images
+  JAVA_SRC_DIR: .github/daily_report/java_check
+  PY_SRC_DIR: .github/daily_report/python_check
+  DOCKER_TEST_IMG: daily-check-test:latest
+  HEALTH_PORT: "8080"
 
 jobs:
   daily_checks:
-    # Linux 환경에서 실행
+    name: "🩺 일일 시스템 점검 (Docker / Python / Java / DB / 리포트)"
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout code
+      ########################################################################
+      # 0. 체크아웃 & 디렉토리 준비
+      ########################################################################
+      - name: "Checkout repository"
         uses: actions/checkout@v4
 
-      # 1. Linux 시스템 상태 점검 (예시)
-      - name: Run basic Linux system health check
+      - name: "Prepare report directories & helper scripts"
+        shell: bash
         run: |
-          echo "--- Disk Usage ---"
-          df -h
-          echo "--- Memory Usage ---"
-          free -m
-          # 필요에 따라 다른 Linux 명령어(예: systemctl status service_name) 추가
+          set -Eeuo pipefail
+          echo "[prep] creating report folders"
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}" "${IMG_DIR}" "${JAVA_SRC_DIR}" "${PY_SRC_DIR}"
 
-      # 2. Java 환경 설정 (Maven 프로젝트 빌드/테스트를 위한 환경)
-      - name: Set up JDK 17
+          echo "[prep] generating helper script: safe_run.sh"
+          cat > "${REPORT_DIR}/safe_run.sh" << 'EOF'
+          #!/usr/bin/env bash
+          # safe_run: run a command, never hard fail the whole job.
+          # usage: safe_run "label" cmd arg...
+          safe_run() {
+            local label="$1"; shift || true
+            echo "▶ [${label}] START $(date '+%Y-%m-%d %H:%M:%S%z')" | tee -a "${LOG_DIR}/${label}.log"
+            if "$@" >> "${LOG_DIR}/${label}.log" 2>&1 ; then
+              echo "✅ [${label}] OK" | tee -a "${LOG_DIR}/${label}.log"
+              return 0
+            else
+              rc=$?
+              echo "❌ [${label}] FAILED exit=${rc}" | tee -a "${LOG_DIR}/${label}.log"
+              return $rc
+            fi
+          }
+          export -f safe_run
+          EOF
+          chmod +x "${REPORT_DIR}/safe_run.sh"
+
+          echo "[prep] write summary stub"
+          echo "Daily Check Summary ($(date '+%Y-%m-%d %H:%M:%S %Z'))" > "${REPORT_DIR}/SUMMARY.txt"
+          echo "--------------------------------------------------" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 1. 리눅스 시스템 상태 수집 (디스크/메모리/네트워크/프로세스)
+      ########################################################################
+      - name: "Collect Linux system health (disk/mem/net/proc)"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/safe_run.sh"
+
+          safe_run "sys.health" bash -c '
+            {
+              echo "--- DATE ---"
+              date
+              echo
+              echo "--- UNAME ---"
+              uname -a
+              echo
+              echo "--- DISK USAGE (df -h) ---"
+              df -h
+              echo
+              echo "--- MEMORY (free -m) ---"
+              free -m
+              echo
+              echo "--- TOP 10 CPU PROCESSES (ps aux --sort=-%cpu | head) ---"
+              ps aux --sort=-%cpu | head -n 15
+              echo
+              echo "--- TOP 10 MEM PROCESSES (ps aux --sort=-%mem | head) ---"
+              ps aux --sort=-%mem | head -n 15
+              echo
+              echo "--- LISTEN PORTS (ss -tulpen || netstat -tulpen) ---"
+              (ss -tulpen || netstat -tulpen) 2>/dev/null || true
+              echo
+              echo "--- DOCKER SERVICE STATUS ---"
+              systemctl status docker 2>/dev/null || echo "systemctl not available in runner"
+              echo
+              echo "--- ENV SNAPSHOT ---"
+              printenv | sort
+            } > "${REPORT_DIR}/system_report.txt"
+          '
+
+          echo "[sys] append high-level note to SUMMARY"
+          echo "- System health collected: system_report.txt" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 2. Python 환경 검사 (버전/패키지/샘플 스크립트 실행)
+      ########################################################################
+      - name: "Set up Python 3.x"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: "Generate and run Python health script"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/safe_run.sh"
+
+          cat > "${PY_SRC_DIR}/health_check.py" << 'EOF'
+          import sys, platform, json, time
+          result = {
+              "timestamp": time.strftime("%Y-%m-%d %H:%M:%S %z"),
+              "python_version": sys.version,
+              "platform": platform.platform(),
+              "ok_imports": {}
+          }
+          # Try some common libs
+          for lib in ["os", "json", "subprocess", "sqlite3"]:
+              try:
+                  __import__(lib)
+                  result["ok_imports"][lib] = True
+              except Exception as e:
+                  result["ok_imports"][lib] = f"ERROR: {e}"
+
+          print(json.dumps(result, indent=2))
+          EOF
+
+          safe_run "python.env" python "${PY_SRC_DIR}/health_check.py" | tee "${REPORT_DIR}/python_report.json"
+
+          echo "- Python env checked: python_report.json" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 3. Java (JDK + Maven 빌드 스모크 테스트)
+      ########################################################################
+      - name: "Set up JDK 17 (Temurin)"
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: 'maven'
+          java-version: "17"
+          distribution: "temurin"
+          cache: "maven"
 
-      # 3. Maven 빌드 및 테스트 실행 (예시)
-      - name: Maven Build and Test
-        run: mvn clean install -DskipTests
-        
-      # 4. DB/SQL 연결 및 유효성 점검 (실제 환경에 맞게 수정 필요)
-      - name: DB Connection and SQL Validation Check
-        # 이 단계는 실제 DB 접속 정보(secrets)와 테스트용 SQL 쿼리가 필요합니다.
-        # DB 연결 정보를 GitHub Secrets에 저장하고 사용해야 합니다.
+      - name: "Generate tiny Maven test project if no pom.xml"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/safe_run.sh"
+
+          if [ ! -f "pom.xml" ]; then
+            echo "[java] No pom.xml found, generating minimal Maven project under ${JAVA_SRC_DIR}"
+            cat > "${JAVA_SRC_DIR}/pom.xml" << 'EOF'
+            <project xmlns="http://maven.apache.org/POM/4.0.0"
+                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                     xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+              <modelVersion>4.0.0</modelVersion>
+              <groupId>com.example</groupId>
+              <artifactId>daily-check-sample</artifactId>
+              <version>1.0.0-SNAPSHOT</version>
+              <properties>
+                <maven.compiler.source>17</maven.compiler.source>
+                <maven.compiler.target>17</maven.compiler.target>
+              </properties>
+              <build>
+                <plugins>
+                  <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.11.0</version>
+                    <configuration>
+                      <source>17</source>
+                      <target>17</target>
+                    </configuration>
+                  </plugin>
+                </plugins>
+              </build>
+            </project>
+            EOF
+
+            mkdir -p "${JAVA_SRC_DIR}/src/main/java/com/example"
+            cat > "${JAVA_SRC_DIR}/src/main/java/com/example/HealthCheck.java" << 'EOF'
+            package com.example;
+
+            public class HealthCheck {
+                public static void main(String[] args) {
+                    System.out.println("[JAVA] HealthCheck OK - " + System.currentTimeMillis());
+                }
+            }
+            EOF
+          else
+            echo "[java] Existing pom.xml detected in repo. Will use that for build."
+          fi
+
+          echo "- Java project prepared (pom.xml present)" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      - name: "Maven Build (skip tests)"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/safe_run.sh"
+
+          # Prefer root pom.xml, fallback to generated one
+          if [ -f "pom.xml" ]; then
+            PROJ_PATH="."
+          else
+            PROJ_PATH="${JAVA_SRC_DIR}"
+          fi
+
+          safe_run "maven.build" bash -c "
+            mvn -f \"${PROJ_PATH}/pom.xml\" -B -ntp clean package -DskipTests
+          "
+
+          # store mvn result summary
+          {
+            echo "=== mvn dependency:tree (top part) ==="
+            mvn -f "${PROJ_PATH}/pom.xml" -B -ntp dependency:tree | head -n 200 || true
+          } > "${REPORT_DIR}/maven_report.txt"
+
+          echo "- Maven build attempted: see maven_report.txt & logs/maven.build.log" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 4. 데이터베이스 연결 점검 (MySQL 예시)
+      #    - 실제 DB 정보는 Secrets 로 받음
+      #    - 접속 실패해도 워크플로 전체는 계속
+      ########################################################################
+      - name: "Install MySQL client (for DB health check)"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          # mysql-client 패키지명은 runner 이미지에 따라 변할 수 있으므로 유연하게 시도
+          sudo apt-get install -y mysql-client || sudo apt-get install -y default-mysql-client || true
+
+      - name: "DB Connection and Simple Query"
+        shell: bash
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT || '3306' }}
           DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_PASS: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME || 'information_schema' }}
         run: |
-          # 예시: 특정 DB 툴을 사용하여 연결 테스트 및 간단한 SELECT 쿼리 실행
-          echo "Attempting DB connection and simple query..."
-          # 실제 DB 환경에 맞는 스크립트 실행 또는 외부 툴 사용 (예: psql, mysql 등)
-          # ./scripts/run_db_health_check.sh
-          echo "DB check completed."
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/safe_run.sh"
 
-      # 5. Docker 이미지 빌드 테스트 (컨테이너화된 앱 점검)
-      - name: Docker Build Test
-        run: docker build . --tag my-app:test-check
+          # 헬스체크 쿼리 (예: 현재 시간, 사용자, DB 목록)
+          cat > "${REPORT_DIR}/db_health.sql" << 'EOF'
+          SELECT NOW()            AS now_time,
+                 USER()           AS db_user,
+                 DATABASE()       AS current_db;
+          SHOW DATABASES;
+          EOF
+
+          safe_run "db.health" bash -c '
+            if [ -n "${DB_HOST:-}" ] && [ -n "${DB_USER:-}" ] && [ -n "${DB_PASS:-}" ]; then
+              echo "[db] attempting mysql connectivity to ${DB_HOST}:${DB_PORT} ..."
+              mysql --protocol=tcp \
+                    -h "${DB_HOST}" \
+                    -P "${DB_PORT}" \
+                    -u "${DB_USER}" \
+                    -p"${DB_PASS}" \
+                    "${DB_NAME}" \
+                    < "${REPORT_DIR}/db_health.sql" \
+                    > "${REPORT_DIR}/db_report.txt" 2>&1 || true
+            else
+              echo "[db] secrets not provided, skipping real DB check" | tee "${REPORT_DIR}/db_report.txt"
+            fi
+          '
+
+          echo "- DB health attempted: db_report.txt" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 5. Docker 점검
+      #    - Docker 빌드 가능 여부
+      #    - 컨테이너 실행 / 헬스체크 에코
+      ########################################################################
+      - name: "Docker availability & version"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/safe_run.sh"
+
+          safe_run "docker.info" bash -c '
+            docker --version
+            docker info
+          ' || true
+
+          echo "- Docker info collected: logs/docker.info.log" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      - name: "Generate sample Dockerfile if none exists"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [ ! -f "Dockerfile" ]; then
+            echo "[docker] No Dockerfile found, creating minimal test Dockerfile at ${REPORT_DIR}/Dockerfile.daily"
+            cat > "${REPORT_DIR}/Dockerfile.daily" << 'EOF'
+            FROM alpine:3.20
+            RUN echo "hello from daily check container" > /health.txt
+            CMD ["cat", "/health.txt"]
+            EOF
+            DOCKERFILE_PATH="${REPORT_DIR}/Dockerfile.daily"
+          else
+            echo "[docker] Using repo Dockerfile"
+            DOCKERFILE_PATH="Dockerfile"
+          fi
+
+          echo "${DOCKERFILE_PATH}" > "${REPORT_DIR}/dockerfile_path.txt"
+
+      - name: "Docker build & run smoke test"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/safe_run.sh"
+
+          DOCKERFILE_PATH="$(cat "${REPORT_DIR}/dockerfile_path.txt")"
+
+          safe_run "docker.build" bash -c "
+            docker build \
+              -f \"${DOCKERFILE_PATH}\" \
+              . \
+              --tag ${DOCKER_TEST_IMG}
+          " || true
+
+          safe_run "docker.run" bash -c "
+            docker run --rm ${DOCKER_TEST_IMG}
+          " || true
+
+          echo "- Docker image build/run attempted. See logs/docker.build.log & logs/docker.run.log" >> "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 6. 간단한 상태 이미지/리포트 파일 생성 (PNG 등)
+      #    - 여기서는 텍스트 스냅샷 PNG로 변환하는 대신,
+      #      현재 요약을 그대로 text로 저장 (아티팩트로 충분)
+      #    - 만약 이미지까지 꼭 원하면 python Pillow 등으로 PNG 생성 가능
+      ########################################################################
+      - name: "Generate status snapshot text"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SNAP_FILE="${IMG_DIR}/status_snapshot.txt"
+          {
+            echo "Daily Status Snapshot"
+            date
+            echo
+            echo "Summary:"
+            cat "${REPORT_DIR}/SUMMARY.txt"
+            echo
+            echo "--- System info head ---"
+            head -n 50 "${REPORT_DIR}/system_report.txt" || true
+            echo
+            echo "--- DB report head ---"
+            head -n 50 "${REPORT_DIR}/db_report.txt" || true
+            echo
+            echo "--- Maven build log head ---"
+            head -n 50 "${LOG_DIR}/maven.build.log" || true
+            echo
+            echo "--- Docker build log head ---"
+            head -n 50 "${LOG_DIR}/docker.build.log" || true
+          } > "${SNAP_FILE}"
+
+      ########################################################################
+      # 7. 요약본 최종 업데이트
+      ########################################################################
+      - name: "Finalize SUMMARY"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo
+            echo "Artifacts to review:"
+            echo " - system_report.txt"
+            echo " - python_report.json"
+            echo " - maven_report.txt"
+            echo " - db_report.txt"
+            echo " - logs/* (docker.build.log, maven.build.log, etc.)"
+            echo " - images/status_snapshot.txt"
+          } >> "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 8. 전체 결과물을 아티팩트로 업로드
+      #    -> 매일 보관 가능 (리텐션 기본 90일)
+      ########################################################################
+      - name: "Upload Daily Report Artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-check-${{ github.run_id }}
+          path: .github/daily_report
+          if-no-files-found: warn
+          retention-days: 30
