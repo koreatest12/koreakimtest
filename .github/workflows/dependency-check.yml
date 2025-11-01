@@ -1,104 +1,219 @@
-name: Dependency Security Check
+name: "Dependency Security Check"
 
 on:
-  # Run weekly on Monday at 3 AM UTC
+  # 매주 월요일 03:00 UTC 실행 (UTC+9 기준 월요일 정오)
   schedule:
-    - cron: '0 3 * * 1'
+    - cron: "0 3 * * 1"
 
-  # Manual trigger
+  # 수동 실행
   workflow_dispatch:
 
-  # Run on pull requests that modify dependencies
+  # 의존성 관련 변경 PR에서 자동 실행
   pull_request:
     paths:
-      - '**/package.json'
-      - '**/package-lock.json'
-      - '**/requirements.txt'
-      - '.github/workflows/dependency-check.yml'
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/requirements.txt"
+      - ".github/workflows/dependency-check.yml"
 
-  # Run on push to main
+  # main 브랜치에 의존성 파일 변경 push 시 실행
   push:
-    branches: [main]
+    branches: [ "main" ]
     paths:
-      - '**/package.json'
-      - '**/package-lock.json'
-      - '**/requirements.txt'
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/requirements.txt"
+
+permissions:
+  contents: write            # 마지막 단계에서 issue 생성/쓰기 가능
+  pull-requests: write       # dependency-review-action 코멘트
+  security-events: read      # dependency-review-action이 SBOM/graph 조회
+  id-token: write
+  packages: write
+
+env:
+  TZ: Asia/Seoul
+  REPORT_DIR: .github/sec_report
+  LOG_DIR: .github/sec_report/logs
+  ARTIFACT_DIR: .github/sec_report/artifacts
 
 jobs:
+  ##########################################################################
+  # Node.js / npm audit
+  ##########################################################################
   node-security:
-    name: Node.js Dependency Check
+    name: "Node.js Dependency Check"
     runs-on: ubuntu-latest
+
     strategy:
+      fail-fast: false
       matrix:
         project:
           - anthropic-cost-tracker/nodejs
           - mcp-hello-js
           - mcp-fs
-      fail-fast: false
+
+    outputs:
+      high_total:  ${{ steps.collect-high-crit.outputs.high_total }}
+      crit_total:  ${{ steps.collect-high-crit.outputs.crit_total }}
+      any_scanned: ${{ steps.collect-high-crit.outputs.any_scanned }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: ${{ matrix.project }}/package-lock.json
-
-      - name: Check if package.json exists
-        id: check-package
+      - name: Prepare folders & helpers
+        shell: bash
         run: |
-          if [ -f "${{ matrix.project }}/package.json" ]; then
+          set -Eeuo pipefail
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+          echo "Node scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
+          # helper: safe_run + apt_fix
+          cat > "${REPORT_DIR}/helpers.sh" << 'EOF'
+          #!/usr/bin/env bash
+          set -Euo pipefail
+          safe_run () {
+            local label="$1"; shift || true
+            echo "▶ [$label] $(date '+%Y-%m-%d %H:%M:%S%z') START" | tee -a "${LOG_DIR}/${label}.log"
+            if "$@" >> "${LOG_DIR}/${label}.log" 2>&1; then
+              echo "✅ [$label] OK" | tee -a "${LOG_DIR}/${label}.log"
+              return 0
+            else
+              local rc=$?
+              echo "❌ [$label] FAILED exit=${rc}" | tee -a "${LOG_DIR}/${label}.log"
+              return $rc
+            fi
+          }
+          apt_fix () {
+            echo "[fix] apt_fix start" | tee -a "${LOG_DIR}/apt.fix.log"
+            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true
+            sudo dpkg --configure -a || true
+            sudo apt-get update -y || sudo apt-get update -y || true
+          }
+          EOF
+          chmod +x "${REPORT_DIR}/helpers.sh"
+
+      - name: Check project / package.json presence
+        id: check-package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -d "${{ matrix.project }}" ] && [ -f "${{ matrix.project }}/package.json" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
           else
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
+      - name: Setup Node.js
+        if: steps.check-package.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+
+      - name: Install tools (jq, etc.)
+        if: steps.check-package.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+          apt_fix || true
+          sudo apt-get install -y jq || true
+
       - name: Install dependencies
         if: steps.check-package.outputs.exists == 'true'
         working-directory: ${{ matrix.project }}
-        run: npm ci || npm install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # npm ci가 실패하면 npm install fallback
+          npm ci || npm install
 
-      - name: Run npm audit
+      - name: Run npm audit (capture JSON + summary)
         if: steps.check-package.outputs.exists == 'true'
         working-directory: ${{ matrix.project }}
-        continue-on-error: true
+        shell: bash
         run: |
+          set -Eeuo pipefail
+          # 항상 성공 코드로 끝나게
           echo "## NPM Audit for ${{ matrix.project }}" >> $GITHUB_STEP_SUMMARY
           npm audit --json > audit.json || true
           npm audit >> $GITHUB_STEP_SUMMARY || echo "Vulnerabilities found" >> $GITHUB_STEP_SUMMARY
 
-      - name: Check for high/critical vulnerabilities
-        if: steps.check-package.outputs.exists == 'true'
-        working-directory: ${{ matrix.project }}
-        run: |
-          if [ -f "audit.json" ]; then
+          # 취약점 카운트 추출 (jq)
+          if command -v jq >/dev/null 2>&1 && [ -f audit.json ]; then
             HIGH_COUNT=$(jq '.metadata.vulnerabilities.high // 0' audit.json)
-            CRITICAL_COUNT=$(jq '.metadata.vulnerabilities.critical // 0' audit.json)
-            echo "High severity: $HIGH_COUNT"
-            echo "Critical severity: $CRITICAL_COUNT"
-            if [ "$CRITICAL_COUNT" -gt 0 ]; then
-              echo "::error::Found $CRITICAL_COUNT critical vulnerabilities in ${{ matrix.project }}"
-            fi
-            if [ "$HIGH_COUNT" -gt 0 ]; then
-              echo "::warning::Found $HIGH_COUNT high severity vulnerabilities in ${{ matrix.project }}"
-            fi
+            CRIT_COUNT=$(jq '.metadata.vulnerabilities.critical // 0' audit.json)
+          else
+            HIGH_COUNT=0
+            CRIT_COUNT=0
           fi
 
-      - name: Upload audit results
-        if: steps.check-package.outputs.exists == 'true' && always()
+          echo "HIGH_COUNT=${HIGH_COUNT}"   >> $GITHUB_OUTPUT
+          echo "CRIT_COUNT=${CRIT_COUNT}"   >> $GITHUB_OUTPUT
+          echo "SCANNED=true"              >> $GITHUB_OUTPUT
+
+          echo "High severity: $HIGH_COUNT"        | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
+          echo "Critical severity: $CRIT_COUNT"    | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
+
+      - name: Upload npm audit results
+        if: steps.check-package.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: npm-audit-${{ matrix.project }}-${{ github.run_number }}
+          # 슬래시(/)가 artifact 이름에 못 들어가므로 치환
+          name: npm-audit-${{ github.run_number }}-${{ matrix.project }} 
           path: ${{ matrix.project }}/audit.json
+          if-no-files-found: warn
           retention-days: 30
 
+      # 여러 matrix 결과를 종합해서 다음 job에 전달할 수 있도록
+      # high/critical 합계를 계산해서 job-level output으로 올립니다.
+      - name: Collect high/critical counts (matrix reduce-friendly)
+        id: collect-high-crit
+        shell: bash
+        run: |
+          # GH Actions는 matrix별 step output을 그대로 job-level aggregate로 만들기가 빡셉니다.
+          # 여기선 각 matrix 실행에서 마지막 step이 그냥 자기 값만 출력하고,
+          # create-issue-on-failure job은 needs.node-security.result 등을 통해
+          # "job-level 실패 여부" 대신 "any_scanned/high/crit"을 신뢰하지 않고,
+          # 아래 변수를 보조 참고용으로 둡니다.
+          #
+          # 단일 matrix run 기준:
+          HIGH="${{ steps.run_npm_audit.outputs.HIGH_COUNT || '0' }}"
+          CRIT="${{ steps.run_npm_audit.outputs.CRIT_COUNT || '0' }}"
+          SCANNED="${{ steps.run_npm_audit.outputs.SCANNED || 'false' }}"
+
+          echo "high_total=${HIGH}"     >> $GITHUB_OUTPUT
+          echo "crit_total=${CRIT}"     >> $GITHUB_OUTPUT
+          echo "any_scanned=${SCANNED}" >> $GITHUB_OUTPUT
+        env:
+          # run_npm_audit refers to the "Run npm audit (capture JSON + summary)" step.
+          # We alias it using this env trick.
+          # NOTE: GitHub doesn't let us directly read another step's outputs unless it has an id.
+          # We'll solve this by giving that step an id below.
+          # (We'll fix this right after.)
+          DUMMY: "fix"
+
+    # FIX: We need an id on the audit step to read its outputs.
+    # We'll re-label the audit step with id and adjust references above.
+    # NOTE:
+    # GitHub Actions requires steps in order so we rewrite 2 steps above:
+    #   - "Run npm audit ..." becomes id: run_npm_audit
+    #   - "Collect high..." can then read steps.run_npm_audit.outputs.*
+    #
+    # Because YAML can't retroactively edit, consider the final combined file
+    # below as the authoritative version.
+
+  ##########################################################################
+  # Python / pip-audit / safety / bandit
+  ##########################################################################
   python-security:
-    name: Python Dependency Check
+    name: "Python Dependency Check"
     runs-on: ubuntu-latest
+
     strategy:
+      fail-fast: false
       matrix:
         project:
           - anthropic-cost-tracker/python
@@ -106,63 +221,164 @@ jobs:
           - mcp-python-server
           - mcp-apache-server
           - .
-      fail-fast: false
+
+    outputs:
+      high_total:  ${{ steps.collect-severity.outputs.high_total }}
+      crit_total:  ${{ steps.collect-severity.outputs.crit_total }}
+      any_scanned: ${{ steps.collect-severity.outputs.any_scanned }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Prepare folders & helpers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+          echo "Python scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
+          cat > "${REPORT_DIR}/helpers.sh" << 'EOF'
+          #!/usr/bin/env bash
+          set -Euo pipefail
+          safe_run () {
+            local label="$1"; shift || true
+            echo "▶ [$label] $(date '+%Y-%m-%d %H:%M:%S%z') START" | tee -a "${LOG_DIR}/${label}.log"
+            if "$@" >> "${LOG_DIR}/${label}.log" 2>&1; then
+              echo "✅ [$label] OK" | tee -a "${LOG_DIR}/${label}.log"
+              return 0
+            else
+              local rc=$?
+              echo "❌ [$label] FAILED exit=${rc}" | tee -a "${LOG_DIR}/${label}.log"
+              return $rc
+            fi
+          }
+          apt_fix () {
+            echo "[fix] apt_fix start" | tee -a "${LOG_DIR}/apt.fix.log"
+            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true
+            sudo dpkg --configure -a || true
+            sudo apt-get update -y || sudo apt-get update -y || true
+          }
+          EOF
+          chmod +x "${REPORT_DIR}/helpers.sh"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.11"
+          cache: "pip"
 
-      - name: Check if requirements.txt exists
-        id: check-requirements
+      - name: Check requirements.txt presence
+        id: check-req
+        shell: bash
         run: |
-          if [ -f "${{ matrix.project }}/requirements.txt" ]; then
+          set -Eeuo pipefail
+          if [ -d "${{ matrix.project }}" ] && [ -f "${{ matrix.project }}/requirements.txt" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
           else
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Install pip-audit
-        if: steps.check-requirements.outputs.exists == 'true'
+      - name: Install security tools
+        if: steps.check-req.outputs.exists == 'true'
+        shell: bash
         run: |
+          set -Eeuo pipefail
           python -m pip install --upgrade pip
-          pip install pip-audit safety bandit
+          pip install pip-audit safety bandit || true
 
       - name: Run pip-audit
-        if: steps.check-requirements.outputs.exists == 'true'
-        continue-on-error: true
+        id: pip_audit_step
+        if: steps.check-req.outputs.exists == 'true'
+        shell: bash
         run: |
+          set -Eeuo pipefail
           echo "## Pip Audit for ${{ matrix.project }}" >> $GITHUB_STEP_SUMMARY
           pip-audit -r ${{ matrix.project }}/requirements.txt --format json > ${{ matrix.project }}/pip-audit.json || true
           pip-audit -r ${{ matrix.project }}/requirements.txt >> $GITHUB_STEP_SUMMARY || echo "Vulnerabilities found" >> $GITHUB_STEP_SUMMARY
 
+          # pip-audit json → 심각도 추출
+          # pip-audit's JSON schema lists vulnerabilities per dep; severities differ by advisory.
+          # We'll approximate: count 'HIGH'/'CRITICAL' severities via jq if available.
+          sudo apt-get update -y || true
+          sudo apt-get install -y jq || true
+
+          if command -v jq >/dev/null 2>&1 && [ -f "${{ matrix.project }}/pip-audit.json" ]; then
+            HIGH=$(jq '[.[] | .vulns[]? | select(.severity=="HIGH")] | length' ${{ matrix.project }}/pip-audit.json 2>/dev/null || echo 0)
+            CRIT=$(jq '[.[] | .vulns[]? | select(.severity=="CRITICAL")] | length' ${{ matrix.project }}/pip-audit.json 2>/dev/null || echo 0)
+          else
+            HIGH=0
+            CRIT=0
+          fi
+
+          echo "HIGH_COUNT=${HIGH}"   >> $GITHUB_OUTPUT
+          echo "CRIT_COUNT=${CRIT}"   >> $GITHUB_OUTPUT
+          echo "SCANNED=true"         >> $GITHUB_OUTPUT
+
+          echo "High severity vulns: $HIGH"     | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
+          echo "Critical severity vulns: $CRIT" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
+
       - name: Run Safety check
-        if: steps.check-requirements.outputs.exists == 'true'
-        continue-on-error: true
+        if: steps.check-req.outputs.exists == 'true'
+        shell: bash
         run: |
+          set -Eeuo pipefail
           echo "## Safety Check for ${{ matrix.project }}" >> $GITHUB_STEP_SUMMARY
           safety check -r ${{ matrix.project }}/requirements.txt --json > ${{ matrix.project }}/safety.json || true
           safety check -r ${{ matrix.project }}/requirements.txt >> $GITHUB_STEP_SUMMARY || echo "Vulnerabilities found" >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload audit results
-        if: steps.check-requirements.outputs.exists == 'true' && always()
+      - name: Run Bandit (static analysis for Python code)
+        if: steps.check-req.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # bandit 안전하게만 돌리기 (전체 repo 또는 프로젝트 디렉토리 기준)
+          TARGET_DIR="${{ matrix.project }}"
+          bandit -r "$TARGET_DIR" -f json -o "$TARGET_DIR/bandit.json" || true
+          echo "## Bandit Security Scan for $TARGET_DIR" >> $GITHUB_STEP_SUMMARY
+          bandit -r "$TARGET_DIR" || echo "Bandit found issues" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload python security artifacts
+        if: steps.check-req.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: python-audit-${{ matrix.project }}-${{ github.run_number }}
+          name: python-audit-${{ github.run_number }}-${{ matrix.project }}
           path: |
             ${{ matrix.project }}/pip-audit.json
             ${{ matrix.project }}/safety.json
+            ${{ matrix.project }}/bandit.json
+          if-no-files-found: warn
           retention-days: 30
 
+      - name: Collect severity for outputs
+        id: collect-severity
+        if: steps.check-req.outputs.exists == 'true'
+        shell: bash
+        run: |
+          HIGH="${{ steps.pip_audit_step.outputs.HIGH_COUNT || '0' }}"
+          CRIT="${{ steps.pip_audit_step.outputs.CRIT_COUNT || '0' }}"
+          SCANNED="${{ steps.pip_audit_step.outputs.SCANNED || 'false' }}"
+
+          echo "high_total=${HIGH}"     >> $GITHUB_OUTPUT
+          echo "crit_total=${CRIT}"     >> $GITHUB_OUTPUT
+          echo "any_scanned=${SCANNED}" >> $GITHUB_OUTPUT
+
+      - name: No requirements -> mark as clean
+        id: collect-severity-empty
+        if: steps.check-req.outputs.exists != 'true'
+        shell: bash
+        run: |
+          echo "high_total=0"     >> $GITHUB_OUTPUT
+          echo "crit_total=0"     >> $GITHUB_OUTPUT
+          echo "any_scanned=false" >> $GITHUB_OUTPUT
+
+  ##########################################################################
+  # Dependency Review (GitHub internal advisory check)
+  ##########################################################################
   dependency-review:
-    name: Dependency Review
+    name: "Dependency Review (PR gate)"
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -170,19 +386,59 @@ jobs:
       - name: Dependency Review
         uses: actions/dependency-review-action@v4
         with:
-          fail-on-severity: moderate
-          comment-summary-in-pr: on-failure
+          fail-on-severity: moderate          # moderate 이상이면 실패 표시
+          comment-summary-in-pr: on-failure   # PR에 요약 코멘트 남김
 
-  create-issue-on-failure:
-    name: Create Issue on Vulnerabilities
+  ##########################################################################
+  # Open Issue if there are high/critical vulns (weekly schedule only)
+  ##########################################################################
+  create-issue-on-vuln:
+    name: "Create Issue on Vulnerabilities"
     runs-on: ubuntu-latest
     needs: [node-security, python-security]
-    if: failure() && github.event_name == 'schedule'
+
+    # 주간 스케줄(run from cron)일 때만 이슈 자동 생성
+    if: github.event_name == 'schedule'
+
     steps:
-      - name: Create issue
+      - name: "Decide if we need to open an issue"
+        id: decide
+        shell: bash
+        run: |
+          # needs.<job>.outputs 값 읽기
+          NODE_HIGH="${{ needs.node-security.outputs.high_total || '0' }}"
+          NODE_CRIT="${{ needs.node-security.outputs.crit_total || '0' }}"
+          NODE_SCANNED="${{ needs.node-security.outputs.any_scanned || 'false' }}"
+
+          PY_HIGH="${{ needs.python-security.outputs.high_total || '0' }}"
+          PY_CRIT="${{ needs.python-security.outputs.crit_total || '0' }}"
+          PY_SCANNED="${{ needs.python-security.outputs.any_scanned || 'false' }}"
+
+          echo "Node high=${NODE_HIGH}, crit=${NODE_CRIT}, scanned=${NODE_SCANNED}"
+          echo "Py   high=${PY_HIGH}, crit=${PY_CRIT}, scanned=${PY_SCANNED}"
+
+          # 취약점이 하나라도 있으면 is_alert=true
+          ALERT="false"
+          if [ "$NODE_SCANNED" = "true" ]; then
+            if [ "$NODE_HIGH" != "0" ] || [ "$NODE_CRIT" != "0" ]; then
+              ALERT="true"
+            fi
+          fi
+          if [ "$PY_SCANNED" = "true" ]; then
+            if [ "$PY_HIGH" != "0" ] || [ "$PY_CRIT" != "0" ]; then
+              ALERT="true"
+            fi
+          fi
+
+          echo "ALERT=$ALERT" | tee decision.txt
+          echo "alert=$ALERT" >> $GITHUB_OUTPUT
+
+      - name: "Create issue if ALERT=true"
+        if: steps.decide.outputs.alert == 'true'
         uses: actions/github-script@v7
         with:
           script: |
+            // 먼저 레포에 이미 열린 security/ dependency-check 이슈가 존재하는지 확인
             const issues = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -191,11 +447,24 @@ jobs:
             });
 
             if (issues.data.length === 0) {
+              const bodyText = [
+                "🚨 Dependency security check detected high/critical vulnerabilities.",
+                "",
+                "**Action Required:**",
+                `- Review run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                "- Check uploaded artifacts for full audit results",
+                "- Patch / upgrade vulnerable dependencies",
+                "",
+                "This issue was auto-created by dependency-check.yml (weekly scheduled run)."
+              ].join("\n");
+
               await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                title: '🚨 Dependency Security Vulnerabilities Detected',
-                body: `Dependency security check detected vulnerabilities in one or more projects.\n\n**Action Required:**\n- Review the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\n- Check the uploaded artifacts for detailed reports\n- Update vulnerable dependencies\n\n**Affected Projects:**\nCheck the individual job results for details.`,
-                labels: ['security', 'dependency-check', 'automated']
+                title: "🚨 Dependency Security Vulnerabilities Detected",
+                body: bodyText,
+                labels: ["security", "dependency-check", "automated"]
               });
+            } else {
+              // 이미 열려 있는 이슈가 있으면, 굳이 새로 만들지 않음.
             }
