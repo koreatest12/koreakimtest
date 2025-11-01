@@ -59,7 +59,7 @@ env:
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
 
-  # DB env for integration test (공통으로 step에서 사용)
+  # DB env for integration test
   PSQL_HOST: localhost
   PSQL_PORT: "5432"
   PSQL_DB: testdb
@@ -164,25 +164,44 @@ jobs:
         uses: github/codeql-action/analyze@v3
         with:
           category: "/language:${{ matrix.language }}"
+          # 기본 analyze는 GitHub Advanced Security 탭에 업로드함
+          # (여기선 그대로 두고 아래에서 별도 백업본 시도)
 
-      - name: Collect CodeQL SARIF
+      # ✅ 개선된 결과 수집 & 업로드 (경고 제거)
+      - name: Collect CodeQL reports (always create folder)
         if: always()
         run: |
+          set -Eeuo pipefail
           mkdir -p codeql_reports
-          cp -r ./codeql-results* ./codeql_reports/ 2>/dev/null || true
+
+          echo "[Collect] Try to gather SARIF / logs for ${{ matrix.language }}"
+
+          # CodeQL이 생성하는 결과물들(언어별 디렉/이름 다를 수 있음)을 최대한 긁어온다.
+          # 실패해도 continue (|| true)
+          cp -r ./codeql-results*/* codeql_reports/ 2>/dev/null || true
+          cp -r ./codeql-results* codeql_reports/ 2>/dev/null || true
+          cp -r *.sarif codeql_reports/ 2>/dev/null || true
+
+          echo "[Collect] Listing codeql_reports:"
           ls -R codeql_reports || true
 
-      - name: Upload CodeQL Reports
+          # 폴더가 비어 있어도, 최소한 README 넣어서 업로드 경고 안 나게 보존
+          if [ -z "$(ls -A codeql_reports)" ]; then
+            echo "no CodeQL SARIF generated for ${{ matrix.language }}" > codeql_reports/README.txt
+          fi
+
+      - name: Upload CodeQL Reports (no-warn if empty)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: codeql-${{ matrix.language }}
           path: codeql_reports
+          if-no-files-found: ignore
 
   #########################################################
   # JOB 2: Build & Test (Java + Python + DB) + Coverage + Lint
   #
-  # matrix는 제거하고 env로 입력값을 넣는 구조
+  # matrix 없이 env로 전달
   #########################################################
   build-and-test:
     name: "🛠 Build/Test w/ Postgres, Coverage, Lint"
@@ -203,7 +222,6 @@ jobs:
           POSTGRES_DB: testdb
         ports:
           - 5432:5432
-        # services.options 는 literal만 허용된다고 보는 게 안전
         options: >-
           --health-cmd "pg_isready -U runner -d testdb"
           --health-interval 10s
@@ -262,7 +280,7 @@ jobs:
       # Dependency Graph (Java)
       - name: Submit Java Dependency Graph
         continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
-        uses: actions/dependency-submission-action@v5
+        uses: github/dependency-submission-action@v5
         with:
           build-root-directory: ${{ github.workspace }}
 
@@ -305,7 +323,7 @@ jobs:
       # Dependency Graph (Python)
       - name: Submit Python Dependency Graph
         continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
-        uses: actions/dependency-submission-action@v5
+        uses: github/dependency-submission-action@v5
         with:
           build-root-directory: ${{ github.workspace }}
 
@@ -470,6 +488,7 @@ jobs:
         with:
           name: sbom-and-licenses
           path: sbom_artifacts
+          if-no-files-found: ignore
 
   #########################################################
   # JOB 5: Docker Build / Push / Security Scan / SmokeTest
