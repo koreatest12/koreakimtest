@@ -89,7 +89,7 @@ jobs:
 
       - name: Upload audit results
         if: steps.check-package.outputs.exists == 'true' && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: npm-audit-${{ matrix.project }}-${{ github.run_number }}
           path: ${{ matrix.project }}/audit.json
@@ -151,7 +151,7 @@ jobs:
 
       - name: Upload audit results
         if: steps.check-requirements.outputs.exists == 'true' && always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: python-audit-${{ matrix.project }}-${{ github.run_number }}
           path: |

@@ -159,7 +159,7 @@ jobs:
           (cd "${{ env.CI_WORKDIR }}"; ls -al)
 
       - name: Upload logs/artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ci-artifacts
           path: |

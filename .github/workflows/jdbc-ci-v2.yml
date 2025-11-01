@@ -357,7 +357,7 @@ jobs:
 
       - name: "[echo] Upload echo logs & jars"
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: spring-ci-artifacts-${{ github.run_id }}
           path: ${{ env.ARTIFACT_DIR }}

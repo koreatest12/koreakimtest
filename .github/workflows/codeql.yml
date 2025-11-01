@@ -285,7 +285,7 @@ jobs:
       # 🌟 NO-SKIP: 앞선 단계의 성공/실패와 관계없이 증거 파일을 반드시 업로드합니다.
       - name: Upload CodeQL & Environment Artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: codeql-${{ matrix.language }}-${{ github.run_id }}
           path: |
