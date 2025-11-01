@@ -59,7 +59,7 @@ env:
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
 
-  # DB env for integration test
+  # DB 기본값
   PSQL_HOST: localhost
   PSQL_PORT: "5432"
   PSQL_DB: testdb
@@ -103,7 +103,6 @@ jobs:
       - name: Create log/artifact directories + dummy assets
         run: |
           set -Eeuo pipefail
-
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" tmp/temp-logs data/processed assets/images .github/ci_cache
           echo "임시 로그 데이터" > tmp/temp-logs/app.log
           touch assets/images/placeholder.png
@@ -230,6 +229,14 @@ jobs:
       PYTHON_VERSION: ${{ github.event.inputs.python_version || '3.10' }}
       FORCE_CONTINUE: ${{ github.event.inputs.force_continue || 'true' }}
 
+      # DB 접속용 env를 job 레벨에도 다시 넣어줘서
+      # $PSQL_HOST 등이 비어버리는 상황 방지
+      PSQL_HOST: ${{ env.PSQL_HOST }}
+      PSQL_PORT: ${{ env.PSQL_PORT }}
+      PSQL_DB:   ${{ env.PSQL_DB }}
+      PSQL_USER: ${{ env.PSQL_USER }}
+      PSQL_PASS: ${{ env.PSQL_PASS }}
+
     services:
       postgres:
         image: postgres:15
@@ -277,14 +284,17 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-
 
-      # Postgres 캐시 슬롯 (Hosted runner 제약 때문에 placeholder 형태)
-      - name: Placeholder - DB cache key reservation
+      # DB 캐시 key 예약 (Hosted runner에서 실제 데이터 캐싱은 제한적이지만 키는 잡아둔다)
+      - name: Cache DB info placeholder
         uses: actions/cache@v4
         with:
           path: .github/ci_cache/db-info
           key: db-cache-${{ runner.os }}-${{ env.PSQL_DB }}-${{ env.PSQL_USER }}
           restore-keys: |
             db-cache-${{ runner.os }}-
+
+      # DB info 기록 (⚠ run은 별도 스텝이어야 함)
+      - name: Record DB connection info
         run: |
           mkdir -p .github/ci_cache/db-info
           echo "DB=${PSQL_DB}, USER=${PSQL_USER}, HOST=${PSQL_HOST}, PORT=${PSQL_PORT}" > .github/ci_cache/db-info/connection.txt || true
@@ -316,11 +326,11 @@ jobs:
       # Java Build + Test + Coverage
       - name: Maven Build/Test
         env:
-          DB_HOST: $PSQL_HOST
-          DB_PORT: $PSQL_PORT
-          DB_NAME: $PSQL_DB
-          DB_USER: $PSQL_USER
-          DB_PASSWORD: $PSQL_PASS
+          DB_HOST: ${{ env.PSQL_HOST }}
+          DB_PORT: ${{ env.PSQL_PORT }}
+          DB_NAME: ${{ env.PSQL_DB }}
+          DB_USER: ${{ env.PSQL_USER }}
+          DB_PASSWORD: ${{ env.PSQL_PASS }}
         run: |
           mvn -B -q clean verify --file pom.xml
           echo "Maven tests complete."
@@ -426,7 +436,6 @@ jobs:
         continue-on-error: ${{ env.FORCE_CONTINUE == 'true' }}
         run: |
           set -Eeuo pipefail
-
           echo "[ServerSetup] apt-get update..."
           sudo apt-get update -y || true
 
@@ -500,7 +509,7 @@ jobs:
           if-no-files-found: ignore
 
   #########################################################
-  # JOB 4: SBOM / 라이선스 보고서 (CycloneDX 등)
+  # JOB 4: SBOM / 라이선스 보고서
   #########################################################
   sbom-and-licenses:
     name: "📜 SBOM / License Report"
@@ -565,7 +574,6 @@ jobs:
 
   #########################################################
   # JOB 5: Docker Build / Push / Security Scan / SmokeTest
-  # - 여기 수정됨: Dockerfile 경로 자동 감지
   #########################################################
   docker-build-push:
     name: "🐳 Docker Build & Push & Scan & SmokeTest"
@@ -574,6 +582,8 @@ jobs:
 
     env:
       FORCE_CONTINUE: ${{ github.event.inputs.force_continue || 'true' }}
+      DOCKER_HEALTH_PORT: ${{ env.DOCKER_HEALTH_PORT }}
+      DOCKER_HEALTH_PATH: ${{ env.DOCKER_HEALTH_PATH }}
 
     steps:
       - name: Checkout repository
@@ -589,7 +599,7 @@ jobs:
             ci-cache-${{ runner.os }}-
             ci-cache-
 
-      # apt 캐시 복구 (Trivy 설치용)
+      # apt 캐시 복구 (Trivy 설치 속도 향상)
       - name: Restore apt cache
         uses: actions/cache@v4
         with:
@@ -613,7 +623,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 🔍 NEW: Dockerfile 경로 자동 탐지
+      # Dockerfile 경로 자동 탐지
       - name: Detect Dockerfile path
         id: detect-dockerfile
         run: |
@@ -626,13 +636,11 @@ jobs:
               break
             fi
           done
-
           if [ -z "$FOUND" ]; then
             echo "❌ Dockerfile not found in any known path" >&2
             echo "checked: ${CANDIDATES[*]}" >&2
             exit 1
           fi
-
           echo "✅ Using Dockerfile: $FOUND"
           echo "DOCKERFILE_PATH=$FOUND" >> "$GITHUB_OUTPUT"
 
