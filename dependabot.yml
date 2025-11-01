@@ -1,38 +1,39 @@
 # 파일 경로: .github/dependabot.yml
 version: 2
 updates:
-  # 1. Java (Maven) 종속성 업데이트 설정
+  # 1. Java (Maven) 종속성 업데이트
   - package-ecosystem: "maven"
-    # pom.xml 파일이 있는 디렉토리 (보통 프로젝트의 루트 경로)
     directory: "/"
-    # 업데이트 스케줄
     schedule:
-      interval: "daily"
-    # Java 관련 종속성을 매일 확인하고 PR을 생성
+      interval: "daily"        # 매일 확인
+    open-pull-requests-limit: 10
     labels:
       - "dependency"
       - "java"
       - "maven"
+    # 필요하면 팀 리뷰어 / 코드오너 자동 요청도 가능
+    # reviewers:
+    #   - "koreatest12"
 
-  # 2. Docker 이미지 업데이트 설정
+  # 2. Docker 이미지 업데이트
   - package-ecosystem: "docker"
-    # Dockerfile이 있는 디렉토리 (예: 루트 경로)
     directory: "/"
-    # 업데이트 스케줄
     schedule:
-      interval: "weekly"
-    # Docker 이미지 및 기본 OS 업데이트 (예: FROM alpine:latest)
+      interval: "weekly"       # 주간 확인
+    open-pull-requests-limit: 10
     labels:
       - "dependency"
       - "docker"
-      
-  # 3. GitHub Actions에 사용되는 액션 버전 업데이트 (선택 사항)
+      - "container"
+    # insecure registry나 private registry 쓰면 registries 설정도 가능
+
+  # 3. GitHub Actions 워크플로우 내부 액션 버전 업데이트
   - package-ecosystem: "github-actions"
-    # 액션 파일이 있는 디렉토리
     directory: "/"
-    # 업데이트 스케줄
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 10
     labels:
       - "dependency"
       - "github-actions"
+      - "ci"
