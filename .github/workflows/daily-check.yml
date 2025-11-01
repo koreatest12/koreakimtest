@@ -34,7 +34,7 @@ env:
 jobs:
 
   ##########################################################################
-  # 0. 공통 Bootstrap: 디렉토리 / 권한 파일 / helpers.sh / 보안 스냅샷
+  # 0. 공통 Bootstrap
   ##########################################################################
   security-bootstrap:
     name: "Security Bootstrap (Dirs, Permissions, Helpers)"
@@ -52,7 +52,7 @@ jobs:
 
           mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}" "${PERM_DIR}"
 
-          # helpers.sh (printf로 생성)
+          # helpers.sh
           HELPER_PATH="${REPORT_DIR}/helpers.sh"
           printf '%s\n' '#!/usr/bin/env bash'                           >  "$HELPER_PATH"
           printf '%s\n' 'set -Eeo pipefail'                              >> "$HELPER_PATH"
@@ -83,10 +83,9 @@ jobs:
           printf '%s\n' '  sudo dpkg --configure -a || true'            >> "$HELPER_PATH"
           printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
           printf '%s\n' '}'                                             >> "$HELPER_PATH"
-
           chmod +x "$HELPER_PATH"
 
-          # 권한/정책 문서 생성
+          # 권한/정책 문서들
           printf '%s\n' "# Global Security / Permission Policy"           >  "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
           printf '%s\n' "Generated at: $(date '+%Y-%m-%d %H:%M:%S%z')"     >> "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
           printf '%s\n' ""                                                >> "${PERM_DIR}/PERMISSIONS_GLOBAL.txt"
@@ -153,7 +152,7 @@ jobs:
 
 
   ##########################################################################
-  # 1. Node.js audit (서비스별 아티팩트 업로드 확장)
+  # 1. Node.js audit
   ##########################################################################
   node-security:
     name: "Node.js Dependency Check"
@@ -176,7 +175,9 @@ jobs:
         shell: bash
         run: |
           set -Eeo pipefail
+
           mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}" "${PERM_DIR}"
+
           if [ ! -f "${REPORT_DIR}/helpers.sh" ]; then
             HELPER_PATH="${REPORT_DIR}/helpers.sh"
             printf '%s\n' '#!/usr/bin/env bash' > "$HELPER_PATH"
@@ -187,7 +188,11 @@ jobs:
             chmod +x "$HELPER_PATH"
           fi
 
-          SERVICE_SAFE_NAME="${{ matrix.project//\//- }}"
+          # matrix.project 에서 '/'를 '-'로 바꿔서 서비스 식별자 생성
+          service_safe_name="$(echo "${{ matrix.project }}" | sed 's/\//-/g')"
+
+          echo "service_safe_name=${service_safe_name}" >> "$GITHUB_OUTPUT"
+
           echo "Node scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
 
           # 서비스별 권한 기록 append
@@ -198,7 +203,7 @@ jobs:
           } >> "${PERM_DIR}/PERMISSIONS_NODE.txt"
 
           # 서비스별 스냅샷 로그
-          SNAP_LOG="${LOG_DIR}/security_snapshot_node_${SERVICE_SAFE_NAME}.log"
+          snap_log="${LOG_DIR}/security_snapshot_node_${service_safe_name}.log"
           {
             echo "=== NODE JOB SECURITY SNAPSHOT ==="
             echo "Project: ${{ matrix.project }}"
@@ -209,10 +214,9 @@ jobs:
             echo "REPORT_DIR tree:"; ls -R "${REPORT_DIR}"
             echo
             echo "stat on REPORT_DIR:"; stat "${REPORT_DIR}" || true
-          } | tee "${SNAP_LOG}"
+          } | tee "${snap_log}"
 
-          echo "SNAP_LOG=${SNAP_LOG}" >> "$GITHUB_OUTPUT"
-          echo "SERVICE_SAFE_NAME=${SERVICE_SAFE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "snap_log=${snap_log}" >> "$GITHUB_OUTPUT"
 
       - name: Check project/package.json
         id: node_exists
@@ -257,6 +261,7 @@ jobs:
         shell: bash
         run: |
           set -Eeo pipefail
+
           echo "## NPM Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
 
           npm audit --json > audit.json || true
@@ -269,6 +274,7 @@ jobs:
             HIGH_COUNT=0
             CRIT_COUNT=0
           fi
+
           echo "High severity: $HIGH_COUNT"
           echo "Critical severity: $CRIT_COUNT"
           echo "HIGH_COUNT=${HIGH_COUNT}" >> "$GITHUB_OUTPUT"
@@ -278,12 +284,10 @@ jobs:
         if: steps.node_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          # 아티팩트 이름은 서비스 단위
-          name: node-sec-${{ github.run_number }}-${{ steps.prep_node.outputs.SERVICE_SAFE_NAME }}
-          # 이 서비스 감사 패키지에 필요한 모든 것 포함
+          name: node-sec-${{ github.run_number }}-${{ steps.prep_node.outputs.service_safe_name }}
           path: |
             ${{ matrix.project }}/audit.json
-            .github/sec_report/logs/security_snapshot_node_${{ steps.prep_node.outputs.SERVICE_SAFE_NAME }}.log
+            .github/sec_report/logs/security_snapshot_node_${{ steps.prep_node.outputs.service_safe_name }}.log
             .github/sec_report/permissions/PERMISSIONS_NODE.txt
             .github/sec_report/permissions/PERMISSIONS_GLOBAL.txt
             .github/sec_report/permissions/SECURITY_POLICY.md
@@ -293,7 +297,7 @@ jobs:
 
 
   ##########################################################################
-  # 2. Python audit (서비스별 아티팩트 업로드 확장)
+  # 2. Python audit
   ##########################################################################
   python-security:
     name: "Python Dependency Check"
@@ -318,7 +322,9 @@ jobs:
         shell: bash
         run: |
           set -Eeo pipefail
+
           mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}" "${PERM_DIR}"
+
           if [ ! -f "${REPORT_DIR}/helpers.sh" ]; then
             HELPER_PATH="${REPORT_DIR}/helpers.sh"
             printf '%s\n' '#!/usr/bin/env bash' > "$HELPER_PATH"
@@ -329,7 +335,10 @@ jobs:
             chmod +x "$HELPER_PATH"
           fi
 
-          SERVICE_SAFE_NAME="${{ matrix.project//\//- }}"
+          # '/' -> '-' 로 변환
+          service_safe_name="$(echo "${{ matrix.project }}" | sed 's/\//-/g')"
+          echo "service_safe_name=${service_safe_name}" >> "$GITHUB_OUTPUT"
+
           echo "Python scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
 
           # 서비스별 권한 기록 append
@@ -340,7 +349,7 @@ jobs:
           } >> "${PERM_DIR}/PERMISSIONS_PYTHON.txt"
 
           # 서비스별 스냅샷 로그
-          SNAP_LOG="${LOG_DIR}/security_snapshot_py_${SERVICE_SAFE_NAME}.log"
+          snap_log="${LOG_DIR}/security_snapshot_py_${service_safe_name}.log"
           {
             echo "=== PYTHON JOB SECURITY SNAPSHOT ==="
             echo "Project: ${{ matrix.project }}"
@@ -351,10 +360,9 @@ jobs:
             echo "REPORT_DIR tree:"; ls -R "${REPORT_DIR}"
             echo
             echo "stat on REPORT_DIR:"; stat "${REPORT_DIR}" || true
-          } | tee "${SNAP_LOG}"
+          } | tee "${snap_log}"
 
-          echo "SNAP_LOG=${SNAP_LOG}" >> "$GITHUB_OUTPUT"
-          echo "SERVICE_SAFE_NAME=${SERVICE_SAFE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "snap_log=${snap_log}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -396,6 +404,7 @@ jobs:
         shell: bash
         run: |
           set -Eeo pipefail
+
           echo "## Pip Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
 
           pip-audit -r "${{ matrix.project }}/requirements.txt" --format json > "${{ matrix.project }}/pip-audit.json" || true
@@ -408,6 +417,7 @@ jobs:
             HIGH=0
             CRIT=0
           fi
+
           echo "High severity vulns: $HIGH"
           echo "Critical severity vulns: $CRIT"
           echo "HIGH_COUNT=${HIGH}" >> "$GITHUB_OUTPUT"
@@ -436,14 +446,12 @@ jobs:
         if: steps.py_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v4
         with:
-          # 서비스 단위 아티팩트 이름
-          name: python-sec-${{ github.run_number }}-${{ steps.prep_py.outputs.SERVICE_SAFE_NAME }}
-          # 이 서비스 스캔/권한/스냅샷 전부
+          name: python-sec-${{ github.run_number }}-${{ steps.prep_py.outputs.service_safe_name }}
           path: |
             ${{ matrix.project }}/pip-audit.json
             ${{ matrix.project }}/safety.json
             ${{ matrix.project }}/bandit.json
-            .github/sec_report/logs/security_snapshot_py_${{ steps.prep_py.outputs.SERVICE_SAFE_NAME }}.log
+            .github/sec_report/logs/security_snapshot_py_${{ steps.prep_py.outputs.service_safe_name }}.log
             .github/sec_report/permissions/PERMISSIONS_PYTHON.txt
             .github/sec_report/permissions/PERMISSIONS_GLOBAL.txt
             .github/sec_report/permissions/SECURITY_POLICY.md
