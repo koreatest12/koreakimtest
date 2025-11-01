@@ -42,11 +42,11 @@ jobs:
 
     steps:
       - name: "[EchoCall] BEFORE: Checkout"
-        run: echo "▶ [executing] actions/checkout@v4"
+        run: echo "▶ [executing] actions/checkout@v5"
       - name: "STEP 1: Checkout repository"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: "[EchoCall] AFTER: Checkout"
-        run: echo "✅ [completed] actions/checkout@v4"
+        run: echo "✅ [completed] actions/checkout@v5"
 
       - name: "[EchoCall] STEP 2: Ledger Simulation"
         shell: bash

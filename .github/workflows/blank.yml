@@ -43,7 +43,7 @@ jobs:
       CI_INSTALL_CMD: ${{ github.event.inputs.install_cmd || 'auto' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prepare dirs
         shell: bash

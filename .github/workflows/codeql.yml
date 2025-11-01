@@ -61,7 +61,7 @@ jobs:
       # 0. CHECKOUT SOURCE
       ##########################################################################
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       ##########################################################################
       # 1. PREP: DIRECTORIES, LOG HELPERS, HOST UPGRADE SNAPSHOT
       ##########################################################################
