@@ -1,40 +1,99 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+# Dependabot configuration for multi-project monorepo
+# Documentation: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
 version: 2
 updates:
-  # 1. Node.js (JavaScript/TypeScript) 생태계
-  - package-ecosystem: "npm" 
-    # package.json 파일이 루트 디렉토리(/)에 있다고 가정합니다.
-    directory: "/" 
+  # Node.js Projects
+  - package-ecosystem: "npm"
+    directory: "/anthropic-cost-tracker/nodejs"
     schedule:
-      # 업데이트 확인 간격: 매주
       interval: "weekly"
-    # 추가 옵션: 평일 10시 (UTC 기준)에 PR을 생성
-    open-pull-requests-limit: 10 # 한 번에 열 수 있는 PR 개수 제한
-    time: "10:00"
-    
-  # 2. Python 생태계
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+    reviewers:
+      - "koreatest12"
+
+  - package-ecosystem: "npm"
+    directory: "/mcp-hello-js"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+
+  - package-ecosystem: "npm"
+    directory: "/mcp-fs"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+
+  # Python Projects
   - package-ecosystem: "pip"
-    # requirements.txt, setup.py 등이 있는 경우 (루트 디렉토리)
-    directory: "/"
+    directory: "/anthropic-cost-tracker/python"
     schedule:
-      # 업데이트 확인 간격: 격주
-      interval: "biweekly"
-    
-  # 3. GitHub Actions 워크플로우 종속성 (.github/workflows)
-  - package-ecosystem: "github-actions"
-    # 워크플로우 파일(.yml)이 있는 디렉토리
-    directory: "/"
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+
+  - package-ecosystem: "pip"
+    directory: "/mcp-hello-py"
     schedule:
-      # 업데이트 확인 간격: 월별
-      interval: "monthly"
-      
-  # 4. Docker (선택 사항: Dockerfile이 있는 경우)
-  - package-ecosystem: "docker"
-    # Dockerfile이 루트 디렉토리에 있다고 가정합니다.
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+
+  - package-ecosystem: "pip"
+    directory: "/mcp-python-server"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+
+  - package-ecosystem: "pip"
+    directory: "/mcp-apache-server"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+
+  - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "python"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  # Docker
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"

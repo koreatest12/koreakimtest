@@ -42,13 +42,20 @@
     },
     "python-utils": {
       "command": "C:\\Users\\kwonn\\mcp-python-server\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\Users\\kwonn\\mcp-python-server\\server.py"],
+      "args": ["C:\\Users\\kwonn\\mcp-python-server\\server_mcp.py"],
       "env": { "PYTHONUNBUFFERED": "1" }
     },
     "apache-manager": {
       "command": "C:\\Users\\kwonn\\mcp-apache-server\\.venv\\Scripts\\python.exe",
       "args": ["C:\\Users\\kwonn\\mcp-apache-server\\server.py"],
       "env": { "PYTHONUNBUFFERED": "1" }
+    },
+    "hello-mcp-java": {
+      "command": "C:\\Users\\kwonn\\.jdks\\openjdk-24.0.2+12-54\\bin\\java.exe",
+      "args": [
+        "-jar",
+        "C:\\Users\\kwonn\\mcp-hello-java\\target\\mcp-hello-java-1.0.0.jar"
+      ]
     }
   }
 }

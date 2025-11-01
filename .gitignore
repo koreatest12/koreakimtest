@@ -39,3 +39,37 @@ Thumbs.db
 # Logs
 logs/
 *.log
+
+# Windows user directories and system files
+AppData/
+Documents/
+Downloads/
+OneDrive/
+Contacts/
+CrossDevice/
+Favorites/
+Links/
+Searches/
+Saved Games/
+.config/
+.local/
+.jdks/
+.redhat/
+.m2/
+.idlerc/
+IdeaProjects/
+plug_ins/
+reports/
+nul
+*.ini
+NTUSER.DAT*
+ntuser.dat*
+ntuser.ini
+MagicVerifyUninstall.exe
+Foxit*.ini
+
+# Claude Code generated files
+.claudegenerated_password.txt
+
+# Markdown temp files (user-specific)
+IntelliJ_Claude_*.md
