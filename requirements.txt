@@ -1,4 +1,4 @@
-pandas==2.2.2
+pandas==2.3.3
 numpy==1.26.4
 Faker==26.0.0
 SQLAlchemy==2.0.36
