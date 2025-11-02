@@ -39,6 +39,13 @@ Thumbs.db
 # Logs
 logs/
 *.log
+.github/echo_logs/
+
+# Java build outputs
+target/
+*.class
+*.jar
+*.war
 
 # Windows user directories and system files
 AppData/
@@ -68,7 +75,11 @@ ntuser.ini
 MagicVerifyUninstall.exe
 Foxit*.ini
 
-# Claude Code generated files
+# Claude Code generated files and personal data
+.claude/
+.claude.json
+.gitconfig
+generated_password.txt
 .claudegenerated_password.txt
 
 # Markdown temp files (user-specific)
