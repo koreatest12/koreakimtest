@@ -1,19 +1,19 @@
-name: "🛰 API Test Server (Java HttpClient) — Safe-Continue / Always-Succeed"
+name: "🛰 API Curl Test Server — EchoOps Safe-Continue / Service Perms / DR+ISO / No-Heredoc"
 
 on:
   workflow_dispatch:
     inputs:
       target_url:            # 1
-        description: "호출할 API URL (빈값이면 Claude messages 엔드포인트 예시)"
+        description: "호출할 API URL (빈값이면 Anthropic Claude messages)"
         required: false
         default: "https://api.anthropic.com/v1/messages"
       run_mode:              # 2
-        description: "full=전체 단계 / lite=컴파일 없이 샘플 코드만 생성"
+        description: "full=전체 수행 / lite=생성 위주 (curl 실패 무시)"
         required: false
         default: "full"
 
 permissions:
-  contents: write   # 로그/아티팩트 커밋/업로드 대비
+  contents: write
   actions: read
   security-events: read
 
@@ -21,191 +21,148 @@ env:
   TZ: Asia/Seoul
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
-  JAVA_MAIN: ApiTest
-  JAVA_FILE: ApiTest.java
+  SERVICE_DIR: .github/echo_services
+  PERM_DIR: .github/echo_perm
+  SERVICES: "claude_api dr_center iso_builder"   # 우리가 관리할 서비스 목록
 
 jobs:
-  api-test-server:
-    name: "API Test Server Runner"
+  curl-test-server:
+    name: "Curl Test Server Runner (Echo / Always Success / Heredoc-Free)"
     runs-on: ubuntu-22.04
 
     steps:
       ##################################################################
-      # 0. 공통 헬퍼 준비: safe_run
-      #    - 어떤 명령이 실패하더라도 워크플로우는 중단하지 않고 계속 감.
-      #    - 각 단계 로그를 개별 파일에 남김.
+      # 0. 리포지토리 체크아웃
       ##################################################################
       - name: "[prep] Checkout repository"
         uses: actions/checkout@v4
 
-      - name: "[prep] Create dirs (.github/echo_*)"
+      ##################################################################
+      # 1. 공통 디렉토리 & safe_echo_run 준비
+      #    - safe_echo_run: 실패해도 무조건 0으로 종료해서 잡이 안 끊긴다
+      ##################################################################
+      - name: "[prep] Create base dirs + helper"
         run: |
-          set -Eeuo pipefail
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" .github/echo_tmp || true
-          echo "[INFO] Directories prepared: ${LOG_DIR}, ${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/prep.log"
+          echo ">>> [prep] start"
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${SERVICE_DIR}" "${PERM_DIR}" .github/echo_tmp || true
 
-      - name: "[prep] Write helper script safe_run.sh"
+          # safe_echo_run: safe_echo_run <label> <command...>
+          # - 명령 실행 전/후 echo 로깅
+          # - 항상 exit 0
+          printf '%s\n' '#!/usr/bin/env bash'                                         >  .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' '# safe_echo_run <label> <command...>'                       >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'label="$1"; shift || true'                                  >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'log_file=".github/echo_logs/${label}.log"'                  >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'echo "▶ [${label}] $(date '\''+%Y-%m-%d %H:%M:%S%z'\'') START" | tee -a "$log_file"' >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'echo "▶ [${label}] COMMAND: $@" | tee -a "$log_file"'       >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'set +e'                                                     >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' '"$@" >> "$log_file" 2>&1'                                   >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'rc=$?'                                                      >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'set +e'                                                     >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'if [ "$rc" -eq 0 ]; then'                                   >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' '  echo "✅ [${label}] OK (exit=${rc})" | tee -a "$log_file"' >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'else'                                                       >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' '  echo "❌ [${label}] FAILED (exit=${rc}) (continue anyway)" | tee -a "$log_file"' >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'fi'                                                         >> .github/echo_tmp/safe_echo_run.sh
+          printf '%s\n' 'exit 0'                                                     >> .github/echo_tmp/safe_echo_run.sh
+
+          chmod +x .github/echo_tmp/safe_echo_run.sh
+
+          echo "[INFO] prep done" | tee -a "${LOG_DIR}/prep.init.log"
+
+      ##################################################################
+      # 2. 서비스별 디렉토리 / 권한 파일 / 상태 로그 생성
+      #    - Heredoc 금지, 모두 echo/printf로 구성
+      ##################################################################
+      - name: "[svc] Init service dirs + perms + status"
+        env:
+          SERVICES: ${{ env.SERVICES }}
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          PERM_DIR: ${{ env.PERM_DIR }}
+          LOG_DIR: ${{ env.LOG_DIR }}
         run: |
-          cat > .github/echo_tmp/safe_run.sh << 'EOF'
-          #!/usr/bin/env bash
-          # safe_run <label> <command...>
-          # - 항상 0으로 종료 (파이프라인 안 끊김)
-          # - stdout/stderr 둘 다 개별 로그 파일에도 저장
-          set -Eeuo pipefail
-          label="$1"; shift || true
-          log_file=".github/echo_logs/${label}.log"
+          echo ">>> [svc] start"
+          for svc in $SERVICES; do
+            svc_dir="${SERVICE_DIR}/${svc}"
+            svc_perm="${PERM_DIR}/${svc}"
 
-          echo "▶ [$label] $(date '+%Y-%m-%d %H:%M:%S%z') START" | tee -a "$log_file"
-          if "$@" >> "$log_file" 2>&1; then
-            echo "✅ [$label] OK"     | tee -a "$log_file"
-            exit 0
-          else
-            rc=$?
-            echo "❌ [$label] FAILED (exit=${rc})" | tee -a "$log_file"
-            # 종료코드는 0으로 변경해서 전체 잡은 계속 진행
-            exit 0
-          fi
-          EOF
-          chmod +x .github/echo_tmp/safe_run.sh
-          echo "[INFO] safe_run.sh ready" | tee -a "${LOG_DIR}/prep.log"
+            echo "[svc:$svc] create dirs ${svc_dir}, ${svc_perm}"
+            mkdir -p "$svc_dir" "$svc_perm" || true
+
+            # README.md
+            printf '%s\n' "# Service: ${svc}" > "${svc_dir}/README.md"
+
+            # status.log
+            printf '%s\n' "[INIT] $(date '+%Y-%m-%d %H:%M:%S%z') service=${svc} created" > "${svc_dir}/status.log"
+
+            # permissions.txt
+            {
+              printf '%s\n' "[PERMISSIONS]"
+              printf '%s\n' "service=${svc}"
+              printf '%s\n' "owner=runner"
+              printf '%s\n' "access=rw"
+              printf '%s\n' "note=자동 생성된 권한/접근 제어 템플릿"
+            } > "${svc_perm}/permissions.txt"
+
+            # 권한 (에러 무시)
+            chmod 600 "${svc_perm}/permissions.txt" || true
+            chmod 640 "${svc_dir}/status.log" || true
+            chmod 644 "${svc_dir}/README.md" || true
+
+            echo "[svc:$svc] files created + chmod applied" | tee -a "${LOG_DIR}/svc.init.log"
+          done
+          echo ">>> [svc] done" | tee -a "${LOG_DIR}/svc.init.log"
 
       ##################################################################
-      # 1. Java 환경 설치
+      # 3. DR 센터 / ISO 빌더 템플릿 생성
+      #    - dr_backup_plan.txt
+      #    - iso_manifest.txt
+      #    - status.log 에 append
+      #    - Heredoc 없이 printf만 사용
       ##################################################################
-      - name: "[java] Setup Temurin JDK 21"
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - name: "[java] java -version"
+      - name: "[svc] DR / ISO templates"
+        env:
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          LOG_DIR: ${{ env.LOG_DIR }}
         run: |
-          .github/echo_tmp/safe_run.sh java_version java -version
+          echo ">>> [dr+iso] start"
+          dr_dir="${SERVICE_DIR}/dr_center"
+          iso_dir="${SERVICE_DIR}/iso_builder"
+
+          # DR 백업 플랜
+          {
+            printf '%s\n' "[DR_BACKUP_PLAN]"
+            printf '%s\n' "retention_days=1"
+            printf '%s\n' "description=하루 단위 DR 데이터센터 보관 정책"
+            printf '%s\n' "snapshot_policy=nightly+on-demand"
+          } > "${dr_dir}/dr_backup_plan.txt"
+
+          # ISO 매니페스트
+          {
+            printf '%s\n' "[ISO_MANIFEST]"
+            printf '%s\n' "image_name=finops-snapshot.iso"
+            printf '%s\n' "includes=logs,configs,sql,artifacts"
+            printf '%s\n' "note=이 파일은 ISO 이미지에 포함할 자원을 정의하는 템플릿입니다."
+          } > "${iso_dir}/iso_manifest.txt"
+
+          chmod 640 "${dr_dir}/dr_backup_plan.txt" || true
+          chmod 640 "${iso_dir}/iso_manifest.txt" || true
+
+          # status.log append
+          printf '\n%s\n' "[DR_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') backup plan prepared" >> "${dr_dir}/status.log"  || true
+          printf '\n%s\n' "[ISO_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') iso manifest prepared"  >> "${iso_dir}/status.log" || true
+
+          echo ">>> [dr+iso] done" | tee -a "${LOG_DIR}/dr_iso.init.log"
 
       ##################################################################
-      # 2. API 호출용 Java 코드 자동 생성
-      #
-      # 이 Java 코드는:
-      #  - Java 11+ HttpClient 사용
-      #  - Anthropic Claude messages API 예시 POST
-      #  - 헤더(x-api-key 등) 포함
-      #  - 응답 status code / body 출력
-      #
-      # 주의:
-      #  실제 키는 하드코딩하지 말고 GitHub Secrets로 넘기는 게 맞다.
-      #  여기서는 빈 문자열/placeholder로 둔다.
+      # 4. 환경 스냅샷
+      #    - df -h, uname, env 등 기록
       ##################################################################
-      - name: "[codegen] Generate ApiTest.java"
-        run: |
-          cat > "${JAVA_FILE}" << 'EOF'
-          import java.net.URI;
-          import java.net.http.HttpClient;
-          import java.net.http.HttpRequest;
-          import java.net.http.HttpResponse;
-          import java.time.Duration;
-
-          // 간단한 데모:
-          // - Anthropic Claude /v1/messages 같은 POST API를 호출해서
-          //   status code / response body를 출력한다.
-          //
-          // 실패해도 프로세스는 0으로 끝나도록 main에서 try/catch 처리.
-          //
-          // 주의: 실제 배포 시엔 API 키를 하드코딩하지 말고
-          //       환경변수나 GitHub Secrets에서 주입하세요.
-          public class ApiTest {
-              public static void main(String[] args) {
-                  String targetUrl   = System.getenv("TARGET_URL");
-                  if (targetUrl == null || targetUrl.isBlank()) {
-                      targetUrl = "https://api.anthropic.com/v1/messages";
-                  }
-
-                  String apiKey      = System.getenv("ANTHROPIC_API_KEY"); // 시크릿에서 넣기 권장
-                  if (apiKey == null) {
-                      apiKey = ""; // 빈 값이면 인증 실패(401) 날 수 있음 - 의도적으로 테스트 가능
-                  }
-
-                  // Claude API 예시 바디
-                  // model / max_tokens / messages 구조는 Claude messages API 기준
-                  String jsonBody = """
-                  {
-                    "model": "claude-3-opus-20240229",
-                    "max_tokens": 64,
-                    "messages": [
-                      { "role": "user", "content": "안녕, 사용량(usage) 필드를 보여줘." }
-                    ]
-                  }
-                  """;
-
-                  HttpClient client = HttpClient.newBuilder()
-                          .connectTimeout(Duration.ofSeconds(15))
-                          .build();
-
-                  HttpRequest request = HttpRequest.newBuilder()
-                          .uri(URI.create(targetUrl))
-                          .timeout(Duration.ofSeconds(30))
-                          .header("Content-Type", "application/json")
-                          .header("anthropic-version", "2023-06-01")
-                          .header("x-api-key", apiKey)
-                          .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                          .build();
-
-                  try {
-                      HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-
-                      System.out.println("=== API CALL RESULT ========================");
-                      System.out.println("URL        : " + targetUrl);
-                      System.out.println("StatusCode : " + response.statusCode());
-                      System.out.println("Headers    : " + response.headers().map());
-                      System.out.println("Body       : " + response.body());
-                      System.out.println("===========================================");
-
-                      // 정상이라면 응답 body 안에 usage 같은 정보가 있을 수도 있음
-                      // (성공 응답이면 usage.input_tokens / usage.output_tokens)
-                      //
-                      // 401, 400, 429 등이 와도 여기까지는 도달하므로
-                      // "호출 경로" 자체는 검증 가능
-
-                  } catch (Exception e) {
-                      // 여기서도 절대 비정상 종료하지 않고,
-                      // 테스트 서버 파이프라인은 항상 "진행" 가능하게 한다.
-                      System.out.println("[WARN] API 호출 중 예외 발생: " + e.getMessage());
-                      e.printStackTrace();
-                  }
-
-                  // 항상 정상 종료 코드로 종료
-                  System.exit(0);
-              }
-          }
-          EOF
-          echo "[INFO] ApiTest.java generated" | tee -a "${LOG_DIR}/codegen.log"
-
-      ##################################################################
-      # 3. 컴파일 & 실행
-      #    - safe_run.sh 로 감싼다.
-      #    - 실패하더라도 워크플로우는 계속 진행.
-      ##################################################################
-      - name: "[build] javac ApiTest.java"
+      - name: "[snap] Environment snapshot"
         env:
           LOG_DIR: ${{ env.LOG_DIR }}
         run: |
-          .github/echo_tmp/safe_run.sh javac_build javac "${JAVA_FILE}"
-
-      - name: "[run] java ApiTest (POST test)"
-        env:
-          LOG_DIR: ${{ env.LOG_DIR }}
-          TARGET_URL: ${{ github.event.inputs.target_url }}
-          # 실제 사용시 아래 Secrets 등록 후 사용:
-          # Settings > Secrets and variables > Actions > New repository secret
-          # Name: ANTHROPIC_API_KEY
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          .github/echo_tmp/safe_run.sh java_run java "${JAVA_MAIN}"
-
-      ##################################################################
-      # 4. 실행 결과/환경 스냅샷을 아티팩트로 모은다.
-      #    - 나중에 근거로 다운로드 가능.
-      ##################################################################
-      - name: "[snapshot] Collect env info"
-        run: |
+          echo ">>> [snap] start"
           {
             echo "===== ENV SNAPSHOT ====="
             date
@@ -215,37 +172,139 @@ jobs:
             echo "--- env | sort ---"
             env | sort
           } | tee "${LOG_DIR}/env_snapshot.log"
+          echo ">>> [snap] done" | tee -a "${LOG_DIR}/env_snapshot.log"
 
-      - name: "[snapshot] Copy key logs to artifacts"
+      ##################################################################
+      # 5. CURL 호출 준비 및 실행
+      #
+      # - Heredoc 없이 request_body.json 작성
+      # - safe_echo_run 사용
+      # - 실패해도 무조건 계속 진행
+      #
+      # 결과물:
+      #   LOG_DIR/curl_request/request_body.json
+      #   LOG_DIR/curl_response/status_code.txt
+      #   LOG_DIR/curl_response/headers.txt
+      #   LOG_DIR/curl_response/body.json
+      #   LOG_DIR/curl_response/usage.log (usage 추출 시도)
+      #
+      # claude_api/status.log 에도 기록 append
+      ##################################################################
+      - name: "[api] Curl call Anthropic Claude messages API (Echo Safe)"
+        env:
+          INPUT_URL: ${{ github.event.inputs.target_url }}
+          SECR_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LOG_DIR: ${{ env.LOG_DIR }}
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
         run: |
-          set -Eeuo pipefail
-          cp -r "${LOG_DIR}" "${ARTIFACT_DIR}/logs"
-          echo "[INFO] Logs copied into ${ARTIFACT_DIR}/logs" | tee -a "${LOG_DIR}/artifact.log"
-          ls -R "${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.log"
+          echo ">>> [api] start"
+
+          TARGET_URL="${INPUT_URL}"
+          if [ -z "$TARGET_URL" ]; then
+            TARGET_URL="https://api.anthropic.com/v1/messages"
+          fi
+
+          echo "[api] TARGET_URL=${TARGET_URL}"
+
+          REQ_DIR="${LOG_DIR}/curl_request"
+          RESP_DIR="${LOG_DIR}/curl_response"
+          mkdir -p "$REQ_DIR" "$RESP_DIR"
+
+          # 요청 바디 JSON (heredoc 금지 → printf로 한 줄씩 작성)
+          {
+            printf '%s\n' '{'
+            printf '%s\n' '  "model": "claude-3-opus-20240229",'
+            printf '%s\n' '  "max_tokens": 64,'
+            printf '%s\n' '  "messages": ['
+            printf '%s\n' '    { "role": "user", "content": "안녕, 사용량 usage 필드 보여줘." }'
+            printf '%s\n' '  ]'
+            printf '%s\n' '}'
+          } > "${REQ_DIR}/request_body.json"
+
+          echo "[api] request_body.json created" | tee -a "${LOG_DIR}/curl_init.log"
+
+          .github/echo_tmp/safe_echo_run.sh curl_call bash -c "
+            echo '[api] curl POST ${TARGET_URL}'
+            echo '[api] headers: Content-Type, anthropic-version, x-api-key(masked)'
+            echo '[api] body file: ${REQ_DIR}/request_body.json'
+
+            status_file='${RESP_DIR}/status_code.txt'
+            body_file='${RESP_DIR}/body.json'
+            header_file='${RESP_DIR}/headers.txt'
+
+            curl -sS -X POST '${TARGET_URL}' \
+              -H 'Content-Type: application/json' \
+              -H 'anthropic-version: 2023-06-01' \
+              -H 'x-api-key: ${SECR_KEY}' \
+              -D \"\$header_file\" \
+              --data @\"${REQ_DIR}/request_body.json\" \
+              -o \"\$body_file\" \
+              --write-out '%{http_code}' > \"\$status_file\"
+
+            echo '[api] curl done.'
+            echo '[api] status:'; cat \"\$status_file\" || true
+            echo '[api] headers top:'; head -n 20 \"\$header_file\" || true
+            echo '[api] body head:'; head -c 500 \"\$body_file\" || true
+
+            usage_log='${RESP_DIR}/usage.log'
+            printf '%s\n' '[api] extracting usage best-effort' | tee \"\$usage_log\"
+            grep -E '\"usage\"|input_tokens|output_tokens' \"\$body_file\" >> \"\$usage_log\" 2>/dev/null || true
+
+            svc_status='${SERVICE_DIR}/claude_api/status.log'
+            {
+              printf '\n%s\n' '[CALL] '"\$(date '+%Y-%m-%d %H:%M:%S%z')"
+              printf '%s%s\n' 'status_code=' \"\$(cat \"\$status_file\" 2>/dev/null || echo 'N/A')\"
+              printf '%s\n' 'note=See curl_response/ for details'
+            } >> \"\$svc_status\" || true
+
+            chmod 600 \"\$status_file\" \"\$header_file\" \"\$body_file\" \"\$usage_log\" 2>/dev/null || true
+          "
+
+          echo ">>> [api] done" | tee -a "${LOG_DIR}/curl_init.log"
 
       ##################################################################
-      # 5. 아티팩트 업로드
+      # 6. 아티팩트 준비 & 업로드
+      #
+      # - echo_services, echo_perm, echo_logs, echo_artifacts 전체 업로드
       ##################################################################
-      - name: "[artifact] Upload Echo Logs & Artifacts"
+      - name: "[collect] Prepare artifacts"
+        env:
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          PERM_DIR: ${{ env.PERM_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          LOG_DIR: ${{ env.LOG_DIR }}
+        run: |
+          echo ">>> [collect] start"
+          mkdir -p "${ARTIFACT_DIR}/services" "${ARTIFACT_DIR}/permissions" || true
+          cp -r "${SERVICE_DIR}/."     "${ARTIFACT_DIR}/services/"     || true
+          cp -r "${PERM_DIR}/."        "${ARTIFACT_DIR}/permissions/"  || true
+          echo ">>> listing ${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
+          ls -R "${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
+          echo ">>> [collect] done" | tee -a "${LOG_DIR}/artifact.bundle.log"
+
+      - name: "[artifact] Upload logs + services + perms"
         uses: actions/upload-artifact@v4
         with:
-          name: api-test-server-logs
+          name: api-curl-test-server-logs-and-services
           path: |
             .github/echo_logs
             .github/echo_artifacts
+            .github/echo_services
+            .github/echo_perm
           if-no-files-found: warn
           retention-days: 7
 
       ##################################################################
-      # 6. 최종 상태 보고 (항상 성공으로 마무리)
-      #    - 여기서 강제로 '성공' 메시지를 찍어준다.
+      # 7. 마지막 리포트 (항상 성공 선언)
       ##################################################################
-      - name: "[final] Report overall status (ALWAYS-SUCCESS)"
+      - name: "[final] Overall status (ALWAYS-SUCCESS)"
         run: |
-          echo "✅ [FINAL] API Test Server workflow finished."
-          echo "   - 각 단계에서 실패가 있어도 파이프라인은 계속 진행했습니다."
-          echo "   - 로그는 api-test-server-logs 아티팩트로 업로드되었습니다."
-          echo "   - ApiTest.java 는 Java HttpClient 기반 POST 테스트 예제입니다."
-          echo "   - Claude 사용량(usage)은 개별 호출 응답 body 안에서만 확인 가능합니다."
-          echo "   - 별도 '/usage' 조회 API는 없으므로 실패처럼 보일 수 있습니다."
-          echo "DONE." | tee -a "${LOG_DIR}/final.log"
+          echo "✅ [FINAL] API Curl Test Server workflow finished."
+          echo "   - 모든 단계는 safe_echo_run 으로 감싸서 실패해도 계속 진행했습니다."
+          echo "   - Anthropic Claude 정식 엔드포인트(${INPUT_URL:-https://api.anthropic.com/v1/messages})에 curl POST 시도."
+          echo "   - x-api-key / anthropic-version / Content-Type 헤더 포함 호출."
+          echo "   - usage 필드는 응답 body 안에서만 추출 시도했고, 별도 /usage API는 존재하지 않습니다."
+          echo "   - 서비스별 디렉토리(.github/echo_services/*)와 권한 파일(.github/echo_perm/*/permissions.txt)을 생성하고 chmod까지 수행했습니다."
+          echo "   - DR 백업 계획(dr_backup_plan.txt)과 ISO 매니페스트(iso_manifest.txt)도 생성했습니다."
+          echo "   - echo_logs, echo_artifacts, echo_services, echo_perm 전체를 아티팩트로 업로드했습니다."
+          echo "DONE."
