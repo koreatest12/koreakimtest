@@ -1,4 +1,4 @@
-name: "🏦 Teradata FinOps Batch — EchoOps + Audit + Snapshot + Schedule (만전대비+DBA+DR)"
+name: "🏦 Teradata FinOps Batch — EchoOps + Audit + Snapshot + ISO + DR(1일보관) + DBA"
 
 on:
   push:
@@ -111,9 +111,6 @@ jobs:
 
       #######################################################################
       # 0.3 DR 데이터센터 구조도/정책 문서 생성
-      #     - DR Topology
-      #     - DR 보관주기 (1일)
-      #     - RPO/RTO 맵핑
       #######################################################################
       - name: 🏢 DR 데이터센터 구조도 & 정책 기록
         run: |
@@ -142,24 +139,24 @@ jobs:
             echo
             echo "[Replication / Snapshot Flow]"
             echo "1) Batch completes in Primary."
-            echo "2) Snapshot tar.gz is generated (FINAL_DATA/BATCH)."
+            echo "2) Snapshot tar.gz & ISO are generated."
             echo "3) Copy snapshot to DR storage bucket / ${DR_DIR_NAME}/YYYYMMDD/"
-            echo "4) DR can restore that batch's partition on demand."
+            echo "4) DR can restore that batch partition on demand."
             echo
             echo "[Ownership / Escalation]"
-            echo "- BatchSRE: owns RTO (time to restore service)."
-            echo "- Compliance: owns data approval for release."
-            echo "- DBA_TEAM: owns partition restore procedure."
+            echo "- BatchSRE: owns RTO (restore time)."
+            echo "- Compliance: data approval."
+            echo "- DBA_TEAM: partition restore procedure."
             echo
             echo "[RPO / RTO Targets]"
-            echo "- RPO_TARGET=15min (data freshness loss allowed)"
-            echo "- RTO_TARGET=30min (service restore time)"
+            echo "- RPO_TARGET=15min"
+            echo "- RTO_TARGET=30min"
             echo
             echo "[Retention Policy]"
             echo "- DR snapshot retention: ${DR_RETENTION_DAYS} day(s)"
             echo "- Rotation job auto-removes snapshots older than ${DR_RETENTION_DAYS} day(s)"
             echo
-            echo "NOTE: 이 문서는 자동으로 생성되며 감사에 포함됩니다."
+            echo "NOTE=이 문서는 자동으로 생성되며 감사에 포함됩니다."
           } > "$DR_TOPO_FILE"
 
           echo "::notice::DR 데이터센터 토폴로지 기록 완료 -> $DR_TOPO_FILE"
@@ -710,7 +707,7 @@ jobs:
             echo "TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
             echo "BATCH_ID=${BATCH_ID_VAL}"
             echo "1) Pause downstream reporting jobs."
-            echo "2) Restore FINAL_DATA partition for BATCH_ID=${BATCH_ID_VAL} from latest DR snapshot."
+            echo "2) Restore FINAL_DATA partition for BATCH_ID=${BATCH_ID_VAL} from latest DR snapshot (.tar.gz or .iso)."
             echo "3) Validate rowcount vs EXPECTED_ROWCOUNT."
             echo "4) Re-run LOAD_AND_MERGE for failed batch only."
             echo "5) Notify BatchSRE and Compliance if discrepancy > 0.5%."
@@ -785,7 +782,7 @@ jobs:
           head -n 60 "$ACL_LOG" || true
 
       #######################################################################
-      # 7. 릴리즈 스냅샷 & 무결성 해시
+      # 7. 릴리즈 스냅샷(tar.gz) & 무결성 해시
       #######################################################################
       - name: 🗜 결과물 tar.gz 스냅샷 생성
         run: |
@@ -807,6 +804,7 @@ jobs:
             tmp \
             health \
             governance \
+            history \
             || true
 
           sha256sum "$SNAP_FILE" > "${DATA_ROOT}/logs/snapshot_hash.txt" 2>/dev/null || echo "hash_failed" > "${DATA_ROOT}/logs/snapshot_hash.txt"
@@ -814,6 +812,79 @@ jobs:
           echo "::notice::스냅샷 아카이브 생성 -> $SNAP_FILE"
           ls -lh "$SNAP_FILE" || true
           head -n 5 "${DATA_ROOT}/logs/snapshot_hash.txt" || true
+
+      #######################################################################
+      # 7.2 ISO 스냅샷 이미지 생성 (실패해도 계속)
+      #######################################################################
+      - name: 🧊 ISO 스냅샷 이미지 생성
+        continue-on-error: true
+        run: |
+          set +e
+          SNAP_INFO="${DATA_ROOT}/logs/snapshot_tag.txt"
+          SNAP_TAG=$(grep '^SNAP_TAG=' "$SNAP_INFO" | cut -d= -f2)
+          SNAP_DIR="${DATA_ROOT}/release"
+          ISO_FILE="${SNAP_DIR}/${SNAP_TAG}.iso"
+
+          ISO_BUILD_LOG="${DATA_ROOT}/logs/iso_build.log"
+          echo "ISO_BUILD_TS=$(date +%Y-%m-%dT%H:%M:%S%z)" > "$ISO_BUILD_LOG"
+          echo "SNAP_TAG=$SNAP_TAG" >> "$ISO_BUILD_LOG"
+          echo "ISO_FILE=$ISO_FILE" >> "$ISO_BUILD_LOG"
+
+          # ISO 소스 준비 디렉토리
+          ISO_SRC_DIR="${DATA_ROOT}/tmp/iso_src_${SNAP_TAG}"
+          mkdir -p "$ISO_SRC_DIR"
+
+          # 감사/요약용 seed 텍스트
+          cat > "${ISO_SRC_DIR}/audit_summary_seed.txt" <<EOF
+          Snapshot Tag: $SNAP_TAG
+          Generated: $(date +%Y-%m-%dT%H:%M:%S%z)
+          Contains: logs, quality, governance, health, DR topology, classification, recovery playbook, etc.
+          RPO_TARGET=15min
+          RTO_TARGET=30min
+          DR_RETENTION_DAYS=${DR_RETENTION_DAYS}
+          EOF
+
+          # 주요 디렉토리 복사 (권한 문제 생겨도 계속)
+          cp -r "${DATA_ROOT}/logs"            "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/quality"         "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/governance"      "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/health"          "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/source_files"    "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/landing_zone"    "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/history"         "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/${DR_TOPOLOGY_DIR}" "${ISO_SRC_DIR}/dr_topology" 2>>"$ISO_BUILD_LOG" || true
+
+          # ISO 생성 툴 설치 시도 (genisoimage / xorriso 둘 다 시도)
+          echo "[TRY] installing genisoimage/xorriso" >> "$ISO_BUILD_LOG"
+          sudo apt-get update -y >> "$ISO_BUILD_LOG" 2>&1 || true
+          sudo apt-get install -y genisoimage xorriso >> "$ISO_BUILD_LOG" 2>&1 || true
+
+          # 1) genisoimage 우선 시도
+          if command -v genisoimage >/dev/null 2>&1 ; then
+            echo "[USE] genisoimage" >> "$ISO_BUILD_LOG"
+            genisoimage -quiet -J -r -o "$ISO_FILE" "$ISO_SRC_DIR" >> "$ISO_BUILD_LOG" 2>&1 || {
+              echo "[WARN] genisoimage failed" >> "$ISO_BUILD_LOG"
+            }
+          fi
+
+          # 2) xorriso fallback (만약 genisoimage 실패/미생성)
+          if [ ! -s "$ISO_FILE" ] && command -v xorriso >/dev/null 2>&1 ; then
+            echo "[USE] xorriso -as mkisofs" >> "$ISO_BUILD_LOG"
+            xorriso -as mkisofs -J -r -o "$ISO_FILE" "$ISO_SRC_DIR" >> "$ISO_BUILD_LOG" 2>&1 || {
+              echo "[WARN] xorriso mkisofs failed" >> "$ISO_BUILD_LOG"
+            }
+          fi
+
+          if [ -s "$ISO_FILE" ]; then
+            echo "::notice::ISO 스냅샷 생성 완료 -> $ISO_FILE"
+            ls -lh "$ISO_FILE" || true
+            sha256sum "$ISO_FILE" > "${DATA_ROOT}/logs/iso_hash.txt" 2>/dev/null || echo "hash_failed" > "${DATA_ROOT}/logs/iso_hash.txt"
+          else
+            echo "::warning::ISO 스냅샷 생성 실패 (환경상 ISO 툴 사용 불가일 수 있음). 파이프라인은 계속 진행합니다."
+            echo "[FAIL] ISO not created" >> "$ISO_BUILD_LOG"
+            echo "ISO_CREATION_FAILED=1" >> "$ISO_BUILD_LOG"
+          fi
+          set -e
 
       #######################################################################
       # 7.5 DR(재해복구) 백업 + DR 보관주기(1일) 로테이션
@@ -827,21 +898,37 @@ jobs:
           SNAP_TAG=$(grep '^SNAP_TAG=' "$SNAP_INFO" | cut -d= -f2)
           SNAP_FILE=$(grep '^SNAP_FILE=' "$SNAP_INFO" | cut -d= -f2)
 
+          SNAP_DIR="${DATA_ROOT}/release"
+          ISO_FILE="${SNAP_DIR}/${SNAP_TAG}.iso"
+          ISO_HASH_FILE="${DATA_ROOT}/logs/iso_hash.txt"
+
           mkdir -p "${DATA_ROOT}/${DR_DIR_NAME}"
 
-          # DR용 날짜 디렉토리 (예: dr_backup/2025-11-02/)
+          # 날짜별 DR 디렉토리 (예: dr_backup/2025-11-02/)
           DR_DATE_DIR="${DATA_ROOT}/${DR_DIR_NAME}/$(date +%Y-%m-%d)"
           mkdir -p "$DR_DATE_DIR"
 
-          DR_COPY_PATH="${DR_DATE_DIR}/${SNAP_TAG}.tar.gz"
+          DR_COPY_TAR="${DR_DATE_DIR}/${SNAP_TAG}.tar.gz"
+          DR_COPY_ISO="${DR_DATE_DIR}/${SNAP_TAG}.iso"
           DR_META_PATH="${DR_DATE_DIR}/${SNAP_TAG}.meta.txt"
-          cp -f "$SNAP_FILE" "$DR_COPY_PATH" 2>/dev/null || true
+
+          # tar.gz 복사
+          cp -f "$SNAP_FILE" "$DR_COPY_TAR" 2>/dev/null || true
+          # iso 있으면 복사
+          if [ -s "$ISO_FILE" ]; then
+            cp -f "$ISO_FILE" "$DR_COPY_ISO" 2>/dev/null || true
+          fi
 
           {
             echo "TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
             echo "SNAP_TAG=$SNAP_TAG"
             echo "SNAP_FILE_LOCAL=$SNAP_FILE"
-            echo "DR_STORED_FILE=$DR_COPY_PATH"
+            echo "DR_STORED_TAR=$DR_COPY_TAR"
+            if [ -s "$ISO_FILE" ]; then
+              echo "DR_STORED_ISO=$DR_COPY_ISO"
+            else
+              echo "DR_STORED_ISO=(none)"
+            fi
             echo "DR_RETENTION_DAYS=${DR_RETENTION_DAYS}"
             if [ -n "$DUMMY_KEY" ]; then
               echo "DR_KEY_PRESENT=yes"
@@ -850,11 +937,14 @@ jobs:
               echo "DR_KEY_PRESENT=no"
               echo "EXTERNAL_UPLOAD_STATUS=FAILED(no credentials)"
             fi
-            echo "NOTE=로컬 DR 영역에 일단 저장됨. DR 보존주기 만료된 스냅샷은 아래 단계에서 삭제."
+            echo "NOTE=로컬 DR 영역에 tar.gz/iso 저장. ${DR_RETENTION_DAYS}일 초과분은 아래에서 삭제."
+            if [ -f "$ISO_HASH_FILE" ]; then
+              echo "--- ISO HASH ---"
+              cat "$ISO_HASH_FILE"
+            fi
           } > "$DR_META_PATH"
 
-          # 1일 초과된 DR 스냅샷 정리
-          # -mtime +1 은 "1일보다 오래된" 의미. DR_RETENTION_DAYS=1 정책 반영.
+          # 1일 초과된 DR 스냅샷 정리 (tar.gz / iso 포함)
           ROTATE_LOG="${DATA_ROOT}/logs/dr_rotation.log"
           {
             echo "=== DR ROTATION START ==="
@@ -872,7 +962,8 @@ jobs:
             echo "TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
             echo "SNAP_TAG=$SNAP_TAG"
             echo "SNAP_FILE=$SNAP_FILE"
-            echo "DR_LOCAL_COPY=$DR_COPY_PATH"
+            echo "DR_LOCAL_TAR=$DR_COPY_TAR"
+            echo "DR_LOCAL_ISO=$DR_COPY_ISO"
             echo "DR_RETENTION_DAYS=${DR_RETENTION_DAYS}"
             echo "RPO_TARGET=15min"
             echo "RTO_TARGET=30min"
@@ -901,12 +992,23 @@ jobs:
             SNAP_FILE=$(grep '^SNAP_FILE=' "$SNAP_INFO" | cut -d= -f2)
           fi
 
+          SNAP_DIR="${DATA_ROOT}/release"
+          ISO_FILE="${SNAP_DIR}/${SNAP_TAG}.iso"
+
           if [ -n "${SNAP_TAG:-}" ] && [ -f "${SNAP_FILE:-}" ]; then
-            echo "::notice::릴리즈 태그 $SNAP_TAG, 파일 $SNAP_FILE 업로드 시도 중"
-            gh release create "$SNAP_TAG" "$SNAP_FILE" \
-              --title "$SNAP_TAG" \
-              --notes "자동 Teradata 배치 스냅샷 (가상 대량데이터, 업그레이드 로그, 테이블/권한 정의, 품질검증, 감사로그, DBA 성능/락/용량/DR, DR Topology, DR 1일 보관 정책 포함)" \
-              || echo "::warning::gh release create 실패 (권한 부족 또는 태그 중복 가능)"
+            echo "::notice::릴리즈 태그 $SNAP_TAG, 파일 $SNAP_FILE (tar.gz) 업로드 시도 중"
+            # ISO가 있으면 같이 시도
+            if [ -s "$ISO_FILE" ]; then
+              gh release create "$SNAP_TAG" "$SNAP_FILE" "$ISO_FILE" \
+                --title "$SNAP_TAG" \
+                --notes "자동 Teradata 배치 스냅샷 (tar.gz + iso). 포함내용: 대량데이터, DBA로그, DR 토폴로지, RPO/RTO, 마스킹/권한 감사, 시스템 업그레이드 로그 등." \
+                || echo "::warning::gh release create 실패 (권한 부족 또는 태그 중복 가능)"
+            else
+              gh release create "$SNAP_TAG" "$SNAP_FILE" \
+                --title "$SNAP_TAG" \
+                --notes "자동 Teradata 배치 스냅샷 (tar.gz). 포함내용: 대량데이터, DBA로그, DR 토폴로지, RPO/RTO, 마스킹/권한 감사, 시스템 업그레이드 로그 등." \
+                || echo "::warning::gh release create 실패 (권한 부족 또는 태그 중복 가능)"
+            fi
           else
             echo "::warning::스냅샷 정보가 없어 릴리즈 생략"
           fi
@@ -947,11 +1049,15 @@ jobs:
             SNAP_FILE=$(grep '^SNAP_FILE=' "$SNAP_INFO" | cut -d= -f2)
           fi
 
+          SNAP_DIR="${DATA_ROOT}/release"
+          ISO_FILE="${SNAP_DIR}/${SNAP_TAG}.iso"
+
           STATUS_FILE="${DATA_ROOT}/logs/pipeline_status.log"
           QUALITY_LOG="${DATA_ROOT}/quality/quality_check.log"
           UPG_LOG="${DATA_ROOT}/logs/system_upgrade.log"
           ACL_LOG="${DATA_ROOT}/logs/acl_audit.sql"
           HASH_LOG="${DATA_ROOT}/logs/snapshot_hash.txt"
+          ISO_HASH_FILE="${DATA_ROOT}/logs/iso_hash.txt"
 
           PARTITION_LOG="${DATA_ROOT}/logs/partition_access.log"
           LOCK_LOG="${DATA_ROOT}/logs/lock_contention.log"
@@ -976,7 +1082,8 @@ jobs:
             echo "<p><b>Batch Target Table:</b> ${TARGET_TABLE}</p>"
             echo "<p><b>Tables Used:</b> ${TBL_STAGE}, ${TBL_FINAL}, ${TBL_AUDIT}</p>"
             echo "<p><b>Snapshot Tag:</b> $SNAP_TAG</p>"
-            echo "<p><b>Snapshot File:</b> $SNAP_FILE</p>"
+            echo "<p><b>Snapshot File (tar.gz):</b> $SNAP_FILE</p>"
+            echo "<p><b>Snapshot ISO:</b> $ISO_FILE</p>"
             echo "<p><b>DR Retention Policy:</b> ${DR_RETENTION_DAYS} day(s) in ${DR_DIR_NAME}/ (auto-rotation)</p>"
 
             echo "<hr /><h2>Pipeline Status</h2><pre>"
@@ -1020,8 +1127,11 @@ jobs:
             echo "--- DR Rotation (older than ${DR_RETENTION_DAYS} day purge) ---"
             head -n 80 "$ROTATE_LOG" 2>/dev/null || echo "(no dr_rotation.log)"
             echo
-            echo "--- Snapshot Integrity Hash ---"
+            echo "--- Snapshot Integrity Hash (tar.gz) ---"
             cat "$HASH_LOG" 2>/dev/null || echo "(no snapshot_hash.txt)"
+            echo
+            echo "--- Snapshot ISO Hash ---"
+            cat "$ISO_HASH_FILE" 2>/dev/null || echo "(no iso_hash.txt)"
             echo "</pre>"
 
             echo "<p>-- End of Report --</p>"
@@ -1066,6 +1176,7 @@ jobs:
           DR_LOG="${DATA_ROOT}/logs/dr_backup_attempt.log"
           GOV_LOG="${DATA_ROOT}/governance/governance_approval.log"
           HASH_LOG="${DATA_ROOT}/logs/snapshot_hash.txt"
+          ISO_HASH_FILE="${DATA_ROOT}/logs/iso_hash.txt"
 
           PARTITION_LOG="${DATA_ROOT}/logs/partition_access.log"
           LOCK_LOG="${DATA_ROOT}/logs/lock_contention.log"
@@ -1085,6 +1196,9 @@ jobs:
             SNAP_FILE=$(grep '^SNAP_FILE=' "$SNAP_INFO" | cut -d= -f2)
           fi
 
+          SNAP_DIR="${DATA_ROOT}/release"
+          ISO_FILE="${SNAP_DIR}/${SNAP_TAG}.iso"
+
           {
             echo "=== PIPELINE AUDIT SUMMARY ==="
             echo "TIMESTAMP=$(date +%Y-%m-%dT%H:%M:%S%z)"
@@ -1097,6 +1211,11 @@ jobs:
             echo "TABLES_USED=${TBL_STAGE},${TBL_FINAL},${TBL_AUDIT}"
             echo "GEN_ROWS=${GEN_ROWS}"
             echo "DR_RETENTION_DAYS=${DR_RETENTION_DAYS}"
+            echo
+            echo "--- SNAPSHOT ARTIFACTS ---"
+            echo "SNAP_TAG=$SNAP_TAG"
+            echo "SNAP_TAR=$SNAP_FILE"
+            echo "SNAP_ISO=$ISO_FILE"
             echo
             echo "--- STATUS_FILE ---"
             cat "$STATUS_FILE" 2>/dev/null || echo "(no pipeline_status.log)"
@@ -1146,12 +1265,11 @@ jobs:
             echo ">>> dr_topology.txt"
             head -n 60 "$DR_TOPO_FILE" 2>/dev/null || echo "(no dr_topology.txt)"
             echo
-            echo "--- SNAPSHOT INFO ---"
-            echo "SNAP_TAG=$SNAP_TAG"
-            echo "SNAP_FILE=$SNAP_FILE"
-            echo "DATA_ROOT=$DATA_ROOT"
-            echo "--- SNAPSHOT HASH ---"
+            echo "--- SNAPSHOT HASH (tar.gz) ---"
             cat "$HASH_LOG" 2>/dev/null || echo "(no snapshot_hash.txt)"
+            echo
+            echo "--- SNAPSHOT ISO HASH ---"
+            cat "$ISO_HASH_FILE" 2>/dev/null || echo "(no iso_hash.txt)"
           } > "$AUDIT_FILE"
 
           echo "::notice::감사 요약 로그 생성 완료 -> $AUDIT_FILE"
@@ -1187,14 +1305,14 @@ jobs:
         if: always()
         run: |
           echo "✅ Teradata FinOps Batch 파이프라인 전체 단계 수행 완료."
-          echo "   - 시스템 업그레이드 & pkg diff 기록"
           echo "   - 대량 가상데이터 생성 및 품질검증(증감률/고위험비율)"
-          echo "   - 파티션/보존 정책 로그, 마스킹/권한/거버넌스/온콜/승인 기록"
-          echo "   - DBA 관점: 파티션 프루닝, 락 경합, 실행 계획, 튜닝 권장, 통계 수집, 용량 추적"
-          echo "   - DR 데이터센터 토폴로지 문서화"
-          echo "   - DR 백업 스냅샷 저장 및 1일 보관주기 자동 로테이션"
-          echo "   - RPO/RTO, 복구 플레이북, DR 보관주기(1일) 감사 기록"
-          echo "   - 스냅샷 tar.gz + 무결성 해시 + (옵션) DR 외부 업로드 + GitHub Release 시도"
-          echo "   - HTML 경영 요약 리포트 & audit_run_summary.log 생성"
+          echo "   - 시스템 업그레이드 & pkg diff 기록"
+          echo "   - DBA 관점(파티션 프루닝, 락 경합, 쿼리 플랜, 튜닝, 통계수집, 용량 성장)"
+          echo "   - 민감데이터 마스킹/권한 감사/거버넌스/온콜/RPO·RTO 문서화"
+          echo "   - tar.gz 스냅샷 + ISO 스냅샷 생성 (hash 포함)"
+          echo "   - DR 데이터센터 토폴로지 기록"
+          echo "   - DR 보관 디렉토리로 tar.gz/iso 복사"
+          echo "   - DR 보관주기 ${DR_RETENTION_DAYS}일 초과된 스냅샷 자동 삭제(로테이션)"
+          echo "   - GitHub Release 업로드(옵션) 및 HTML 요약 리포트, audit_run_summary.log 생성"
           echo "모든 산출물이 artifact teradata-run-${GITHUB_RUN_ID} 로 업로드되었습니다."
           exit 0
