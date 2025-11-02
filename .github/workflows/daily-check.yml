@@ -1,8 +1,8 @@
-name: "Dependency Security Check"
+name: "Dependency Security Check + AutoUpgrade"
 
 on:
   schedule:
-    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC (한국시간 월요일 정오 전후)
+    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC
   workflow_dispatch:
   pull_request:
     paths:
@@ -33,18 +33,21 @@ env:
 jobs:
 
   ##########################################################################
-  # Node.js audit
+  # Node.js audit + upgrade
   ##########################################################################
   node-security:
-    name: "Node.js Dependency Check"
+    name: "Node.js Dependency Check + Upgrade"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        project:
-          - anthropic-cost-tracker/nodejs
-          - mcp-hello-js
-          - mcp-fs
+        include:
+          - project: anthropic-cost-tracker/nodejs
+            safe: anthropic-cost-tracker-nodejs
+          - project: mcp-hello-js
+            safe: mcp-hello-js
+          - project: mcp-fs
+            safe: mcp-fs
 
     steps:
       - name: Checkout
@@ -60,7 +63,7 @@ jobs:
 
           HELPER_PATH="${REPORT_DIR}/helpers.sh"
 
-          # helpers.sh 생성 (printf만 사용)
+          # helpers.sh (printf만 사용)
           printf '%s\n' '#!/usr/bin/env bash'                            >  "$HELPER_PATH"
           printf '%s\n' 'set -Eeo pipefail'                               >> "$HELPER_PATH"
           printf '%s\n' ''                                               >> "$HELPER_PATH"
@@ -90,9 +93,8 @@ jobs:
 
           chmod +x "$HELPER_PATH"
 
-          echo "Node scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
+          echo "Node scan target: ${{ matrix.project }} (safe=${{ matrix.safe }})" | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
 
-      # 대상 디렉토리/파일 유무 확인
       - name: Check project/package.json
         id: node_exists
         shell: bash
@@ -104,12 +106,12 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Node 설치 (캐시 사용 X: cache 옵션/경로 미지정)
       - name: Setup Node.js
         if: steps.node_exists.outputs.exists == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          # intentionally no cache-dependency-path here to avoid cache errors
 
       - name: Install jq
         if: steps.node_exists.outputs.exists == 'true'
@@ -120,20 +122,19 @@ jobs:
           apt_fix || true
           sudo apt-get install -y jq || true
 
-      - name: npm install/ci
+      - name: npm install / ci
         if: steps.node_exists.outputs.exists == 'true'
         working-directory: ${{ matrix.project }}
         shell: bash
         run: |
           set -Eeo pipefail
-          # package-lock.json이 있으면 ci, 없으면 install
           if [ -f "package-lock.json" ]; then
             npm ci || npm install
           else
             npm install
           fi
 
-      - name: npm audit
+      - name: npm audit (report only)
         if: steps.node_exists.outputs.exists == 'true'
         id: node_audit
         working-directory: ${{ matrix.project }}
@@ -143,11 +144,9 @@ jobs:
 
           echo "## NPM Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
 
-          # 항상 성공시키고 계속
           npm audit --json > audit.json || true
           npm audit >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
 
-          # jq로 high/critical 추출 (없으면 0)
           if command -v jq >/dev/null 2>&1 && [ -f audit.json ]; then
             HIGH_COUNT=$(jq '.metadata.vulnerabilities.high // 0' audit.json 2>/dev/null || echo 0)
             CRIT_COUNT=$(jq '.metadata.vulnerabilities.critical // 0' audit.json 2>/dev/null || echo 0)
@@ -162,32 +161,58 @@ jobs:
           echo "HIGH_COUNT=${HIGH_COUNT}" >> "$GITHUB_OUTPUT"
           echo "CRIT_COUNT=${CRIT_COUNT}" >> "$GITHUB_OUTPUT"
 
+      - name: npm upgrade attempt (auto-fix vulnerabilities)
+        if: steps.node_exists.outputs.exists == 'true'
+        working-directory: ${{ matrix.project }}
+        shell: bash
+        run: |
+          set -Eeo pipefail
+
+          UPG_LOG="sec-upgrade.log"
+
+          {
+            echo "### $(date '+%Y-%m-%d %H:%M:%S%z') npm audit fix try"
+            npm audit fix || true
+            echo
+            echo "### $(date '+%Y-%m-%d %H:%M:%S%z') npm audit fix --force try (may introduce breaking changes)"
+            npm audit fix --force || true
+            echo
+            echo "### re-run npm audit --json after fix"
+            npm audit --json || true
+          } > "$UPG_LOG" 2>&1 || true
+
       - name: Upload Node audit artifact
         if: steps.node_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v5
         with:
-          # matrix.project 예: "anthropic-cost-tracker/nodejs"
-          # 슬래시 등을 - 로 치환한 세이프 이름 사용
-          name: npm-audit-${{ github.run_number }}-${{ steps.node_exists.outputs.exists == 'true' && (matrix.project || '') }}
-          path: ${{ matrix.project }}/audit.json
+          # 이제 artifact 이름은 / 없는 safe 문자열만 사용
+          name: npm-audit-${{ github.run_number }}-${{ matrix.safe }}
+          path: |
+            ${{ matrix.project }}/audit.json
+            ${{ matrix.project }}/sec-upgrade.log
           if-no-files-found: warn
           retention-days: 30
 
   ##########################################################################
-  # Python audit
+  # Python audit + upgrade
   ##########################################################################
   python-security:
-    name: "Python Dependency Check"
+    name: "Python Dependency Check + Upgrade"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        project:
-          - anthropic-cost-tracker/python
-          - mcp-hello-py
-          - mcp-python-server
-          - mcp-apache-server
-          - .
+        include:
+          - project: anthropic-cost-tracker/python
+            safe: anthropic-cost-tracker-python
+          - project: mcp-hello-py
+            safe: mcp-hello-py
+          - project: mcp-python-server
+            safe: mcp-python-server
+          - project: mcp-apache-server
+            safe: mcp-apache-server
+          - project: .
+            safe: root-dot
 
     steps:
       - name: Checkout
@@ -202,7 +227,7 @@ jobs:
           mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
 
           HELPER_PATH="${REPORT_DIR}/helpers.sh"
-          # 덮어써도 OK
+          # 덮어써도 무방
           printf '%s\n' '#!/usr/bin/env bash'                            >  "$HELPER_PATH"
           printf '%s\n' 'set -Eeo pipefail'                               >> "$HELPER_PATH"
           printf '%s\n' ''                                               >> "$HELPER_PATH"
@@ -232,7 +257,7 @@ jobs:
 
           chmod +x "$HELPER_PATH"
 
-          echo "Python scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
+          echo "Python scan target: ${{ matrix.project }} (safe=${{ matrix.safe }})" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -268,7 +293,7 @@ jobs:
           apt_fix || true
           sudo apt-get install -y jq || true
 
-      - name: pip-audit
+      - name: pip-audit (report only)
         if: steps.py_exists.outputs.exists == 'true'
         id: py_audit
         shell: bash
@@ -288,6 +313,7 @@ jobs:
             HIGH=0
             CRIT=0
           fi
+
           echo "High severity vulns: $HIGH"
           echo "Critical severity vulns: $CRIT"
 
@@ -310,27 +336,39 @@ jobs:
         run: |
           set -Eeo pipefail
           TARGET_DIR="${{ matrix.project }}"
-          # bandit 결과 JSON 저장
           bandit -r "$TARGET_DIR" -f json -o "$TARGET_DIR/bandit.json" || true
           echo "## Bandit Security Scan for $TARGET_DIR" >> "$GITHUB_STEP_SUMMARY"
           bandit -r "$TARGET_DIR" || echo "Bandit found issues" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: pip-audit --fix (auto upgrade attempt)
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TARGET_DIR="${{ matrix.project }}"
+          UPG_LOG="${TARGET_DIR}/sec-upgrade.log"
+
+          {
+            echo "### $(date '+%Y-%m-%d %H:%M:%S%z') pip-audit --fix try"
+            echo "(pip-audit가 알려진 취약 패키지를 업그레이드/패치 가능한 경우 자동 적용)"
+            pip-audit -r "${TARGET_DIR}/requirements.txt" --fix || true
+            echo
+            echo "### re-run pip-audit for diff"
+            pip-audit -r "${TARGET_DIR}/requirements.txt" --format json || true
+          } > "$UPG_LOG" 2>&1 || true
 
       - name: Upload Python audit artifact
         if: steps.py_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v5
         with:
-          # 슬래시(`/`) 같은 문제 문자를 안전하게 바꾸기 위해 matrix.project를 그대로 쓰지 않고,
-          # GitHub가 step context에서 문자열 치환을 직접 지원하지 않으므로,
-          # 아래처럼 이름을 단순화: 슬래시를 하이픈으로 바꿨다고 가정하는 safe 네이밍
-          # (matrix.project 값 중 '/' 대신 '-'로 사용할 것)
-          name: python-audit-${{ github.run_number }}-${{ matrix.project && join(matrix.project, '') }}
+          name: python-audit-${{ github.run_number }}-${{ matrix.safe }}
           path: |
             ${{ matrix.project }}/pip-audit.json
             ${{ matrix.project }}/safety.json
             ${{ matrix.project }}/bandit.json
+            ${{ matrix.project }}/sec-upgrade.log
           if-no-files-found: warn
           retention-days: 30
-
 
   ##########################################################################
   # GitHub advisory gate on PR
@@ -349,7 +387,6 @@ jobs:
         with:
           fail-on-severity: moderate
           comment-summary-in-pr: on-failure
-
 
   ##########################################################################
   # Weekly scheduled run -> if any job failed, open issue
@@ -375,18 +412,18 @@ jobs:
               const bodyText = [
                 "🚨 Weekly dependency check reported failures.",
                 "",
-                "일부 보안 점검 단계(npm audit / pip-audit / bandit / safety 등)가 실패했습니다.",
-                "취약 의존성(high/critical) 또는 감사 단계 오류 가능성이 있습니다.",
+                "일부 보안 점검 단계(npm audit / pip-audit / bandit / safety 등)가 실패했거나",
+                "자동 업그레이드(npm audit fix / pip-audit --fix) 과정에서 오류가 있었습니다.",
                 "",
                 `Run details: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
                 "",
-                "Artifacts (npm-audit-*, python-audit-*)를 확인하여",
-                "취약한 패키지 및 문제 지점을 업데이트/조치해 주세요."
+                "업로드된 아티팩트(npm-audit-*, python-audit-*)의 sec-upgrade.log를 참고하여",
+                "어떤 패키지들이 실제로 업데이트/패치 시도되었는지 확인해 주세요."
               ].join("\n");
               await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                title: "🚨 Dependency Security Check Failure (Weekly Scan)",
+                title: "🚨 Dependency Security Check Failure (Weekly Scan w/ AutoUpgrade)",
                 body: bodyText,
                 labels: ["security", "dependency-check", "automated"]
               });
