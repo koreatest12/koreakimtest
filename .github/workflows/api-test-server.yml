@@ -1,4 +1,4 @@
-name: "🛰 API Curl Test Server — EchoOps / Safe-Continue / Service Perms / DR+ISO / Stable"
+name: "🛰 API Curl Test Server — EchoOps DR+ISO Audit Pipeline"
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: false
         default: "https://api.anthropic.com/v1/messages"
       run_mode:              # 2
-        description: "full=전체 수행 / lite=생성 위주 (curl도 시도하지만 실패 무시)"
+        description: "full=전체 수행 / lite=DR/파일만 생성 (외부 curl 호출 스킵)"
         required: false
         default: "full"
 
@@ -23,13 +23,12 @@ env:
   ARTIFACT_DIR: .github/echo_artifacts
   SERVICE_DIR: .github/echo_services
   PERM_DIR: .github/echo_perm
-
-  # 관리 대상 서비스 목록
   SERVICES: "claude_api dr_center iso_builder"
+  RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   curl-test-server:
-    name: "Curl Test Server Runner (Echo / Always Success / No Nested Bash)"
+    name: "Curl Test Server Runner (Echo / DR / Audit / Safe-Continue)"
     runs-on: ubuntu-22.04
 
     steps:
@@ -44,13 +43,19 @@ jobs:
       #    - echo_logs / echo_artifacts / echo_services / echo_perm / echo_tmp
       ##################################################################
       - name: "[prep] Create base dirs"
+        env:
+          LOG_DIR: ${{ env.LOG_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          PERM_DIR: ${{ env.PERM_DIR }}
         run: |
           echo ">>> [prep] start"
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${SERVICE_DIR}" "${PERM_DIR}" .github/echo_tmp || true
-          echo "[INFO] base dirs ready" | tee -a "${LOG_DIR}/prep.init.log"
+          echo "[INFO] base dirs ready (RUN_ID=${RUN_ID})" | tee -a "${LOG_DIR}/prep.init.log"
 
       ##################################################################
       # 2. 서비스별 디렉토리 / 권한 파일 / 상태 로그 생성
+      #    - RUN_ID 포함
       #    - Heredoc 금지. printf/echo만 사용.
       ##################################################################
       - name: "[svc] Init service dirs + perms + status"
@@ -59,6 +64,7 @@ jobs:
           SERVICE_DIR: ${{ env.SERVICE_DIR }}
           PERM_DIR: ${{ env.PERM_DIR }}
           LOG_DIR: ${{ env.LOG_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
         run: |
           echo ">>> [svc] start"
           for svc in $SERVICES; do
@@ -70,9 +76,10 @@ jobs:
 
             # README.md
             printf '%s\n' "# Service: ${svc}" > "${svc_dir}/README.md"
+            printf '%s\n' "RUN_ID=${RUN_ID}" >> "${svc_dir}/README.md"
 
             # status.log
-            printf '%s\n' "[INIT] $(date '+%Y-%m-%d %H:%M:%S%z') service=${svc} created" > "${svc_dir}/status.log"
+            printf '%s\n' "[INIT] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID} service=${svc} created" > "${svc_dir}/status.log"
 
             # permissions.txt
             {
@@ -81,6 +88,7 @@ jobs:
               printf '%s\n' "owner=runner"
               printf '%s\n' "access=rw"
               printf '%s\n' "note=자동 생성된 권한/접근 제어 템플릿"
+              printf '%s\n' "run_id=${RUN_ID}"
             } > "${svc_perm}/permissions.txt"
 
             # 권한 (에러 무시)
@@ -88,20 +96,21 @@ jobs:
             chmod 640 "${svc_dir}/status.log" || true
             chmod 644 "${svc_dir}/README.md" || true
 
-            echo "[svc:$svc] files created + chmod applied" | tee -a "${LOG_DIR}/svc.init.log"
+            echo "[svc:$svc] files created + chmod applied (RUN_ID=${RUN_ID})" | tee -a "${LOG_DIR}/svc.init.log"
           done
           echo ">>> [svc] done" | tee -a "${LOG_DIR}/svc.init.log"
 
       ##################################################################
       # 3. DR 센터 / ISO 빌더 템플릿 생성
-      #    - dr_backup_plan.txt
-      #    - iso_manifest.txt
-      #    - 서비스 status.log에 append
+      #    - dr_backup_plan.txt + iso_manifest.txt
+      #    - status.log 에 append
+      #    - 무결성 기록(wc/sha256sum)
       ##################################################################
-      - name: "[svc] DR / ISO templates"
+      - name: "[svc] DR / ISO templates (with integrity hash)"
         env:
           SERVICE_DIR: ${{ env.SERVICE_DIR }}
           LOG_DIR: ${{ env.LOG_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
         run: |
           echo ">>> [dr+iso] start"
 
@@ -111,6 +120,7 @@ jobs:
           # DR 백업 플랜
           {
             printf '%s\n' "[DR_BACKUP_PLAN]"
+            printf '%s\n' "run_id=${RUN_ID}"
             printf '%s\n' "retention_days=1"
             printf '%s\n' "description=하루 단위 DR 데이터센터 보관 정책"
             printf '%s\n' "snapshot_policy=nightly+on-demand"
@@ -119,6 +129,7 @@ jobs:
           # ISO 매니페스트
           {
             printf '%s\n' "[ISO_MANIFEST]"
+            printf '%s\n' "run_id=${RUN_ID}"
             printf '%s\n' "image_name=finops-snapshot.iso"
             printf '%s\n' "includes=logs,configs,sql,artifacts"
             printf '%s\n' "note=이 파일은 ISO 이미지에 포함할 자원을 정의하는 템플릿입니다."
@@ -127,19 +138,28 @@ jobs:
           chmod 640 "${dr_dir}/dr_backup_plan.txt" || true
           chmod 640 "${iso_dir}/iso_manifest.txt" || true
 
-          # status.log append
-          printf '\n%s\n' "[DR_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') backup plan prepared" >> "${dr_dir}/status.log"  || true
-          printf '\n%s\n' "[ISO_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') iso manifest prepared"  >> "${iso_dir}/status.log" || true
+          # status.log append (DR/ISO 초기화 기록)
+          printf '\n%s\n' "[DR_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID} backup plan prepared" >> "${dr_dir}/status.log"  || true
+          printf '\n%s\n' "[ISO_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID} iso manifest prepared"  >> "${iso_dir}/status.log" || true
+
+          # 무결성 기록: 파일 크기와 sha256
+          echo "--- integrity check ---" | tee -a "${LOG_DIR}/dr_iso.init.log"
+          wc -c "${dr_dir}/dr_backup_plan.txt" "${iso_dir}/iso_manifest.txt" | tee -a "${LOG_DIR}/dr_iso.init.log" || true
+          sha256sum "${dr_dir}/dr_backup_plan.txt" "${iso_dir}/iso_manifest.txt" | tee -a "${LOG_DIR}/dr_iso.init.log" || true
 
           echo ">>> [dr+iso] done" | tee -a "${LOG_DIR}/dr_iso.init.log"
 
       ##################################################################
-      # 4. 환경 스냅샷
-      #    - df -h, uname, env 등 기록
+      # 4. 환경/권한 스냅샷
+      #    - df -h, uname, env | sort
+      #    - 디렉토리 퍼미션 / GitHub 컨텍스트(actor, repo, ref, sha 등)
       ##################################################################
-      - name: "[snap] Environment snapshot"
+      - name: "[snap] Environment & permissions snapshot"
         env:
-          LOG_DIR: ${{ env.LOG_DIR }}
+            LOG_DIR: ${{ env.LOG_DIR }}
+            SERVICE_DIR: ${{ env.SERVICE_DIR }}
+            ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+            PERM_DIR: ${{ env.PERM_DIR }}
         run: |
           echo ">>> [snap] start"
           {
@@ -150,46 +170,80 @@ jobs:
             df -h
             echo "--- env | sort ---"
             env | sort
+            echo "--- permissions check (top dirs) ---"
+            ls -ld "${LOG_DIR}" "${ARTIFACT_DIR}" "${SERVICE_DIR}" "${PERM_DIR}"
+            echo "--- service tree depth 2 (mode/owner/group) ---"
+            find "${SERVICE_DIR}" -maxdepth 2 -type f -printf "%M %u %g %p\n" 2>/dev/null
+            echo "--- GitHub Context ---"
+            echo "actor=${{ github.actor }}"
+            echo "repo=${{ github.repository }}"
+            echo "ref=${{ github.ref }}"
+            echo "sha=${{ github.sha }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "run_attempt=${{ github.run_attempt }}"
           } | tee "${LOG_DIR}/env_snapshot.log"
           echo ">>> [snap] done" | tee -a "${LOG_DIR}/env_snapshot.log"
 
       ##################################################################
-      # 5. CURL 호출
+      # 5. 외부 API 호출 (Anthropic Claude messages)
       #
-      #  - Heredoc 없이 request_body.json 생성 (printf 사용)
-      #  - curl로 Anthropic Claude messages API POST 시도
-      #  - 결과 (status, headers, body, usage 추출)를 파일로 저장
-      #  - claude_api/status.log 에 호출 결과 append
+      #  - run_mode=lite 이면 curl 스킵 (비용/네트워크 없는 러너 대비)
+      #  - request_body.json 은 printf로 생성
+      #  - curl은 continue-on-error=true 라서 실패해도 파이프라인 계속
+      #  - status_code / headers / body / usage 추출 / result_summary 기록
+      #  - claude_api/status.log 에도 남김
       #
-      #  중요:
-      #    - 네트워크 실패, 인증 실패(401), 레이트리밋(429) 등으로
-      #      이 step 자체가 실패(exit code!=0)할 수 있다.
-      #    - 그래서 continue-on-error: true 를 켠다.
-      #
-      #  => 전체 잡은 계속 진행하고, 마지막 step은 ✅ SUCCESS 출력.
       ##################################################################
-      - name: "[api] Curl call Anthropic Claude messages API (Echo Safe)"
+      - name: "[api] Curl call Anthropic Claude messages API (Echo Safe / run_mode aware)"
         continue-on-error: true
         env:
           INPUT_URL: ${{ github.event.inputs.target_url }}
+          RUN_MODE: ${{ github.event.inputs.run_mode }}
           SECR_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           LOG_DIR: ${{ env.LOG_DIR }}
           SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
         run: |
-          echo ">>> [api] start"
+          echo ">>> [api] start (run_mode=${RUN_MODE}, RUN_ID=${RUN_ID})"
 
+          # run_mode=lite 이면 실제 외부 호출을 스킵한다.
+          if [ "${RUN_MODE}" = "lite" ]; then
+            echo "[api] run_mode=lite -> skipping external curl call" | tee -a "${LOG_DIR}/curl_init.log"
+
+            RESP_DIR="${LOG_DIR}/curl_response"
+            mkdir -p "${RESP_DIR}"
+
+            # placeholder 결과 파일들 생성 (빈 값, N/A 등)
+            printf '%s\n' "N/A" > "${RESP_DIR}/status_code.txt"
+            printf '%s\n' "[lite mode: no request performed]" > "${RESP_DIR}/headers.txt"
+            printf '%s\n' '{"lite_mode": true, "note": "no external call performed"}' > "${RESP_DIR}/body.json"
+            printf '%s\n' "[api] usage not available in lite mode" > "${RESP_DIR}/usage.log"
+
+            svc_status="${SERVICE_DIR}/claude_api/status.log"
+            {
+              printf '\n%s\n' "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID}"
+              printf '%s\n' "status_code=N/A"
+              printf '%s\n' "result_summary=SKIPPED_LITE_MODE"
+              printf '%s\n' "note=No external network call due to lite mode"
+            } >> "${svc_status}" || true
+
+            echo ">>> [api] done (lite mode, no curl)" | tee -a "${LOG_DIR}/curl_init.log"
+            exit 0
+          fi
+
+          # full 모드일 경우 실제 호출 진행
           TARGET_URL="${INPUT_URL}"
           if [ -z "$TARGET_URL" ]; then
             TARGET_URL="https://api.anthropic.com/v1/messages"
           fi
 
-          echo "[api] TARGET_URL=${TARGET_URL}"
+          echo "[api] TARGET_URL=${TARGET_URL}" | tee -a "${LOG_DIR}/curl_init.log"
 
           REQ_DIR="${LOG_DIR}/curl_request"
           RESP_DIR="${LOG_DIR}/curl_response"
           mkdir -p "$REQ_DIR" "$RESP_DIR"
 
-          # 요청 바디 JSON
+          # 요청 바디 JSON 작성
           {
             printf '%s\n' '{'
             printf '%s\n' '  "model": "claude-3-opus-20240229",'
@@ -207,14 +261,17 @@ jobs:
           header_file="${RESP_DIR}/headers.txt"
           usage_log="${RESP_DIR}/usage.log"
 
+          # 키 존재 여부(길이만 기록) → 보안 감사용
+          if [ -n "${SECR_KEY}" ]; then
+            key_len=${#SECR_KEY}
+            echo "[api] secret key present (length=${key_len})" | tee -a "${LOG_DIR}/curl_init.log"
+          else
+            echo "[api] WARNING: secret key missing" | tee -a "${LOG_DIR}/curl_init.log"
+          fi
+
           echo "[api] curl POST ${TARGET_URL}"        | tee -a "${LOG_DIR}/curl_init.log"
           echo "[api] headers: Content-Type, anthropic-version, x-api-key(masked)" | tee -a "${LOG_DIR}/curl_init.log"
 
-          # curl 실행
-          # -sS : 에러 시 stderr 표시
-          # -D header_file : 응답 헤더 저장
-          # --write-out '%{http_code}' : 상태코드만 status_file에 저장
-          # --data @file : 우리가 만든 JSON 바디 사용
           curl -sS -X POST "${TARGET_URL}" \
             -H "Content-Type: application/json" \
             -H "anthropic-version: 2023-06-01" \
@@ -240,11 +297,27 @@ jobs:
           printf '%s\n' "[api] extracting usage best-effort" | tee "${usage_log}"
           grep -E '"usage"|input_tokens|output_tokens' "${body_file}" >> "${usage_log}" 2>/dev/null || true
 
+          # status code 기반 결과 요약
+          code="$(cat "${status_file}" 2>/dev/null || echo 'N/A')"
+          summary="unknown"
+          if [ "$code" = "200" ]; then
+            summary="OK-response"
+          elif [ "$code" = "401" ]; then
+            summary="AUTH-FAIL (check x-api-key)"
+          elif [ "$code" = "429" ]; then
+            summary="RATE-LIMIT or QUOTA"
+          elif [ "$code" = "N/A" ]; then
+            summary="NO-RESPONSE (network/timeout?)"
+          fi
+
+          echo "[api] result_summary=${summary}" | tee -a "${LOG_DIR}/curl_init.log"
+
           # claude_api/status.log 에 호출 결과 append
           svc_status="${SERVICE_DIR}/claude_api/status.log"
           {
-            printf '\n%s\n' "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z')"
-            printf '%s%s\n' "status_code=" "$(cat "${status_file}" 2>/dev/null || echo 'N/A')"
+            printf '\n%s\n' "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID}"
+            printf '%s%s\n' "status_code=" "$code"
+            printf '%s\n' "result_summary=${summary}"
             printf '%s\n' "note=See curl_response/ for details"
           } >> "${svc_status}" || true
 
@@ -254,25 +327,103 @@ jobs:
           echo ">>> [api] done" | tee -a "${LOG_DIR}/curl_init.log"
 
       ##################################################################
-      # 6. 아티팩트 준비 & 업로드
-      #    - echo_services, echo_perm, echo_logs, echo_artifacts 전체 업로드
+      # 6. 아티팩트 준비 & index.md 리포트 생성
+      #
+      # - echo_services, echo_perm, echo_logs, echo_artifacts 전체 업로드 준비
+      # - index.md 생성:
+      #   - 실행 요약 (RUN_ID, run_mode 등)
+      #   - DR 정책, ISO 매니페스트 핵심 내용
+      #   - API 호출 상태 코드 / result_summary
+      #   - 복구 절차(Recovery Hints)
       ##################################################################
-      - name: "[collect] Prepare artifacts"
+      - name: "[collect] Prepare artifacts + index.md"
         env:
           SERVICE_DIR: ${{ env.SERVICE_DIR }}
           PERM_DIR: ${{ env.PERM_DIR }}
           ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
           LOG_DIR: ${{ env.LOG_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
+          RUN_MODE: ${{ github.event.inputs.run_mode }}
+          INPUT_URL: ${{ github.event.inputs.target_url }}
         run: |
           echo ">>> [collect] start"
+
           mkdir -p "${ARTIFACT_DIR}/services" "${ARTIFACT_DIR}/permissions" || true
           cp -r "${SERVICE_DIR}/."     "${ARTIFACT_DIR}/services/"     || true
           cp -r "${PERM_DIR}/."        "${ARTIFACT_DIR}/permissions/"  || true
+
+          RESP_DIR="${LOG_DIR}/curl_response"
+          status_file="${RESP_DIR}/status_code.txt"
+          usage_log="${RESP_DIR}/usage.log"
+
+          # status_code / result_summary 가져오기
+          STATUS_CODE="N/A"
+          [ -f "${status_file}" ] && STATUS_CODE="$(cat "${status_file}" 2>/dev/null || echo 'N/A')"
+
+          RESULT_SUMMARY_LINE=$(grep -E "result_summary=" "${SERVICE_DIR}/claude_api/status.log" | tail -n 1 | sed 's/.*result_summary=//')
+          if [ -z "$RESULT_SUMMARY_LINE" ]; then
+            RESULT_SUMMARY_LINE="(no-summary)"
+          fi
+
+          # TARGET_URL 최종 기록(없으면 기본)
+          TARGET_URL="${INPUT_URL}"
+          if [ -z "$TARGET_URL" ]; then
+            TARGET_URL="https://api.anthropic.com/v1/messages"
+          fi
+
+          report_file="${ARTIFACT_DIR}/index.md"
+          {
+            echo "# Execution Report"
+            echo ""
+            echo "## Run Info"
+            echo "- Run ID: ${RUN_ID}"
+            echo "- Timestamp: $(date '+%Y-%m-%d %H:%M:%S%z')"
+            echo "- Mode: ${RUN_MODE}"
+            echo "- Target URL: ${TARGET_URL}"
+            echo "- GitHub Actor: ${{ github.actor }}"
+            echo "- GitHub Repo:  ${{ github.repository }}"
+            echo "- Git Ref:      ${{ github.ref }}"
+            echo "- Git SHA:      ${{ github.sha }}"
+            echo ""
+            echo "## DR Center"
+            echo "- retention_days=1 (1일 보관 정책)"
+            echo "- snapshot_policy=nightly+on-demand"
+            echo "- Source: .github/echo_services/dr_center/dr_backup_plan.txt"
+            echo ""
+            echo "## ISO Manifest"
+            echo "- image_name=finops-snapshot.iso"
+            echo "- includes=logs,configs,sql,artifacts"
+            echo "- Source: .github/echo_services/iso_builder/iso_manifest.txt"
+            echo ""
+            echo "## API Call Result"
+            echo "- status_code: ${STATUS_CODE}"
+            echo "- result_summary: ${RESULT_SUMMARY_LINE}"
+            echo "- usage info: see curl_response/usage.log (tokens 등)"
+            echo "- NOTE: run_mode=lite 인 경우 실제 외부 호출은 스킵됨"
+            echo ""
+            echo "## Recovery Hints"
+            echo "1. Create service directories (see services/)."
+            echo "2. Reapply permissions from permissions/ (chmod 600 etc.)."
+            echo "3. Apply DR plan from dr_center/dr_backup_plan.txt."
+            echo "4. Build ISO using iso_builder/iso_manifest.txt as include list."
+            echo "5. Re-run external API connectivity using a valid key (if needed)."
+            echo ""
+            echo "## Integrity / Audit"
+            echo "- env_snapshot.log: runner 환경, 디스크 상태, GitHub 컨텍스트(actor/ref/sha)."
+            echo "- dr_iso.init.log: DR/ISO 파일 크기 및 sha256 무결성 기록."
+            echo "- curl_init.log: API 호출 헤더/상태/응답 앞부분 및 result_summary 기록."
+          } > "$report_file"
+
+          chmod 644 "$report_file" || true
+
           echo ">>> listing ${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
           ls -R "${ARTIFACT_DIR}"     | tee -a "${LOG_DIR}/artifact.bundle.log"
           echo ">>> [collect] done"   | tee -a "${LOG_DIR}/artifact.bundle.log"
 
-      - name: "[artifact] Upload logs + services + perms"
+      ##################################################################
+      # 7. 아티팩트 업로드
+      ##################################################################
+      - name: "[artifact] Upload logs + services + perms + report"
         uses: actions/upload-artifact@v4
         with:
           name: api-curl-test-server-logs-and-services
@@ -285,19 +436,21 @@ jobs:
           retention-days: 7
 
       ##################################################################
-      # 7. 마지막 리포트 (항상 성공 선언)
-      #    - curl 단계가 실패했더라도 continue-on-error: true 덕분에
-      #      잡은 여기까지 온다.
+      # 8. 마지막 리포트 (항상 성공 선언)
+      #    - curl 단계는 continue-on-error: true 이므로 실패해도 여기 도달
       ##################################################################
       - name: "[final] Overall status (ALWAYS-SUCCESS)"
         run: |
           echo "✅ [FINAL] API Curl Test Server workflow finished."
-          echo "   - 모든 단계는 echo 기반으로 로깅했습니다."
-          echo "   - Anthropic Claude 정식 엔드포인트(${{ github.event.inputs.target_url }})에 curl POST 시도(빈 값이면 https://api.anthropic.com/v1/messages)."
-          echo "   - x-api-key / anthropic-version / Content-Type 헤더까지 포함해서 호출했습니다."
-          echo "   - usage 필드는 응답 body 안에서만 추출 시도했고, 별도의 /usage API는 존재하지 않습니다."
-          echo "   - 서비스별 디렉토리(.github/echo_services/*)와 권한 파일(.github/echo_perm/*/permissions.txt)을 생성/권한부여 했습니다."
-          echo "   - DR 백업 계획(dr_backup_plan.txt)과 ISO 매니페스트(iso_manifest.txt)도 생성했습니다."
-          echo "   - echo_logs, echo_artifacts, echo_services, echo_perm 전체를 아티팩트로 업로드했습니다."
+          echo "   - 모든 단계 echo 로깅 및 RUN_ID=${RUN_ID} 로 추적 가능하게 기록했습니다."
+          echo "   - run_mode=${{ github.event.inputs.run_mode }}: lite 모드면 외부 curl 완전히 스킵합니다."
+          echo "   - Anthropic Claude 정식 엔드포인트(${{ github.event.inputs.target_url }}) 기준 호출 로직 포함."
+          echo "   - x-api-key / anthropic-version / Content-Type 헤더를 포함해 POST 호출을 수행(또는 lite면 skip)."
+          echo "   - status_code / result_summary를 claude_api/status.log와 index.md에 남겼습니다."
+          echo "   - usage(토큰 소비)는 body.json에서 grep해 usage.log로 정리했습니다."
+          echo "   - 서비스별 디렉토리(.github/echo_services/*)와 권한 파일(.github/echo_perm/*/permissions.txt)을 생성했고 chmod 적용했습니다."
+          echo "   - DR 백업 계획(dr_backup_plan.txt), ISO 매니페스트(iso_manifest.txt) 생성 후 sha256 / wc -c 무결성까지 기록했습니다."
+          echo "   - env_snapshot.log에 디스크/권한상태, GitHub actor/ref/sha까지 남겨 감사/재해복구 증적을 확보했습니다."
+          echo "   - index.md(Execution Report + Recovery Hints)를 아티팩트에 포함시켜 DR 복구 순서를 바로 볼 수 있게 했습니다."
           echo "   - 마지막 단계는 항상 성공으로 종료합니다."
           echo "DONE."
