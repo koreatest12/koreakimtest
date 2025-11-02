@@ -225,6 +225,48 @@ jobs:
             mcp-hello-js/package-lock.json
             mcp-fs/package-lock.json
 
+      - name: "Install and cache npm dependencies"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+
+          echo "=== Installing npm dependencies and creating cache ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+
+          # Root project
+          if [ -f "package.json" ]; then
+            echo "▶ Installing root npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
+            safe_run "npm.root" npm ci || safe_run "npm.root.fallback" npm install || true
+            safe_run "npm.audit.root" npm audit --json > "${REPORT_DIR}/npm_audit_root.json" || true
+          fi
+
+          # Anthropic Cost Tracker
+          if [ -f "anthropic-cost-tracker/nodejs/package.json" ]; then
+            echo "▶ Installing cost-tracker npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
+            cd anthropic-cost-tracker/nodejs
+            safe_run "npm.cost-tracker" npm ci || safe_run "npm.cost-tracker.fallback" npm install || true
+            safe_run "npm.audit.cost-tracker" npm audit --json > "${REPORT_DIR}/npm_audit_cost_tracker.json" || true
+            cd ../..
+          fi
+
+          # MCP Hello JS
+          if [ -f "mcp-hello-js/package.json" ]; then
+            echo "▶ Installing mcp-hello-js npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
+            cd mcp-hello-js
+            safe_run "npm.mcp-hello-js" npm ci || safe_run "npm.mcp-hello-js.fallback" npm install || true
+            cd ..
+          fi
+
+          # MCP FS
+          if [ -f "mcp-fs/package.json" ]; then
+            echo "▶ Installing mcp-fs npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
+            cd mcp-fs
+            safe_run "npm.mcp-fs" npm ci || safe_run "npm.mcp-fs.fallback" npm install || true
+            cd ..
+          fi
+
+          echo "✅ npm dependencies installed and cached" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+
       - name: "Python env quick check with pip cache"
         if: ${{ github.event.inputs.run_python_check != 'false' }}
         uses: actions/setup-python@v5
@@ -237,6 +279,91 @@ jobs:
             mcp-hello-py/requirements.txt
             mcp-python-server/requirements.txt
             mcp-apache-server/requirements.txt
+
+      - name: "Install and cache pip dependencies"
+        if: ${{ github.event.inputs.run_python_check != 'false' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+
+          echo "=== Installing pip dependencies and creating cache ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+
+          # Upgrade pip first
+          safe_run "pip.upgrade" python -m pip install --upgrade pip setuptools wheel || true
+
+          # Root project
+          if [ -f "requirements.txt" ]; then
+            echo "▶ Installing root pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            safe_run "pip.root" pip install -r requirements.txt || true
+            safe_run "pip.check.root" pip check > "${REPORT_DIR}/pip_check_root.txt" || true
+          fi
+
+          # Anthropic Cost Tracker Python
+          if [ -f "anthropic-cost-tracker/python/requirements.txt" ]; then
+            echo "▶ Installing cost-tracker pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            safe_run "pip.cost-tracker" pip install -r anthropic-cost-tracker/python/requirements.txt || true
+          fi
+
+          # MCP Hello Python
+          if [ -f "mcp-hello-py/requirements.txt" ]; then
+            echo "▶ Installing mcp-hello-py pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            safe_run "pip.mcp-hello-py" pip install -r mcp-hello-py/requirements.txt || true
+          fi
+
+          # MCP Python Server
+          if [ -f "mcp-python-server/requirements.txt" ]; then
+            echo "▶ Installing mcp-python-server pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            safe_run "pip.mcp-python" pip install -r mcp-python-server/requirements.txt || true
+          fi
+
+          # MCP Apache Server
+          if [ -f "mcp-apache-server/requirements.txt" ]; then
+            echo "▶ Installing mcp-apache-server pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            safe_run "pip.mcp-apache" pip install -r mcp-apache-server/requirements.txt || true
+          fi
+
+          # Install all other requirements files
+          for req in requirements-*.txt; do
+            if [ -f "$req" ]; then
+              echo "▶ Installing $req..." | tee -a "${LOG_DIR}/pip.install.log"
+              safe_run "pip.${req}" pip install -r "$req" || true
+            fi
+          done
+
+          # List installed packages
+          pip list --format=json > "${REPORT_DIR}/pip_list.json" || true
+          pip list --outdated --format=json > "${REPORT_DIR}/pip_outdated.json" || true
+
+          echo "✅ pip dependencies installed and cached" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+
+      - name: "Check for dependency updates"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+
+          echo "=== Checking for available updates ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+
+          # npm outdated check
+          if command -v npm >/dev/null 2>&1; then
+            echo "▶ Checking npm outdated packages..." | tee -a "${LOG_DIR}/npm.outdated.log"
+            npm outdated --json > "${REPORT_DIR}/npm_outdated.json" || true
+
+            # Count outdated packages
+            if [ -f "${REPORT_DIR}/npm_outdated.json" ]; then
+              OUTDATED_COUNT=$(jq -r 'length' "${REPORT_DIR}/npm_outdated.json" 2>/dev/null || echo "0")
+              echo "Found $OUTDATED_COUNT outdated npm packages" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+            fi
+          fi
+
+          # pip outdated check (already done above)
+          if [ -f "${REPORT_DIR}/pip_outdated.json" ]; then
+            PIP_OUTDATED_COUNT=$(jq -r 'length' "${REPORT_DIR}/pip_outdated.json" 2>/dev/null || echo "0")
+            echo "Found $PIP_OUTDATED_COUNT outdated pip packages" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          fi
+
+          echo "✅ Dependency update check completed" | tee -a "${REPORT_DIR}/SUMMARY.txt"
 
       - name: "Run python check script"
         if: ${{ github.event.inputs.run_python_check != 'false' }}
@@ -352,7 +479,71 @@ jobs:
           echo "auto-merge attempted" >> "${REPORT_DIR}/SUMMARY.txt"
 
       ########################################################################
-      # 4. 리포트/로그 아티팩트 업로드
+      # 4. 캐시 검증 및 통계
+      ########################################################################
+      - name: "Verify cache creation and generate statistics"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "=== Cache Verification and Statistics ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+
+          # Check npm cache
+          if command -v npm >/dev/null 2>&1; then
+            NPM_CACHE_DIR=$(npm config get cache 2>/dev/null || echo "~/.npm")
+            if [ -d "$NPM_CACHE_DIR" ]; then
+              NPM_CACHE_SIZE=$(du -sh "$NPM_CACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown")
+              echo "✅ npm cache size: $NPM_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+              echo "npm_cache_size=$NPM_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
+            fi
+
+            # Count node_modules
+            NODE_MODULES_COUNT=$(find . -type d -name "node_modules" 2>/dev/null | wc -l || echo "0")
+            echo "Found $NODE_MODULES_COUNT node_modules directories" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          fi
+
+          # Check pip cache
+          if command -v pip >/dev/null 2>&1; then
+            PIP_CACHE_DIR=$(pip cache dir 2>/dev/null || echo "~/.cache/pip")
+            if [ -d "$PIP_CACHE_DIR" ]; then
+              PIP_CACHE_SIZE=$(du -sh "$PIP_CACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown")
+              echo "✅ pip cache size: $PIP_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+              echo "pip_cache_size=$PIP_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
+            fi
+
+            # Count installed packages
+            PIP_PACKAGE_COUNT=$(pip list --format=json 2>/dev/null | jq 'length' || echo "0")
+            echo "Installed $PIP_PACKAGE_COUNT pip packages" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          fi
+
+          # Check Maven cache
+          if [ -d "$HOME/.m2/repository" ]; then
+            MAVEN_CACHE_SIZE=$(du -sh "$HOME/.m2/repository" 2>/dev/null | cut -f1 || echo "unknown")
+            echo "✅ Maven cache size: $MAVEN_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+            echo "maven_cache_size=$MAVEN_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
+          fi
+
+          # Check Docker cache
+          if [ -d "/tmp/.buildx-cache" ]; then
+            DOCKER_CACHE_SIZE=$(du -sh "/tmp/.buildx-cache" 2>/dev/null | cut -f1 || echo "unknown")
+            echo "✅ Docker buildx cache size: $DOCKER_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+            echo "docker_cache_size=$DOCKER_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
+          fi
+
+          # Actions cache statistics
+          echo "" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "GitHub Actions Cache Information:" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "- Cache keys used in this run:" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "  * npm: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "  * pip: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "  * maven: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "  * docker: ${{ runner.os }}-buildx-${{ github.sha }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+
+          echo "" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "✅ Cache verification completed" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+
+      ########################################################################
+      # 5. 리포트/로그 아티팩트 업로드
       ########################################################################
       - name: "Upload dependabot-check artifact"
         if: ${{ github.event.inputs.upload_artifact != 'false' }}
