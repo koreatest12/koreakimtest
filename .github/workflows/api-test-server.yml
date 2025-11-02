@@ -1,16 +1,16 @@
-name: "🛰 API Curl Test Server — Claude + Gemini + OpenAI / EchoOps / Safe-Continue / DR+ISO / Stable"
+name: "🛰 AI API DR/Audit — Claude+Gemini+OpenAI / EchoOps / DR+ISO / Replay / Severity"
 
 on:
   workflow_dispatch:
     inputs:
       target_url:            # 1
-        description: "우선 호출할 Anthropic API URL (빈값이면 기본 Claude messages)"
+        description: "우선 Anthropic 호출 URL (빈값이면 기본 Claude messages)"
         required: false
         default: "https://api.anthropic.com/v1/messages"
       run_mode:              # 2
-        description: "full=전체 수행 / lite=생성 위주 (curl 시도하되 실패 무시)"
+        description: "lite=완전 모의 / full-safe=실제 호출 / full=실제 호출(확장용)"
         required: false
-        default: "full"
+        default: "full-safe"
 
 permissions:
   contents: write
@@ -25,16 +25,22 @@ env:
   PERM_DIR: .github/echo_perm
 
   # 관리 대상 서비스 목록
-  # - claude_api   : Anthropic
-  # - gemini_api   : Google Gemini (제미나이)
+  # - claude_api   : Anthropic Claude
+  # - gemini_api   : Google Gemini
   # - openai_api   : OpenAI ChatGPT
-  # - dr_center    : DR 센터/백업
-  # - iso_builder  : ISO 스냅샷
+  # - dr_center    : DR/백업 정책
+  # - iso_builder  : ISO 스냅샷 정책
   SERVICES: "claude_api gemini_api openai_api dr_center iso_builder"
+
+  # 실행 추적용 RUN_ID (GitHub에서 제공하는 run_id/run_attempt를 조합)
+  RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+
+  # 안전 커밋 여부 (요약 정보만 repo에 커밋/푸시). "true"로 바꾸면 작동.
+  RUN_COMMIT_SUMMARY: "false"
 
 jobs:
   curl-test-server:
-    name: "Curl Test Server Runner (Claude + Gemini + OpenAI) — Echo / Always Success"
+    name: "AI API DR/Audit Runner (Echo / Severity / Replay / Always Success)"
     runs-on: ubuntu-22.04
 
     steps:
@@ -45,17 +51,24 @@ jobs:
         uses: actions/checkout@v4
 
       ##################################################################
-      # 1. 기본 디렉토리 준비
+      # 1. 사전 정리 (오래된 로그 삭제, 기본 디렉토리 준비)
+      #    - 7일 지난 로그 제거
       ##################################################################
-      - name: "[prep] Create base dirs"
+      - name: "[prep] Init dirs & cleanup old logs (>7d)"
+        env:
+          LOG_DIR: ${{ env.LOG_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          PERM_DIR: ${{ env.PERM_DIR }}
         run: |
           echo ">>> [prep] start"
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${SERVICE_DIR}" "${PERM_DIR}" .github/echo_tmp || true
-          echo "[INFO] base dirs ready" | tee -a "${LOG_DIR}/prep.init.log"
+          # 오래된 로그 정리 (7일 경과 파일 삭제) - 실패 무시
+          find "${LOG_DIR}" -type f -mtime +7 -exec rm -f {} \; 2>/dev/null || true
+          echo "[INFO] base dirs ready (RUN_ID=${RUN_ID})" | tee -a "${LOG_DIR}/prep.init.log"
 
       ##################################################################
-      # 2. 서비스별 디렉토리 / 권한 파일 / 상태 로그 생성
-      #    - Heredoc 금지. printf/echo만 사용.
+      # 2. 서비스별 디렉토리 / 권한 파일 / status.log 생성
       ##################################################################
       - name: "[svc] Init service dirs + perms + status"
         env:
@@ -63,6 +76,7 @@ jobs:
           SERVICE_DIR: ${{ env.SERVICE_DIR }}
           PERM_DIR: ${{ env.PERM_DIR }}
           LOG_DIR: ${{ env.LOG_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
         run: |
           echo ">>> [svc] start"
           for svc in $SERVICES; do
@@ -72,10 +86,15 @@ jobs:
             mkdir -p "$svc_dir" "$svc_perm" || true
 
             # README.md
-            printf '%s\n' "# Service: ${svc}" > "${svc_dir}/README.md"
+            {
+              printf '%s\n' "# Service: ${svc}"
+              printf '%s\n' "RUN_ID=${RUN_ID}"
+            } > "${svc_dir}/README.md"
 
             # status.log
-            printf '%s\n' "[INIT] $(date '+%Y-%m-%d %H:%M:%S%z') service=${svc} created" > "${svc_dir}/status.log"
+            {
+              printf '%s\n' "[INIT] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID} service=${svc} created"
+            } > "${svc_dir}/status.log"
 
             # permissions.txt
             {
@@ -84,24 +103,26 @@ jobs:
               printf '%s\n' "owner=runner"
               printf '%s\n' "access=rw"
               printf '%s\n' "note=자동 생성된 권한/접근 제어 템플릿"
+              printf '%s\n' "run_id=${RUN_ID}"
             } > "${svc_perm}/permissions.txt"
 
-            # 최소 권한 부여 (오류 무시는 || true)
+            # 최소 권한
             chmod 600 "${svc_perm}/permissions.txt" || true
             chmod 640 "${svc_dir}/status.log" || true
             chmod 644 "${svc_dir}/README.md" || true
 
-            echo "[svc:$svc] files created + chmod applied" | tee -a "${LOG_DIR}/svc.init.log"
+            echo "[svc:$svc] files created + chmod applied (RUN_ID=${RUN_ID})" | tee -a "${LOG_DIR}/svc.init.log"
           done
           echo ">>> [svc] done" | tee -a "${LOG_DIR}/svc.init.log"
 
       ##################################################################
-      # 3. DR 센터 / ISO 빌더 템플릿 생성
+      # 3. DR 센터 / ISO 빌더 템플릿 생성 + 무결성 체크
       ##################################################################
-      - name: "[svc] DR / ISO templates"
+      - name: "[svc] DR / ISO templates (+ integrity)"
         env:
           SERVICE_DIR: ${{ env.SERVICE_DIR }}
           LOG_DIR: ${{ env.LOG_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
         run: |
           echo ">>> [dr+iso] start"
           dr_dir="${SERVICE_DIR}/dr_center"
@@ -110,6 +131,7 @@ jobs:
           # DR 백업 플랜
           {
             printf '%s\n' "[DR_BACKUP_PLAN]"
+            printf '%s\n' "run_id=${RUN_ID}"
             printf '%s\n' "retention_days=1"
             printf '%s\n' "description=하루 단위 DR 데이터센터 보관 정책"
             printf '%s\n' "snapshot_policy=nightly+on-demand"
@@ -118,6 +140,7 @@ jobs:
           # ISO 매니페스트
           {
             printf '%s\n' "[ISO_MANIFEST]"
+            printf '%s\n' "run_id=${RUN_ID}"
             printf '%s\n' "image_name=finops-snapshot.iso"
             printf '%s\n' "includes=logs,configs,sql,artifacts"
             printf '%s\n' "note=이 파일은 ISO 이미지에 포함할 자원을 정의하는 템플릿입니다."
@@ -127,17 +150,30 @@ jobs:
           chmod 640 "${iso_dir}/iso_manifest.txt" || true
 
           # status.log append
-          printf '\n%s\n' "[DR_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') backup plan prepared" >> "${dr_dir}/status.log"  || true
-          printf '\n%s\n' "[ISO_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') iso manifest prepared"  >> "${iso_dir}/status.log" || true
+          {
+            printf '\n%s\n' "[DR_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID} backup plan prepared"
+          } >> "${dr_dir}/status.log"  || true
+          {
+            printf '\n%s\n' "[ISO_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID} iso manifest prepared"
+          } >> "${iso_dir}/status.log" || true
+
+          # 무결성 (크기 + sha256)
+          echo "--- integrity check ---" | tee -a "${LOG_DIR}/dr_iso.init.log"
+          wc -c "${dr_dir}/dr_backup_plan.txt" "${iso_dir}/iso_manifest.txt" | tee -a "${LOG_DIR}/dr_iso.init.log" || true
+          sha256sum "${dr_dir}/dr_backup_plan.txt" "${iso_dir}/iso_manifest.txt" | tee -a "${LOG_DIR}/dr_iso.init.log" || true
 
           echo ">>> [dr+iso] done" | tee -a "${LOG_DIR}/dr_iso.init.log"
 
       ##################################################################
-      # 4. 환경 스냅샷
+      # 4. 환경/권한/런 정보 스냅샷
       ##################################################################
-      - name: "[snap] Environment snapshot"
+      - name: "[snap] Environment & permissions snapshot"
         env:
           LOG_DIR: ${{ env.LOG_DIR }}
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          PERM_DIR: ${{ env.PERM_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
         run: |
           echo ">>> [snap] start"
           {
@@ -148,34 +184,243 @@ jobs:
             df -h
             echo "--- env | sort ---"
             env | sort
+            echo "--- permissions check (top dirs) ---"
+            ls -ld "${LOG_DIR}" "${ARTIFACT_DIR}" "${SERVICE_DIR}" "${PERM_DIR}"
+            echo "--- service tree depth 2 (mode/owner/group) ---"
+            find "${SERVICE_DIR}" -maxdepth 2 -type f -printf "%M %u %g %p\n" 2>/dev/null
+            echo "--- GitHub Context ---"
+            echo "actor=${{ github.actor }}"
+            echo "repo=${{ github.repository }}"
+            echo "ref=${{ github.ref }}"
+            echo "sha=${{ github.sha }}"
+            echo "ref_name=${{ github.ref_name }}"
+            echo "event_name=${{ github.event_name }}"
+            echo "triggering_actor=${{ github.triggering_actor }}"
+            echo "workflow=${{ github.workflow }}"
+            echo "run_id=${{ github.run_id }}"
+            echo "run_attempt=${{ github.run_attempt }}"
+            echo "RUN_ID=${RUN_ID}"
+            echo "run_mode=${{ github.event.inputs.run_mode }}"
           } | tee "${LOG_DIR}/env_snapshot.log"
           echo ">>> [snap] done" | tee -a "${LOG_DIR}/env_snapshot.log"
 
       ##################################################################
-      # 5A. CURL 호출 (Anthropic Claude)
-      #     - 실패 허용 (continue-on-error)
+      # 5. health 체크 (DNS/TLS/latency 스타일 메타)
+      #    - 각 주요 API 도메인에 대한 기본 연결성 정보를 health.log에 남김
       ##################################################################
-      - name: "[api-claude] Curl Anthropic Claude messages API"
+      - name: "[health] basic connectivity metadata"
         continue-on-error: true
         env:
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          LOG_DIR: ${{ env.LOG_DIR }}
+        run: |
+          echo ">>> [health] start"
+          # 대상들
+          CLAUDE_HOST="api.anthropic.com"
+          GEMINI_HOST="generativelanguage.googleapis.com"
+          OPENAI_HOST="api.openai.com"
+
+          for host in "$CLAUDE_HOST" "$GEMINI_HOST" "$OPENAI_HOST"; do
+            svc_name="openai_api"
+            if [ "$host" = "$CLAUDE_HOST" ]; then svc_name="claude_api"; fi
+            if [ "$host" = "$GEMINI_HOST" ]; then svc_name="gemini_api"; fi
+
+            health_file="${SERVICE_DIR}/${svc_name}/health.log"
+
+            echo "[HEALTH] $(date '+%Y-%m-%d %H:%M:%S%z') host=${host}" >> "${health_file}"
+
+            # DNS 해석 시도
+            getent hosts "$host" >> "${health_file}" 2>&1 || echo "dns_failed=1 host=${host}" >> "${health_file}"
+
+            # TLS 핸드셰이크/헤더 프리뷰 (HEAD 요청)
+            /usr/bin/time -f "time_total_sec=%E" curl -sS -I "https://${host}" >> "${health_file}" 2>&1 || echo "tls_head_failed=1 host=${host}" >> "${health_file}"
+
+            echo "---" >> "${health_file}"
+
+            chmod 640 "${health_file}" || true
+          done
+
+          echo ">>> [health] done" | tee -a "${LOG_DIR}/health.init.log"
+
+      ##################################################################
+      # 6. 외부 API 호출 블록 (Claude / Gemini / OpenAI)
+      #
+      # run_mode 동작:
+      #   lite       -> 모든 외부 호출 스킵, 더미 응답만 기록
+      #   full-safe  -> 실제 호출 1회씩 실행
+      #   full       -> 실제 호출 1회씩 실행 (full-safe와 동일 동작, 단 로그/리포트에 run_mode 표시)
+      #
+      # 각 API 호출 후:
+      #   - status_code.txt
+      #   - headers.txt
+      #   - body.json
+      #   - body.sanitized.json (마스킹)
+      #   - usage.log
+      #   - severity 평가 후 status.log에 기록
+      #   - checksums later에 포함
+      #
+      ##################################################################
+
+      - name: "[api] Call Anthropic Claude / Gemini / OpenAI (with severity, sanitized, skip-by-mode)"
+        continue-on-error: true
+        env:
+          RUN_MODE: ${{ github.event.inputs.run_mode }}
           INPUT_URL: ${{ github.event.inputs.target_url }}
-          SECR_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RUN_ID: ${{ env.RUN_ID }}
           LOG_DIR: ${{ env.LOG_DIR }}
           SERVICE_DIR: ${{ env.SERVICE_DIR }}
+
+          SECR_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEM_KEY:  ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          echo ">>> [api-claude] start"
-          TARGET_URL="${INPUT_URL}"
-          if [ -z "$TARGET_URL" ]; then
-            TARGET_URL="https://api.anthropic.com/v1/messages"
+          echo ">>> [api] start (RUN_MODE=${RUN_MODE}, RUN_ID=${RUN_ID})"
+
+          # 공통 함수처럼 쓸 헬퍼(반복 로직) 형태: bash에선 그냥 블록으로 복붙 방식 사용
+          # 우리는 실제로 반복 구현 (Claude / Gemini / OpenAI 순서)
+
+          ##############################################################
+          # 내부 헬퍼: result_summary + severity 계산 함수 흉내
+          # code -> summary/severity
+          ##############################################################
+          classify_severity () {
+            local code="$1"
+            local summary="unknown"
+            local sev="UNKNOWN"
+            if [ "$code" = "200" ] || [ "$code" = "201" ]; then
+              summary="OK-response"
+              sev="OK"
+            elif [ "$code" = "401" ] || [ "$code" = "403" ]; then
+              summary="AUTH-FAIL (check key/permission)"
+              sev="CRITICAL_AUTH"
+            elif [ "$code" = "429" ]; then
+              summary="RATE-LIMIT or QUOTA"
+              sev="LIMIT_QUOTA"
+            elif [ "$code" = "N/A" ]; then
+              summary="NO-RESPONSE (network/timeout?)"
+              sev="NO_RESPONSE"
+            else
+              # 5xx 등
+              case "$code" in
+                5*) summary="SERVER-ERROR"; sev="SERVER_ERROR" ;;
+                4*) summary="CLIENT-ERROR"; sev="CLIENT_ERROR" ;;
+              esac
+            fi
+            echo "${summary}:::${sev}"
+          }
+
+          ##############################################################
+          # 헬퍼: 호출 or 스킵 공통 처리
+          # params:
+          #   $1 : svc_name (예: claude_api)
+          #   $2 : target_url
+          #   $3 : header_cmds   (줄바꿈으로 나열된 curl -H 들)
+          #   $4 : body_json     (printf로 만들어둘 파일경로)
+          #   $5 : req_dir
+          #   $6 : resp_dir
+          ##############################################################
+          do_call () {
+            local svc_name="$1"
+            local tgt="$2"
+            local hdrs="$3"
+            local body_file_in="$4"
+            local req_dir="$5"
+            local resp_dir="$6"
+
+            mkdir -p "${req_dir}" "${resp_dir}"
+
+            local status_file="${resp_dir}/status_code.txt"
+            local body_file="${resp_dir}/body.json"
+            local body_sanit="${resp_dir}/body.sanitized.json"
+            local header_file="${resp_dir}/headers.txt"
+            local usage_log="${resp_dir}/usage.log"
+            local svc_status="${SERVICE_DIR}/${svc_name}/status.log"
+
+            echo "[api:${svc_name}] mode=${RUN_MODE} target=${tgt}"
+
+            if [ "${RUN_MODE}" = "lite" ]; then
+              # 스킵: 더미 응답만 넣는다
+              printf '%s\n' "N/A" > "${status_file}"
+              printf '%s\n' '{"lite_mode": true, "note": "no external call performed"}' > "${body_file}"
+              printf '%s\n' "[lite mode skip]" > "${header_file}"
+              printf '%s\n' "[lite mode skip usage]" > "${usage_log}"
+              printf '%s\n' '{"lite_mode": true}' > "${body_sanit}"
+            else
+              # 실제 curl 호출
+              # hdrs 는 -H 라인들을 그대로 eval-safe하게 사용해야 하므로 while read
+              # 우리는 임시 파일에 curl 명령을 조립해서 sh로 실행
+              local curl_script="${req_dir}/curl_do.sh"
+              {
+                printf '%s' "curl -sS -X POST \"${tgt}\" "
+                echo "$hdrs" | while read hline; do
+                  [ -n "$hline" ] && printf '%s' "$hline "
+                done
+                printf '%s' "-D \"${header_file}\" "
+                printf '%s' "--data @\"${body_file_in}\" "
+                printf '%s' "-o \"${body_file}\" "
+                printf '%s\n' "--write-out \"%{http_code}\" > \"${status_file}\""
+              } > "${curl_script}"
+
+              chmod +x "${curl_script}" || true
+              echo "[api:${svc_name}] executing curl..." | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
+              sh "${curl_script}" 2>> "${LOG_DIR}/curl_init_${svc_name}.log" || true
+
+              echo "[api:${svc_name}] curl done." | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
+
+              # usage 추출 (best-effort)
+              printf '%s\n' "[api:${svc_name}] extracting usage best-effort" | tee "${usage_log}"
+              grep -E '"usage"|input_tokens|output_tokens|prompt_tokens|completion_tokens|total_tokens' "${body_file}" >> "${usage_log}" 2>/dev/null || true
+
+              # body.sanitized.json 생성 (민감 Authorization / Bearer / api_key 등 마스킹)
+              # 단순 치환 기반
+              sed -E 's/"x-api-key"[[:space:]]*:[[:space:]]*"[^"]*"/"x-api-key":"[MASKED]"/g; s/"Authorization"[[:space:]]*:[[:space:]]*"Bearer [^"]*"/"Authorization":"Bearer [MASKED]"/g' "${body_file}" > "${body_sanit}" 2>/dev/null || cp "${body_file}" "${body_sanit}" 2>/dev/null || true
+            fi
+
+            # status code
+            local code="N/A"
+            [ -f "${status_file}" ] && code="$(cat "${status_file}" 2>/dev/null || echo 'N/A')"
+
+            # severity / summary
+            local cinfo
+            cinfo="$(classify_severity "${code}")"
+            local summary="$(echo "${cinfo}" | cut -d':' -f1)"
+            local severity="$(echo "${cinfo}" | cut -d':' -f3)"
+
+            # short preview to log
+            echo "[api:${svc_name}] status=${code} summary=${summary} severity=${severity}" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
+            echo "[api:${svc_name}] headers first lines:" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
+            head -n 20 "${header_file}" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log" || true
+            echo "[api:${svc_name}] body first 500 chars:" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
+            head -c 500 "${body_file}" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log" || true
+            echo "" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
+
+            # status.log append
+            {
+              printf '\n%s\n' "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID}"
+              printf '%s%s\n' "status_code=" "$code"
+              printf '%s\n' "result_summary=${summary}"
+              printf '%s\n' "severity=${severity}"
+              printf '%s\n' "note=See ${svc_name}_response/ for details"
+              printf '%s\n' "mode=${RUN_MODE}"
+            } >> "${svc_status}" || true
+
+            # 민감 로그 최소 권한
+            chmod 600 "${status_file}" "${header_file}" "${body_file}" "${usage_log}" 2>/dev/null || true
+            chmod 600 "${body_sanit}" 2>/dev/null || true
+          }
+
+          ##############################################################
+          # 6-1. Anthropic Claude
+          ##############################################################
+          CLAUDE_URL="${INPUT_URL}"
+          if [ -z "$CLAUDE_URL" ]; then
+            CLAUDE_URL="https://api.anthropic.com/v1/messages"
           fi
-          echo "[api-claude] TARGET_URL=${TARGET_URL}"
-          echo "[api-claude] api-key=[MASKED] anthropic-version=2023-06-01"
 
-          REQ_DIR="${LOG_DIR}/claude_request"
-          RESP_DIR="${LOG_DIR}/claude_response"
-          mkdir -p "$REQ_DIR" "$RESP_DIR"
+          CLAUDE_REQ_DIR="${LOG_DIR}/claude_request"
+          CLAUDE_RESP_DIR="${LOG_DIR}/claude_response"
+          mkdir -p "${CLAUDE_REQ_DIR}"
 
-          # 요청 바디 JSON (Anthropic 형식)
           {
             printf '%s\n' '{'
             printf '%s\n' '  "model": "claude-3-opus-20240229",'
@@ -184,145 +429,48 @@ jobs:
             printf '%s\n' '    { "role": "user", "content": "안녕, 사용량 usage 필드 보여줘." }'
             printf '%s\n' '  ]'
             printf '%s\n' '}'
-          } > "${REQ_DIR}/request_body.json"
+          } > "${CLAUDE_REQ_DIR}/request_body.json"
 
-          status_file="${RESP_DIR}/status_code.txt"
-          body_file="${RESP_DIR}/body.json"
-          header_file="${RESP_DIR}/headers.txt"
-          usage_log="${RESP_DIR}/usage.log"
+          # header list for Claude
+          CLAUDE_HDRS=$(printf '%s\n' \
+            "-H \"Content-Type: application/json\"" \
+            "-H \"anthropic-version: 2023-06-01\"" \
+            "-H \"x-api-key: ${SECR_KEY}\"" \
+          )
 
-          echo "[api-claude] curl POST ${TARGET_URL}" | tee -a "${LOG_DIR}/curl_init_claude.log"
+          do_call "claude_api" "${CLAUDE_URL}" "${CLAUDE_HDRS}" "${CLAUDE_REQ_DIR}/request_body.json" "${CLAUDE_REQ_DIR}" "${CLAUDE_RESP_DIR}"
 
-          curl -sS -X POST "${TARGET_URL}" \
-            -H "Content-Type: application/json" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "x-api-key: ${SECR_KEY}" \
-            -D "${header_file}" \
-            --data @"${REQ_DIR}/request_body.json" \
-            -o "${body_file}" \
-            --write-out "%{http_code}" > "${status_file}"
+          ##############################################################
+          # 6-2. Google Gemini
+          ##############################################################
+          GEM_URL="https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+          GEM_REQ_DIR="${LOG_DIR}/gemini_request"
+          GEM_RESP_DIR="${LOG_DIR}/gemini_response"
+          mkdir -p "${GEM_REQ_DIR}"
 
-          echo "[api-claude] curl done." | tee -a "${LOG_DIR}/curl_init_claude.log"
-
-          echo "[api-claude] status code:" | tee -a "${LOG_DIR}/curl_init_claude.log"
-          cat "${status_file}" | tee -a "${LOG_DIR}/curl_init_claude.log" || true
-
-          echo "[api-claude] headers (first lines):" | tee -a "${LOG_DIR}/curl_init_claude.log"
-          head -n 20 "${header_file}" | tee -a "${LOG_DIR}/curl_init_claude.log" || true
-
-          echo "[api-claude] body (first 500 chars):" | tee -a "${LOG_DIR}/curl_init_claude.log"
-          head -c 500 "${body_file}" | tee -a "${LOG_DIR}/curl_init_claude.log" || true
-          echo "" | tee -a "${LOG_DIR}/curl_init_claude.log"
-
-          # usage 추출
-          printf '%s\n' "[api-claude] extracting usage best-effort" | tee "${usage_log}"
-          grep -E '"usage"|input_tokens|output_tokens' "${body_file}" >> "${usage_log}" 2>/dev/null || true
-
-          # claude_api/status.log 에 append
-          svc_status="${SERVICE_DIR}/claude_api/status.log"
-          {
-            printf '\n%s\n' "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z')"
-            printf '%s%s\n' "status_code=" "$(cat "${status_file}" 2>/dev/null || echo 'N/A')"
-            printf '%s\n' "note=See claude_response/ for details"
-          } >> "${svc_status}" || true
-
-          chmod 600 "${status_file}" "${header_file}" "${body_file}" "${usage_log}" 2>/dev/null || true
-          echo ">>> [api-claude] done" | tee -a "${LOG_DIR}/curl_init_claude.log"
-
-      ##################################################################
-      # 5B. CURL 호출 (Google Gemini / 제미나이)
-      #     - 실패 허용 (continue-on-error)
-      #     - 정식 엔드포인트: generateContent
-      ##################################################################
-      - name: "[api-gemini] Curl Google Gemini generateContent API"
-        continue-on-error: true
-        env:
-          GEM_KEY: ${{ secrets.GEMINI_API_KEY }}
-          LOG_DIR: ${{ env.LOG_DIR }}
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-        run: |
-          echo ">>> [api-gemini] start"
-          TARGET_URL_GEM="https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-          echo "[api-gemini] TARGET_URL_GEM=${TARGET_URL_GEM}"
-          echo "[api-gemini] x-goog-api-key=[MASKED]"
-
-          REQ_DIR="${LOG_DIR}/gemini_request"
-          RESP_DIR="${LOG_DIR}/gemini_response"
-          mkdir -p "$REQ_DIR" "$RESP_DIR"
-
-          # 요청 바디 JSON (Gemini 형식)
           {
             printf '%s\n' '{'
             printf '%s\n' '  "contents": [{'
             printf '%s\n' '    "parts": [ { "text": "안녕, usage/토큰 정보 가능해?" } ]'
             printf '%s\n' '  }]'
             printf '%s\n' '}'
-          } > "${REQ_DIR}/request_body.json"
+          } > "${GEM_REQ_DIR}/request_body.json"
 
-          status_file="${RESP_DIR}/status_code.txt"
-          body_file="${RESP_DIR}/body.json"
-          header_file="${RESP_DIR}/headers.txt"
-          usage_log="${RESP_DIR}/usage.log"
+          GEM_HDRS=$(printf '%s\n' \
+            "-H \"Content-Type: application/json\"" \
+            "-H \"x-goog-api-key: ${GEM_KEY}\"" \
+          )
 
-          echo "[api-gemini] curl POST ${TARGET_URL_GEM}" | tee -a "${LOG_DIR}/curl_init_gemini.log"
+          do_call "gemini_api" "${GEM_URL}" "${GEM_HDRS}" "${GEM_REQ_DIR}/request_body.json" "${GEM_REQ_DIR}" "${GEM_RESP_DIR}"
 
-          curl -sS -X POST "${TARGET_URL_GEM}" \
-            -H "Content-Type: application/json" \
-            -H "x-goog-api-key: ${GEM_KEY}" \
-            -D "${header_file}" \
-            --data @"${REQ_DIR}/request_body.json" \
-            -o "${body_file}" \
-            --write-out "%{http_code}" > "${status_file}"
+          ##############################################################
+          # 6-3. OpenAI ChatGPT
+          ##############################################################
+          OAI_URL="https://api.openai.com/v1/chat/completions"
+          OAI_REQ_DIR="${LOG_DIR}/openai_request"
+          OAI_RESP_DIR="${LOG_DIR}/openai_response"
+          mkdir -p "${OAI_REQ_DIR}"
 
-          echo "[api-gemini] curl done." | tee -a "${LOG_DIR}/curl_init_gemini.log"
-
-          echo "[api-gemini] status code:" | tee -a "${LOG_DIR}/curl_init_gemini.log"
-          cat "${status_file}" | tee -a "${LOG_DIR}/curl_init_gemini.log" || true
-
-          echo "[api-gemini] headers (first lines):" | tee -a "${LOG_DIR}/curl_init_gemini.log"
-          head -n 20 "${header_file}" | tee -a "${LOG_DIR}/curl_init_gemini.log" || true
-
-          echo "[api-gemini] body (first 500 chars):" | tee -a "${LOG_DIR}/curl_init_gemini.log"
-          head -c 500 "${body_file}" | tee -a "${LOG_DIR}/curl_init_gemini.log" || true
-          echo "" | tee -a "${LOG_DIR}/curl_init_gemini.log"
-
-          # Gemini는 usage 토큰 필드가 표준화돼 있지 않을 수 있음 -> best-effort grep
-          printf '%s\n' "[api-gemini] extracting usage best-effort" | tee "${usage_log}"
-          grep -E '"usage"|prompt_token|total_tokens|candidates' "${body_file}" >> "${usage_log}" 2>/dev/null || true
-
-          # gemini_api/status.log 에 append
-          svc_status="${SERVICE_DIR}/gemini_api/status.log"
-          {
-            printf '\n%s\n' "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z')"
-            printf '%s%s\n' "status_code=" "$(cat "${status_file}" 2>/dev/null || echo 'N/A')"
-            printf '%s\n' "note=See gemini_response/ for details"
-          } >> "${svc_status}" || true
-
-          chmod 600 "${status_file}" "${header_file}" "${body_file}" "${usage_log}" 2>/dev/null || true
-          echo ">>> [api-gemini] done" | tee -a "${LOG_DIR}/curl_init_gemini.log"
-
-      ##################################################################
-      # 5C. CURL 호출 (OpenAI ChatGPT Chat Completions)
-      #     - 실패 허용 (continue-on-error)
-      #     - 정식 엔드포인트: /v1/chat/completions
-      ##################################################################
-      - name: "[api-openai] Curl OpenAI Chat Completions API"
-        continue-on-error: true
-        env:
-          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
-          LOG_DIR: ${{ env.LOG_DIR }}
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-        run: |
-          echo ">>> [api-openai] start"
-          TARGET_URL_OAI="https://api.openai.com/v1/chat/completions"
-          echo "[api-openai] TARGET_URL_OAI=${TARGET_URL_OAI}"
-          echo "[api-openai] Authorization: Bearer [MASKED]"
-
-          REQ_DIR="${LOG_DIR}/openai_request"
-          RESP_DIR="${LOG_DIR}/openai_response"
-          mkdir -p "$REQ_DIR" "$RESP_DIR"
-
-          # 요청 바디 JSON (OpenAI Chat Completions 형식)
           {
             printf '%s\n' '{'
             printf '%s\n' '  "model": "gpt-4o-mini",'
@@ -330,54 +478,210 @@ jobs:
             printf '%s\n' '    { "role": "user", "content": "안녕, usage 필드 보여줘." }'
             printf '%s\n' '  ]'
             printf '%s\n' '}'
-          } > "${REQ_DIR}/request_body.json"
+          } > "${OAI_REQ_DIR}/request_body.json"
 
-          status_file="${RESP_DIR}/status_code.txt"
-          body_file="${RESP_DIR}/body.json"
-          header_file="${RESP_DIR}/headers.txt"
-          usage_log="${RESP_DIR}/usage.log"
+          OAI_HDRS=$(printf '%s\n' \
+            "-H \"Content-Type: application/json\"" \
+            "-H \"Authorization: Bearer ${OPENAI_KEY}\"" \
+          )
 
-          echo "[api-openai] curl POST ${TARGET_URL_OAI}" | tee -a "${LOG_DIR}/curl_init_openai.log"
+          do_call "openai_api" "${OAI_URL}" "${OAI_HDRS}" "${OAI_REQ_DIR}/request_body.json" "${OAI_REQ_DIR}" "${OAI_RESP_DIR}"
 
-          curl -sS -X POST "${TARGET_URL_OAI}" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${OPENAI_KEY}" \
-            -D "${header_file}" \
-            --data @"${REQ_DIR}/request_body.json" \
-            -o "${body_file}" \
-            --write-out "%{http_code}" > "${status_file}"
+          echo ">>> [api] done (all vendors processed)" | tee -a "${LOG_DIR}/api.all.log"
 
-          echo "[api-openai] curl done." | tee -a "${LOG_DIR}/curl_init_openai.log"
+      ##################################################################
+      # 7. checksums.txt 생성 (무결성 체인)
+      #    - 핵심 결과 파일들에 대한 sha256sum 목록
+      ##################################################################
+      - name: "[integrity] Build global checksums.txt"
+        env:
+          LOG_DIR: ${{ env.LOG_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+        run: |
+          echo ">>> [integrity] start"
+          CHECK_FILE="${ARTIFACT_DIR}/checksums.txt"
+          mkdir -p "${ARTIFACT_DIR}" || true
 
-          echo "[api-openai] status code:" | tee -a "${LOG_DIR}/curl_init_openai.log"
-          cat "${status_file}" | tee -a "${LOG_DIR}/curl_init_openai.log" || true
-
-          echo "[api-openai] headers (first lines):" | tee -a "${LOG_DIR}/curl_init_openai.log"
-          head -n 20 "${header_file}" | tee -a "${LOG_DIR}/curl_init_openai.log" || true
-
-          echo "[api-openai] body (first 500 chars):" | tee -a "${LOG_DIR}/curl_init_openai.log"
-          head -c 500 "${body_file}" | tee -a "${LOG_DIR}/curl_init_openai.log" || true
-          echo "" | tee -a "${LOG_DIR}/curl_init_openai.log"
-
-          # OpenAI 응답 usage 블록 추출
-          printf '%s\n' "[api-openai] extracting usage best-effort" | tee "${usage_log}"
-          grep -E '"usage"|prompt_tokens|completion_tokens|total_tokens' "${body_file}" >> "${usage_log}" 2>/dev/null || true
-
-          # openai_api/status.log 에 append
-          svc_status="${SERVICE_DIR}/openai_api/status.log"
+          # sha256sum for selected response artifacts if present
           {
-            printf '\n%s\n' "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z')"
-            printf '%s%s\n' "status_code=" "$(cat "${status_file}" 2>/dev/null || echo 'N/A')"
-            printf '%s\n' "note=See openai_response/ for details"
-          } >> "${svc_status}" || true
+            echo "# checksums for audit (sha256)"
+            date
+            echo "LOG_DIR=${LOG_DIR}"
+            find "${LOG_DIR}" -maxdepth 2 -type f \( -name "status_code.txt" -o -name "body.json" -o -name "body.sanitized.json" -o -name "usage.log" -o -name "dr_backup_plan.txt" -o -name "iso_manifest.txt" \) -print0 2>/dev/null | xargs -0 sha256sum 2>/dev/null || true
+          } > "${CHECK_FILE}"
 
-          chmod 600 "${status_file}" "${header_file}" "${body_file}" "${usage_log}" 2>/dev/null || true
-          echo ">>> [api-openai] done" | tee -a "${LOG_DIR}/curl_init_openai.log"
+          chmod 644 "${CHECK_FILE}" || true
+          echo ">>> [integrity] done" | tee -a "${LOG_DIR}/integrity.init.log"
 
       ##################################################################
-      # 6. 아티팩트 준비 & 업로드
+      # 8. replay.sh 생성 (재현 스크립트)
+      #    - 민감 키는 마스킹
+      #    - DR 복구 순서/권한 복구 절차/ISO 생성 힌트 포함
       ##################################################################
-      - name: "[collect] Prepare artifacts"
+      - name: "[replay] Generate replay.sh for DR rehearsal"
+        env:
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          PERM_DIR: ${{ env.PERM_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
+          RUN_MODE: ${{ github.event.inputs.run_mode }}
+        run: |
+          echo ">>> [replay] start"
+          REPLAY_FILE="${ARTIFACT_DIR}/replay.sh"
+          {
+            echo "#!/usr/bin/env bash"
+            echo "# Replay / DR rehearsal script"
+            echo "# RUN_ID=${RUN_ID}"
+            echo "# RUN_MODE=${RUN_MODE}"
+            echo "# (민감 키는 포함하지 않음. Authorization 등은 [MASKED])"
+            echo ""
+            echo "set -euo pipefail"
+            echo ""
+            echo "# 1. 기본 디렉토리 복구 예시"
+            echo "mkdir -p .github/echo_services .github/echo_perm .github/echo_logs .github/echo_artifacts || true"
+            echo ""
+            echo "# 2. 권한 복구 예시"
+            echo "find .github/echo_perm -type f -name permissions.txt -exec chmod 600 {} \\; || true"
+            echo "find .github/echo_services -type f -name status.log -exec chmod 640 {} \\; || true"
+            echo ""
+            echo "# 3. DR 정책/ISO 정책 파일 참고"
+            echo "echo '참고: .github/echo_services/dr_center/dr_backup_plan.txt'"
+            echo "echo '참고: .github/echo_services/iso_builder/iso_manifest.txt'"
+            echo ""
+            echo "# 4. API 재검증 curl 예시 (MASKED KEY)"
+            echo "curl -sS -X POST \"https://api.anthropic.com/v1/messages\" \\"
+            echo "  -H \"Content-Type: application/json\" \\"
+            echo "  -H \"anthropic-version: 2023-06-01\" \\"
+            echo "  -H \"x-api-key: [MASKED]\" \\"
+            echo "  --data '{\"model\":\"claude-3-opus-20240229\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}'"
+            echo ""
+            echo "# 5. severity 확인은 각 서비스 status.log 참고"
+            echo "grep -E \"severity=\" .github/echo_services/*/status.log || true"
+            echo ""
+            echo "# End of replay guidance"
+          } > "${REPLAY_FILE}"
+
+          chmod 755 "${REPLAY_FILE}" || true
+          echo ">>> [replay] done" | tee -a "${LOG_DIR}/replay.init.log"
+
+      ##################################################################
+      # 9. index.md 생성 (상세 리포트 + 에스컬레이션 매뉴얼)
+      #    - severity 요약 / 복구 절차 / 에스컬레이션 가이드 / GitHub 컨텍스트
+      ##################################################################
+      - name: "[report] Build index.md"
+        env:
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          LOG_DIR: ${{ env.LOG_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
+          RUN_MODE: ${{ github.event.inputs.run_mode }}
+        run: |
+          echo ">>> [report] start"
+          INDEX_FILE="${ARTIFACT_DIR}/index.md"
+
+          # 각 서비스별 마지막 severity/코드 요약 가져오기
+          get_last () {
+            local svc_name="$1"
+            local f="${SERVICE_DIR}/${svc_name}/status.log"
+            local code="N/A"
+            local sev="UNKNOWN"
+            local sum="(no-summary)"
+            if [ -f "$f" ]; then
+              code=$(grep -E "status_code=" "$f" | tail -n 1 | sed 's/.*status_code=//')
+              sev=$(grep -E "severity=" "$f" | tail -n 1 | sed 's/.*severity=//')
+              sum=$(grep -E "result_summary=" "$f" | tail -n 1 | sed 's/.*result_summary=//')
+            fi
+            echo "${code}:::${sev}:::${sum}"
+          }
+
+          CLAUDE_LAST=$(get_last "claude_api")
+          GEMINI_LAST=$(get_last "gemini_api")
+          OPENAI_LAST=$(get_last "openai_api")
+
+          CLAUDE_CODE=$(echo "${CLAUDE_LAST}" | cut -d':' -f1)
+          CLAUDE_SEV=$(echo "${CLAUDE_LAST}"  | cut -d':' -f3)
+          CLAUDE_SUM=$(echo "${CLAUDE_LAST}"  | cut -d':' -f5)
+
+          GEMINI_CODE=$(echo "${GEMINI_LAST}" | cut -d':' -f1)
+          GEMINI_SEV=$(echo "${GEMINI_LAST}"  | cut -d':' -f3)
+          GEMINI_SUM=$(echo "${GEMINI_LAST}"  | cut -d':' -f5)
+
+          OPENAI_CODE=$(echo "${OPENAI_LAST}" | cut -d':' -f1)
+          OPENAI_SEV=$(echo "${OPENAI_LAST}"  | cut -d':' -f3)
+          OPENAI_SUM=$(echo "${OPENAI_LAST}"  | cut -d':' -f5)
+
+          {
+            echo "# Execution Report / DR & Audit"
+            echo ""
+            echo "## Run Info"
+            echo "- Run ID: ${RUN_ID}"
+            echo "- Run Mode: ${RUN_MODE}"
+            echo "- Timestamp: $(date '+%Y-%m-%d %H:%M:%S%z')"
+            echo "- GitHub Actor: ${{ github.actor }}"
+            echo "- Repo:        ${{ github.repository }}"
+            echo "- Ref:         ${{ github.ref }}"
+            echo "- Ref Name:    ${{ github.ref_name }}"
+            echo "- SHA:         ${{ github.sha }}"
+            echo "- Event:       ${{ github.event_name }}"
+            echo "- Trigger:     ${{ github.triggering_actor }}"
+            echo "- Workflow:    ${{ github.workflow }}"
+            echo ""
+            echo "## API Call Summary"
+            echo "### Anthropic Claude"
+            echo "- status_code: ${CLAUDE_CODE}"
+            echo "- severity:    ${CLAUDE_SEV}"
+            echo "- summary:     ${CLAUDE_SUM}"
+            echo "- logs:        .github/echo_logs/claude_response/"
+            echo ""
+            echo "### Google Gemini"
+            echo "- status_code: ${GEMINI_CODE}"
+            echo "- severity:    ${GEMINI_SEV}"
+            echo "- summary:     ${GEMINI_SUM}"
+            echo "- logs:        .github/echo_logs/gemini_response/"
+            echo ""
+            echo "### OpenAI ChatGPT"
+            echo "- status_code: ${OPENAI_CODE}"
+            echo "- severity:    ${OPENAI_SEV}"
+            echo "- summary:     ${OPENAI_SUM}"
+            echo "- logs:        .github/echo_logs/openai_response/"
+            echo ""
+            echo "## Severity Escalation Guide"
+            echo "- OK: 정상 응답 (200/201 등)"
+            echo "- CRITICAL_AUTH: 인증/권한 문제 (401/403) → 키 재발급/보안담당 알림"
+            echo "- LIMIT_QUOTA: 한도/요금 초과 (429) → 비용/쿼터 담당 알림"
+            echo "- SERVER_ERROR: 벤더 서버 오류 (5xx) → 서비스 제공사에 에스컬레이션"
+            echo "- NO_RESPONSE: 네트워크/방화벽/차단 의심 → 인프라/네트워크 담당 알림"
+            echo ""
+            echo "## DR / Recovery Hints"
+            echo "1. .github/echo_services/* 디렉토리를 새 환경에 복제하고 README.md / status.log 복원."
+            echo "2. .github/echo_perm/*/permissions.txt 참고하여 chmod 600 등 최소권한 재적용."
+            echo "3. DR 정책: dr_center/dr_backup_plan.txt"
+            echo "4. ISO 정책: iso_builder/iso_manifest.txt (image_name, includes 목록)."
+            echo "5. replay.sh 실행해 환경 재현 (키는 직접 주입)."
+            echo "6. severity가 CRITICAL_AUTH 면 비밀키/권한 이슈, LIMIT_QUOTA 면 비용/쿼터 이슈 우선 해결."
+            echo ""
+            echo "## Integrity / Audit Trail"
+            echo "- checksums.txt: 주요 산출물 sha256 목록"
+            echo "- env_snapshot.log: 실행 당시 runner 환경, 디스크, GitHub 컨텍스트"
+            echo "- health.log: DNS/TLS/latency 메타 정보(claude_api/health.log 등)"
+            echo "- body.sanitized.json: 민감정보 마스킹된 응답"
+            echo ""
+            echo "## Escalation Procedure (운영 인계용)"
+            echo "- CRITICAL_AUTH: 보안/Secret 관리 담당자에게 보고 (키 만료/권한 부족)."
+            echo "- LIMIT_QUOTA: 비용/Rate Limit 담당자에게 보고 (요금/쿼터 상향 또는 호출 빈도 조정)."
+            echo "- SERVER_ERROR: 벤더 지원 채널로 장애 문의."
+            echo "- NO_RESPONSE: 내부 네트워크/방화벽 점검, DR센터 우회 경로 사용 여부 확인."
+            echo ""
+            echo "끝."
+          } > "${INDEX_FILE}"
+
+          chmod 644 "${INDEX_FILE}" || true
+          echo ">>> [report] done" | tee -a "${LOG_DIR}/report.init.log"
+
+      ##################################################################
+      # 10. 아티팩트 수집 (services/permissions/logs/artifacts)
+      ##################################################################
+      - name: "[collect] Bundle artifacts"
         env:
           SERVICE_DIR: ${{ env.SERVICE_DIR }}
           PERM_DIR: ${{ env.PERM_DIR }}
@@ -388,14 +692,15 @@ jobs:
           mkdir -p "${ARTIFACT_DIR}/services" "${ARTIFACT_DIR}/permissions" || true
           cp -r "${SERVICE_DIR}/."     "${ARTIFACT_DIR}/services/"     || true
           cp -r "${PERM_DIR}/."        "${ARTIFACT_DIR}/permissions/"  || true
-          echo ">>> listing ${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
-          ls -R "${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
-          echo ">>> [collect] done" | tee -a "${LOG_DIR}/artifact.bundle.log"
 
-      - name: "[artifact] Upload logs + services + perms"
+          echo ">>> listing ${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
+          ls -R "${ARTIFACT_DIR}"     | tee -a "${LOG_DIR}/artifact.bundle.log"
+          echo ">>> [collect] done"   | tee -a "${LOG_DIR}/artifact.bundle.log"
+
+      - name: "[artifact] Upload logs + services + perms + artifacts"
         uses: actions/upload-artifact@v4
         with:
-          name: api-curl-test-server-logs-and-services
+          name: ai-api-dr-audit-all-artifacts
           path: |
             .github/echo_logs
             .github/echo_artifacts
@@ -405,16 +710,51 @@ jobs:
           retention-days: 7
 
       ##################################################################
-      # 7. 마지막 리포트 (항상 성공 선언)
+      # 11. (옵션) 요약을 repo에 커밋
+      #     - 민감한 body.json/headers/key 등은 절대 커밋하지 않음
+      #     - status.log 의 상태요약/심각도, index.md, checksums.txt 정도만 커밋
+      ##################################################################
+      - name: "[optional-commit] Commit summary back to repo (safe only)"
+        if: env.RUN_COMMIT_SUMMARY == 'true'
+        env:
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          RUN_ID: ${{ env.RUN_ID }}
+        run: |
+          echo ">>> [optional-commit] start"
+          git config user.email "automation@example.local"
+          git config user.name "EchoOps-AuditBot"
+
+          # 안전한 요약본만 stage
+          # status.log, index.md, checksums.txt 등
+          git add "${SERVICE_DIR}/claude_api/status.log" 2>/dev/null || true
+          git add "${SERVICE_DIR}/gemini_api/status.log" 2>/dev/null || true
+          git add "${SERVICE_DIR}/openai_api/status.log" 2>/devnull || true
+          git add "${ARTIFACT_DIR}/index.md" 2>/dev/null || true
+          git add "${ARTIFACT_DIR}/checksums.txt" 2>/dev/null || true
+
+          git commit -m "[EchoOps DR/Audit] RUN_ID=${RUN_ID} status summary (sanitized)" || true
+          git push || true
+          echo ">>> [optional-commit] done"
+
+      ##################################################################
+      # 12. 마지막 리포트 (항상 성공 선언)
       ##################################################################
       - name: "[final] Overall status (ALWAYS-SUCCESS)"
         run: |
-          echo "✅ [FINAL] API Curl Test Server workflow finished."
-          echo "   - Anthropic Claude / Google Gemini / OpenAI ChatGPT 엔드포인트에 대해 정식 URL로 POST 시도했습니다."
-          echo "   - API 키는 헤더로만 전달하고 로그 출력은 [MASKED] 처리했습니다."
-          echo "   - 각 호출 결과(status_code, headers 일부, body 일부, usage 추출 시도)를 .github/echo_logs/*_* 아래에 저장했습니다."
-          echo "   - 서비스별 status.log (claude_api / gemini_api / openai_api / dr_center / iso_builder)도 갱신했습니다."
-          echo "   - DR 백업 계획과 ISO 매니페스트 템플릿을 생성했습니다."
-          echo "   - echo_logs, echo_artifacts, echo_services, echo_perm 전체를 아티팩트로 업로드했습니다."
-          echo "   - 이 단계는 항상 성공으로 종료합니다."
+          echo "✅ [FINAL] AI API DR/Audit workflow finished."
+          echo "   - run_mode=${{ github.event.inputs.run_mode }}:"
+          echo "       lite=외부 호출 스킵(비용 0, 모의용)"
+          echo "       full-safe=실제 호출 1회씩 (기본)"
+          echo "       full=full-safe와 동일하게 호출하되 향후 확장용 태그"
+          echo "   - Anthropic / Gemini / OpenAI 각각 status_code, severity, summary 기록."
+          echo "   - status.log에 severity=CRITICAL_AUTH / LIMIT_QUOTA / SERVER_ERROR 등급화해 저장."
+          echo "   - body.sanitized.json 으로 민감정보 마스킹된 응답 버전 생성."
+          echo "   - replay.sh 생성: DR 복구/재현 명령어와 chmod 복원 가이드 포함."
+          echo "   - checksums.txt 생성: 핵심 산출물 sha256 해시 체인 기록."
+          echo "   - health.log에 DNS/TLS/응답 메타 기록."
+          echo "   - index.md에 복구 순서, 에스컬레이션 절차(GitHub 컨텍스트 포함)까지 문서화."
+          echo "   - 오래된 로그(7일 초과)는 자동 삭제."
+          echo "   - 선택적으로 RUN_COMMIT_SUMMARY=true면 요약 상태를 repo에 커밋(민감본 제외)."
+          echo "   - 마지막 단계는 항상 성공으로 종료합니다."
           echo "DONE."
