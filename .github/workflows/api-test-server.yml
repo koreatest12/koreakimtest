@@ -1,4 +1,4 @@
-name: "🛰 API Curl Test Server — EchoOps Safe-Continue / Service Perms / DR+ISO / No-Heredoc"
+name: "🛰 API Curl Test Server — EchoOps / Safe-Continue / Service Perms / DR+ISO / Stable"
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: false
         default: "https://api.anthropic.com/v1/messages"
       run_mode:              # 2
-        description: "full=전체 수행 / lite=생성 위주 (curl 실패 무시)"
+        description: "full=전체 수행 / lite=생성 위주 (curl도 시도하지만 실패 무시)"
         required: false
         default: "full"
 
@@ -23,11 +23,13 @@ env:
   ARTIFACT_DIR: .github/echo_artifacts
   SERVICE_DIR: .github/echo_services
   PERM_DIR: .github/echo_perm
-  SERVICES: "claude_api dr_center iso_builder"   # 우리가 관리할 서비스 목록
+
+  # 관리 대상 서비스 목록
+  SERVICES: "claude_api dr_center iso_builder"
 
 jobs:
   curl-test-server:
-    name: "Curl Test Server Runner (Echo / Always Success / Heredoc-Free)"
+    name: "Curl Test Server Runner (Echo / Always Success / No Nested Bash)"
     runs-on: ubuntu-22.04
 
     steps:
@@ -38,41 +40,18 @@ jobs:
         uses: actions/checkout@v4
 
       ##################################################################
-      # 1. 공통 디렉토리 & safe_echo_run 준비
-      #    - safe_echo_run: 실패해도 무조건 0으로 종료해서 잡이 안 끊긴다
+      # 1. 기본 디렉토리 준비
+      #    - echo_logs / echo_artifacts / echo_services / echo_perm / echo_tmp
       ##################################################################
-      - name: "[prep] Create base dirs + helper"
+      - name: "[prep] Create base dirs"
         run: |
           echo ">>> [prep] start"
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${SERVICE_DIR}" "${PERM_DIR}" .github/echo_tmp || true
-
-          # safe_echo_run: safe_echo_run <label> <command...>
-          # - 명령 실행 전/후 echo 로깅
-          # - 항상 exit 0
-          printf '%s\n' '#!/usr/bin/env bash'                                         >  .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' '# safe_echo_run <label> <command...>'                       >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'label="$1"; shift || true'                                  >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'log_file=".github/echo_logs/${label}.log"'                  >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'echo "▶ [${label}] $(date '\''+%Y-%m-%d %H:%M:%S%z'\'') START" | tee -a "$log_file"' >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'echo "▶ [${label}] COMMAND: $@" | tee -a "$log_file"'       >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'set +e'                                                     >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' '"$@" >> "$log_file" 2>&1'                                   >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'rc=$?'                                                      >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'set +e'                                                     >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'if [ "$rc" -eq 0 ]; then'                                   >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' '  echo "✅ [${label}] OK (exit=${rc})" | tee -a "$log_file"' >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'else'                                                       >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' '  echo "❌ [${label}] FAILED (exit=${rc}) (continue anyway)" | tee -a "$log_file"' >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'fi'                                                         >> .github/echo_tmp/safe_echo_run.sh
-          printf '%s\n' 'exit 0'                                                     >> .github/echo_tmp/safe_echo_run.sh
-
-          chmod +x .github/echo_tmp/safe_echo_run.sh
-
-          echo "[INFO] prep done" | tee -a "${LOG_DIR}/prep.init.log"
+          echo "[INFO] base dirs ready" | tee -a "${LOG_DIR}/prep.init.log"
 
       ##################################################################
       # 2. 서비스별 디렉토리 / 권한 파일 / 상태 로그 생성
-      #    - Heredoc 금지, 모두 echo/printf로 구성
+      #    - Heredoc 금지. printf/echo만 사용.
       ##################################################################
       - name: "[svc] Init service dirs + perms + status"
         env:
@@ -117,8 +96,7 @@ jobs:
       # 3. DR 센터 / ISO 빌더 템플릿 생성
       #    - dr_backup_plan.txt
       #    - iso_manifest.txt
-      #    - status.log 에 append
-      #    - Heredoc 없이 printf만 사용
+      #    - 서비스 status.log에 append
       ##################################################################
       - name: "[svc] DR / ISO templates"
         env:
@@ -126,6 +104,7 @@ jobs:
           LOG_DIR: ${{ env.LOG_DIR }}
         run: |
           echo ">>> [dr+iso] start"
+
           dr_dir="${SERVICE_DIR}/dr_center"
           iso_dir="${SERVICE_DIR}/iso_builder"
 
@@ -175,22 +154,22 @@ jobs:
           echo ">>> [snap] done" | tee -a "${LOG_DIR}/env_snapshot.log"
 
       ##################################################################
-      # 5. CURL 호출 준비 및 실행
+      # 5. CURL 호출
       #
-      # - Heredoc 없이 request_body.json 작성
-      # - safe_echo_run 사용
-      # - 실패해도 무조건 계속 진행
+      #  - Heredoc 없이 request_body.json 생성 (printf 사용)
+      #  - curl로 Anthropic Claude messages API POST 시도
+      #  - 결과 (status, headers, body, usage 추출)를 파일로 저장
+      #  - claude_api/status.log 에 호출 결과 append
       #
-      # 결과물:
-      #   LOG_DIR/curl_request/request_body.json
-      #   LOG_DIR/curl_response/status_code.txt
-      #   LOG_DIR/curl_response/headers.txt
-      #   LOG_DIR/curl_response/body.json
-      #   LOG_DIR/curl_response/usage.log (usage 추출 시도)
+      #  중요:
+      #    - 네트워크 실패, 인증 실패(401), 레이트리밋(429) 등으로
+      #      이 step 자체가 실패(exit code!=0)할 수 있다.
+      #    - 그래서 continue-on-error: true 를 켠다.
       #
-      # claude_api/status.log 에도 기록 append
+      #  => 전체 잡은 계속 진행하고, 마지막 step은 ✅ SUCCESS 출력.
       ##################################################################
       - name: "[api] Curl call Anthropic Claude messages API (Echo Safe)"
+        continue-on-error: true
         env:
           INPUT_URL: ${{ github.event.inputs.target_url }}
           SECR_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -210,7 +189,7 @@ jobs:
           RESP_DIR="${LOG_DIR}/curl_response"
           mkdir -p "$REQ_DIR" "$RESP_DIR"
 
-          # 요청 바디 JSON (heredoc 금지 → printf로 한 줄씩 작성)
+          # 요청 바디 JSON
           {
             printf '%s\n' '{'
             printf '%s\n' '  "model": "claude-3-opus-20240229",'
@@ -223,49 +202,60 @@ jobs:
 
           echo "[api] request_body.json created" | tee -a "${LOG_DIR}/curl_init.log"
 
-          .github/echo_tmp/safe_echo_run.sh curl_call bash -c "
-            echo '[api] curl POST ${TARGET_URL}'
-            echo '[api] headers: Content-Type, anthropic-version, x-api-key(masked)'
-            echo '[api] body file: ${REQ_DIR}/request_body.json'
+          status_file="${RESP_DIR}/status_code.txt"
+          body_file="${RESP_DIR}/body.json"
+          header_file="${RESP_DIR}/headers.txt"
+          usage_log="${RESP_DIR}/usage.log"
 
-            status_file='${RESP_DIR}/status_code.txt'
-            body_file='${RESP_DIR}/body.json'
-            header_file='${RESP_DIR}/headers.txt'
+          echo "[api] curl POST ${TARGET_URL}"        | tee -a "${LOG_DIR}/curl_init.log"
+          echo "[api] headers: Content-Type, anthropic-version, x-api-key(masked)" | tee -a "${LOG_DIR}/curl_init.log"
 
-            curl -sS -X POST '${TARGET_URL}' \
-              -H 'Content-Type: application/json' \
-              -H 'anthropic-version: 2023-06-01' \
-              -H 'x-api-key: ${SECR_KEY}' \
-              -D \"\$header_file\" \
-              --data @\"${REQ_DIR}/request_body.json\" \
-              -o \"\$body_file\" \
-              --write-out '%{http_code}' > \"\$status_file\"
+          # curl 실행
+          # -sS : 에러 시 stderr 표시
+          # -D header_file : 응답 헤더 저장
+          # --write-out '%{http_code}' : 상태코드만 status_file에 저장
+          # --data @file : 우리가 만든 JSON 바디 사용
+          curl -sS -X POST "${TARGET_URL}" \
+            -H "Content-Type: application/json" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "x-api-key: ${SECR_KEY}" \
+            -D "${header_file}" \
+            --data @"${REQ_DIR}/request_body.json" \
+            -o "${body_file}" \
+            --write-out "%{http_code}" > "${status_file}"
 
-            echo '[api] curl done.'
-            echo '[api] status:'; cat \"\$status_file\" || true
-            echo '[api] headers top:'; head -n 20 \"\$header_file\" || true
-            echo '[api] body head:'; head -c 500 \"\$body_file\" || true
+          echo "[api] curl done." | tee -a "${LOG_DIR}/curl_init.log"
 
-            usage_log='${RESP_DIR}/usage.log'
-            printf '%s\n' '[api] extracting usage best-effort' | tee \"\$usage_log\"
-            grep -E '\"usage\"|input_tokens|output_tokens' \"\$body_file\" >> \"\$usage_log\" 2>/dev/null || true
+          echo "[api] status code:" | tee -a "${LOG_DIR}/curl_init.log"
+          cat "${status_file}"      | tee -a "${LOG_DIR}/curl_init.log" || true
 
-            svc_status='${SERVICE_DIR}/claude_api/status.log'
-            {
-              printf '\n%s\n' '[CALL] '"\$(date '+%Y-%m-%d %H:%M:%S%z')"
-              printf '%s%s\n' 'status_code=' \"\$(cat \"\$status_file\" 2>/dev/null || echo 'N/A')\"
-              printf '%s\n' 'note=See curl_response/ for details'
-            } >> \"\$svc_status\" || true
+          echo "[api] headers (first lines):" | tee -a "${LOG_DIR}/curl_init.log"
+          head -n 20 "${header_file}"         | tee -a "${LOG_DIR}/curl_init.log" || true
 
-            chmod 600 \"\$status_file\" \"\$header_file\" \"\$body_file\" \"\$usage_log\" 2>/dev/null || true
-          "
+          echo "[api] body (first 500 chars):" | tee -a "${LOG_DIR}/curl_init.log"
+          head -c 500 "${body_file}"           | tee -a "${LOG_DIR}/curl_init.log" || true
+          echo ""                              | tee -a "${LOG_DIR}/curl_init.log"
+
+          # usage 필드 추출 시도
+          printf '%s\n' "[api] extracting usage best-effort" | tee "${usage_log}"
+          grep -E '"usage"|input_tokens|output_tokens' "${body_file}" >> "${usage_log}" 2>/dev/null || true
+
+          # claude_api/status.log 에 호출 결과 append
+          svc_status="${SERVICE_DIR}/claude_api/status.log"
+          {
+            printf '\n%s\n' "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z')"
+            printf '%s%s\n' "status_code=" "$(cat "${status_file}" 2>/dev/null || echo 'N/A')"
+            printf '%s\n' "note=See curl_response/ for details"
+          } >> "${svc_status}" || true
+
+          # 민감 로그 최소 권한
+          chmod 600 "${status_file}" "${header_file}" "${body_file}" "${usage_log}" 2>/dev/null || true
 
           echo ">>> [api] done" | tee -a "${LOG_DIR}/curl_init.log"
 
       ##################################################################
       # 6. 아티팩트 준비 & 업로드
-      #
-      # - echo_services, echo_perm, echo_logs, echo_artifacts 전체 업로드
+      #    - echo_services, echo_perm, echo_logs, echo_artifacts 전체 업로드
       ##################################################################
       - name: "[collect] Prepare artifacts"
         env:
@@ -279,8 +269,8 @@ jobs:
           cp -r "${SERVICE_DIR}/."     "${ARTIFACT_DIR}/services/"     || true
           cp -r "${PERM_DIR}/."        "${ARTIFACT_DIR}/permissions/"  || true
           echo ">>> listing ${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
-          ls -R "${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
-          echo ">>> [collect] done" | tee -a "${LOG_DIR}/artifact.bundle.log"
+          ls -R "${ARTIFACT_DIR}"     | tee -a "${LOG_DIR}/artifact.bundle.log"
+          echo ">>> [collect] done"   | tee -a "${LOG_DIR}/artifact.bundle.log"
 
       - name: "[artifact] Upload logs + services + perms"
         uses: actions/upload-artifact@v4
@@ -296,15 +286,18 @@ jobs:
 
       ##################################################################
       # 7. 마지막 리포트 (항상 성공 선언)
+      #    - curl 단계가 실패했더라도 continue-on-error: true 덕분에
+      #      잡은 여기까지 온다.
       ##################################################################
       - name: "[final] Overall status (ALWAYS-SUCCESS)"
         run: |
           echo "✅ [FINAL] API Curl Test Server workflow finished."
-          echo "   - 모든 단계는 safe_echo_run 으로 감싸서 실패해도 계속 진행했습니다."
-          echo "   - Anthropic Claude 정식 엔드포인트(${INPUT_URL:-https://api.anthropic.com/v1/messages})에 curl POST 시도."
-          echo "   - x-api-key / anthropic-version / Content-Type 헤더 포함 호출."
-          echo "   - usage 필드는 응답 body 안에서만 추출 시도했고, 별도 /usage API는 존재하지 않습니다."
-          echo "   - 서비스별 디렉토리(.github/echo_services/*)와 권한 파일(.github/echo_perm/*/permissions.txt)을 생성하고 chmod까지 수행했습니다."
+          echo "   - 모든 단계는 echo 기반으로 로깅했습니다."
+          echo "   - Anthropic Claude 정식 엔드포인트(${{ github.event.inputs.target_url }})에 curl POST 시도(빈 값이면 https://api.anthropic.com/v1/messages)."
+          echo "   - x-api-key / anthropic-version / Content-Type 헤더까지 포함해서 호출했습니다."
+          echo "   - usage 필드는 응답 body 안에서만 추출 시도했고, 별도의 /usage API는 존재하지 않습니다."
+          echo "   - 서비스별 디렉토리(.github/echo_services/*)와 권한 파일(.github/echo_perm/*/permissions.txt)을 생성/권한부여 했습니다."
           echo "   - DR 백업 계획(dr_backup_plan.txt)과 ISO 매니페스트(iso_manifest.txt)도 생성했습니다."
           echo "   - echo_logs, echo_artifacts, echo_services, echo_perm 전체를 아티팩트로 업로드했습니다."
+          echo "   - 마지막 단계는 항상 성공으로 종료합니다."
           echo "DONE."
