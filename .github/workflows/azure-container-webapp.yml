@@ -133,7 +133,7 @@ jobs:
           exit 0
 
       - name: Upload build logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: build-logs
           path: |
@@ -256,7 +256,7 @@ jobs:
           exit 0
 
       - name: Upload deploy logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: deploy-logs
           path: |

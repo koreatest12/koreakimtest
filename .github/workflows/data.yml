@@ -1161,7 +1161,7 @@ jobs:
       # 11. Artifact 업로드
       #######################################################################
       - name: 📦 실행 산출물 업로드 (logs / quality / source / snapshot 등)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: teradata-run-${{ github.run_id }}
           path: |
