@@ -1,760 +1,565 @@
-name: "🛰 AI API DR/Audit — Claude+Gemini+OpenAI / EchoOps / DR+ISO / Replay / Severity"
+name: "Dependency Security Check + AutoUpgrade + Release Publish"
 
 on:
+  schedule:
+    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC
   workflow_dispatch:
-    inputs:
-      target_url:            # 1
-        description: "우선 Anthropic 호출 URL (빈값이면 기본 Claude messages)"
-        required: false
-        default: "https://api.anthropic.com/v1/messages"
-      run_mode:              # 2
-        description: "lite=완전 모의 / full-safe=실제 호출 / full=실제 호출(확장용)"
-        required: false
-        default: "full-safe"
+  pull_request:
+    paths:
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/requirements.txt"
+      - ".github/workflows/dependency-check.yml"
+  push:
+    branches: [ "main" ]
+    paths:
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/requirements.txt"
 
 permissions:
-  contents: write
-  actions: read
+  contents: write         # 릴리즈 생성/업로드에 필요
+  pull-requests: write
   security-events: read
+  id-token: write
+  packages: write
 
 env:
   TZ: Asia/Seoul
-  LOG_DIR: .github/echo_logs
-  ARTIFACT_DIR: .github/echo_artifacts
-  SERVICE_DIR: .github/echo_services
-  PERM_DIR: .github/echo_perm
-
-  # 관리 대상 서비스 목록
-  # - claude_api   : Anthropic Claude
-  # - gemini_api   : Google Gemini
-  # - openai_api   : OpenAI ChatGPT
-  # - dr_center    : DR/백업 정책
-  # - iso_builder  : ISO 스냅샷 정책
-  SERVICES: "claude_api gemini_api openai_api dr_center iso_builder"
-
-  # 실행 추적용 RUN_ID (GitHub에서 제공하는 run_id/run_attempt를 조합)
-  RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
-
-  # 안전 커밋 여부 (요약 정보만 repo에 커밋/푸시). "true"로 바꾸면 작동.
-  RUN_COMMIT_SUMMARY: "false"
+  REPORT_DIR: .github/sec_report
+  LOG_DIR: .github/sec_report/logs
+  ARTIFACT_DIR: .github/sec_report/artifacts
 
 jobs:
-  curl-test-server:
-    name: "AI API DR/Audit Runner (Echo / Severity / Replay / Always Success)"
-    runs-on: ubuntu-22.04
+
+  ##########################################################################
+  # Node.js audit + upgrade
+  ##########################################################################
+  node-security:
+    name: "Node.js Dependency Check + Upgrade"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: anthropic-cost-tracker/nodejs
+            safe: anthropic-cost-tracker-nodejs
+          - project: mcp-hello-js
+            safe: mcp-hello-js
+          - project: mcp-fs
+            safe: mcp-fs
 
     steps:
-      ##################################################################
-      # 0. 리포지토리 체크아웃
-      ##################################################################
-      - name: "[prep] Checkout repository"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      ##################################################################
-      # 1. 사전 정리 (오래된 로그 삭제, 기본 디렉토리 준비)
-      #    - 7일 지난 로그 제거
-      ##################################################################
-      - name: "[prep] Init dirs & cleanup old logs (>7d)"
-        env:
-          LOG_DIR: ${{ env.LOG_DIR }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-          PERM_DIR: ${{ env.PERM_DIR }}
+      - name: Prepare dirs and helper script (no heredoc)
+        id: prep_node
+        shell: bash
         run: |
-          echo ">>> [prep] start"
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${SERVICE_DIR}" "${PERM_DIR}" .github/echo_tmp || true
-          # 오래된 로그 정리 (7일 경과 파일 삭제) - 실패 무시
-          find "${LOG_DIR}" -type f -mtime +7 -exec rm -f {} \; 2>/dev/null || true
-          echo "[INFO] base dirs ready (RUN_ID=${RUN_ID})" | tee -a "${LOG_DIR}/prep.init.log"
+          set -Eeo pipefail
 
-      ##################################################################
-      # 2. 서비스별 디렉토리 / 권한 파일 / status.log 생성
-      ##################################################################
-      - name: "[svc] Init service dirs + perms + status"
-        env:
-          SERVICES: ${{ env.SERVICES }}
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-          PERM_DIR: ${{ env.PERM_DIR }}
-          LOG_DIR: ${{ env.LOG_DIR }}
-          RUN_ID: ${{ env.RUN_ID }}
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+
+          HELPER_PATH="${REPORT_DIR}/helpers.sh"
+
+          printf '%s\n' '#!/usr/bin/env bash'                            >  "$HELPER_PATH"
+          printf '%s\n' 'set -Eeo pipefail'                               >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"' >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'safe_run() {'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  local label="$1"; shift || true'              >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'     >> "$HELPER_PATH"
+          printf '%s\n' '  echo "▶ [$label] $(date \"+%Y-%m-%d %H:%M:%S%z\") START" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '  if \"$@\" >> \"$logfile\" 2>&1 ; then'        >> "$HELPER_PATH"
+          printf '%s\n' '    echo \"✅ [$label] OK\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '    return 0'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  else'                                         >> "$HELPER_PATH"
+          printf '%s\n' '    local rc=$?'                                >> "$HELPER_PATH"
+          printf '%s\n' '    echo \"❌ [$label] FAILED exit=${rc}\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '    return $rc'                                 >> "$HELPER_PATH"
+          printf '%s\n' '  fi'                                           >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'apt_fix() {'                                    >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile=\"${LOG_BASE}/apt.fix.log\"'    >> "$HELPER_PATH"
+          printf '%s\n' '  echo \"[fix] apt_fix start\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo dpkg --configure -a || true'             >> "$HELPER_PATH"
+          printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+
+          chmod +x "$HELPER_PATH"
+
+          echo "Node scan target: ${{ matrix.project }} (safe=${{ matrix.safe }})" | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
+
+      - name: Check project/package.json
+        id: node_exists
+        shell: bash
         run: |
-          echo ">>> [svc] start"
-          for svc in $SERVICES; do
-            svc_dir="${SERVICE_DIR}/${svc}"
-            svc_perm="${PERM_DIR}/${svc}"
-            echo "[svc:$svc] create dirs ${svc_dir}, ${svc_perm}"
-            mkdir -p "$svc_dir" "$svc_perm" || true
-
-            # README.md
-            {
-              printf '%s\n' "# Service: ${svc}"
-              printf '%s\n' "RUN_ID=${RUN_ID}"
-            } > "${svc_dir}/README.md"
-
-            # status.log
-            {
-              printf '%s\n' "[INIT] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID} service=${svc} created"
-            } > "${svc_dir}/status.log"
-
-            # permissions.txt
-            {
-              printf '%s\n' "[PERMISSIONS]"
-              printf '%s\n' "service=${svc}"
-              printf '%s\n' "owner=runner"
-              printf '%s\n' "access=rw"
-              printf '%s\n' "note=자동 생성된 권한/접근 제어 템플릿"
-              printf '%s\n' "run_id=${RUN_ID}"
-            } > "${svc_perm}/permissions.txt"
-
-            # 최소 권한
-            chmod 600 "${svc_perm}/permissions.txt" || true
-            chmod 640 "${svc_dir}/status.log" || true
-            chmod 644 "${svc_dir}/README.md" || true
-
-            echo "[svc:$svc] files created + chmod applied (RUN_ID=${RUN_ID})" | tee -a "${LOG_DIR}/svc.init.log"
-          done
-          echo ">>> [svc] done" | tee -a "${LOG_DIR}/svc.init.log"
-
-      ##################################################################
-      # 3. DR 센터 / ISO 빌더 템플릿 생성 + 무결성 체크
-      ##################################################################
-      - name: "[svc] DR / ISO templates (+ integrity)"
-        env:
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-          LOG_DIR: ${{ env.LOG_DIR }}
-          RUN_ID: ${{ env.RUN_ID }}
-        run: |
-          echo ">>> [dr+iso] start"
-          dr_dir="${SERVICE_DIR}/dr_center"
-          iso_dir="${SERVICE_DIR}/iso_builder"
-
-          # DR 백업 플랜
-          {
-            printf '%s\n' "[DR_BACKUP_PLAN]"
-            printf '%s\n' "run_id=${RUN_ID}"
-            printf '%s\n' "retention_days=1"
-            printf '%s\n' "description=하루 단위 DR 데이터센터 보관 정책"
-            printf '%s\n' "snapshot_policy=nightly+on-demand"
-          } > "${dr_dir}/dr_backup_plan.txt"
-
-          # ISO 매니페스트
-          {
-            printf '%s\n' "[ISO_MANIFEST]"
-            printf '%s\n' "run_id=${RUN_ID}"
-            printf '%s\n' "image_name=finops-snapshot.iso"
-            printf '%s\n' "includes=logs,configs,sql,artifacts"
-            printf '%s\n' "note=이 파일은 ISO 이미지에 포함할 자원을 정의하는 템플릿입니다."
-          } > "${iso_dir}/iso_manifest.txt"
-
-          chmod 640 "${dr_dir}/dr_backup_plan.txt" || true
-          chmod 640 "${iso_dir}/iso_manifest.txt" || true
-
-          # status.log append
-          {
-            printf '\n%s\n' "[DR_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID} backup plan prepared"
-          } >> "${dr_dir}/status.log"  || true
-          {
-            printf '\n%s\n' "[ISO_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID} iso manifest prepared"
-          } >> "${iso_dir}/status.log" || true
-
-          # 무결성 (크기 + sha256)
-          echo "--- integrity check ---" | tee -a "${LOG_DIR}/dr_iso.init.log"
-          wc -c "${dr_dir}/dr_backup_plan.txt" "${iso_dir}/iso_manifest.txt" | tee -a "${LOG_DIR}/dr_iso.init.log" || true
-          sha256sum "${dr_dir}/dr_backup_plan.txt" "${iso_dir}/iso_manifest.txt" | tee -a "${LOG_DIR}/dr_iso.init.log" || true
-
-          echo ">>> [dr+iso] done" | tee -a "${LOG_DIR}/dr_iso.init.log"
-
-      ##################################################################
-      # 4. 환경/권한/런 정보 스냅샷
-      ##################################################################
-      - name: "[snap] Environment & permissions snapshot"
-        env:
-          LOG_DIR: ${{ env.LOG_DIR }}
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          PERM_DIR: ${{ env.PERM_DIR }}
-          RUN_ID: ${{ env.RUN_ID }}
-        run: |
-          echo ">>> [snap] start"
-          {
-            echo "===== ENV SNAPSHOT ====="
-            date
-            uname -a
-            echo "--- df -h ---"
-            df -h
-            echo "--- env | sort ---"
-            env | sort
-            echo "--- permissions check (top dirs) ---"
-            ls -ld "${LOG_DIR}" "${ARTIFACT_DIR}" "${SERVICE_DIR}" "${PERM_DIR}"
-            echo "--- service tree depth 2 (mode/owner/group) ---"
-            find "${SERVICE_DIR}" -maxdepth 2 -type f -printf "%M %u %g %p\n" 2>/dev/null
-            echo "--- GitHub Context ---"
-            echo "actor=${{ github.actor }}"
-            echo "repo=${{ github.repository }}"
-            echo "ref=${{ github.ref }}"
-            echo "sha=${{ github.sha }}"
-            echo "ref_name=${{ github.ref_name }}"
-            echo "event_name=${{ github.event_name }}"
-            echo "triggering_actor=${{ github.triggering_actor }}"
-            echo "workflow=${{ github.workflow }}"
-            echo "run_id=${{ github.run_id }}"
-            echo "run_attempt=${{ github.run_attempt }}"
-            echo "RUN_ID=${RUN_ID}"
-            echo "run_mode=${{ github.event.inputs.run_mode }}"
-          } | tee "${LOG_DIR}/env_snapshot.log"
-          echo ">>> [snap] done" | tee -a "${LOG_DIR}/env_snapshot.log"
-
-      ##################################################################
-      # 5. health 체크 (DNS/TLS/latency 스타일 메타)
-      #    - 각 주요 API 도메인에 대한 기본 연결성 정보를 health.log에 남김
-      ##################################################################
-      - name: "[health] basic connectivity metadata"
-        continue-on-error: true
-        env:
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-          LOG_DIR: ${{ env.LOG_DIR }}
-        run: |
-          echo ">>> [health] start"
-          # 대상들
-          CLAUDE_HOST="api.anthropic.com"
-          GEMINI_HOST="generativelanguage.googleapis.com"
-          OPENAI_HOST="api.openai.com"
-
-          for host in "$CLAUDE_HOST" "$GEMINI_HOST" "$OPENAI_HOST"; do
-            svc_name="openai_api"
-            if [ "$host" = "$CLAUDE_HOST" ]; then svc_name="claude_api"; fi
-            if [ "$host" = "$GEMINI_HOST" ]; then svc_name="gemini_api"; fi
-
-            health_file="${SERVICE_DIR}/${svc_name}/health.log"
-
-            echo "[HEALTH] $(date '+%Y-%m-%d %H:%M:%S%z') host=${host}" >> "${health_file}"
-
-            # DNS 해석 시도
-            getent hosts "$host" >> "${health_file}" 2>&1 || echo "dns_failed=1 host=${host}" >> "${health_file}"
-
-            # TLS 핸드셰이크/헤더 프리뷰 (HEAD 요청)
-            /usr/bin/time -f "time_total_sec=%E" curl -sS -I "https://${host}" >> "${health_file}" 2>&1 || echo "tls_head_failed=1 host=${host}" >> "${health_file}"
-
-            echo "---" >> "${health_file}"
-
-            chmod 640 "${health_file}" || true
-          done
-
-          echo ">>> [health] done" | tee -a "${LOG_DIR}/health.init.log"
-
-      ##################################################################
-      # 6. 외부 API 호출 블록 (Claude / Gemini / OpenAI)
-      #
-      # run_mode 동작:
-      #   lite       -> 모든 외부 호출 스킵, 더미 응답만 기록
-      #   full-safe  -> 실제 호출 1회씩 실행
-      #   full       -> 실제 호출 1회씩 실행 (full-safe와 동일 동작, 단 로그/리포트에 run_mode 표시)
-      #
-      # 각 API 호출 후:
-      #   - status_code.txt
-      #   - headers.txt
-      #   - body.json
-      #   - body.sanitized.json (마스킹)
-      #   - usage.log
-      #   - severity 평가 후 status.log에 기록
-      #   - checksums later에 포함
-      #
-      ##################################################################
-
-      - name: "[api] Call Anthropic Claude / Gemini / OpenAI (with severity, sanitized, skip-by-mode)"
-        continue-on-error: true
-        env:
-          RUN_MODE: ${{ github.event.inputs.run_mode }}
-          INPUT_URL: ${{ github.event.inputs.target_url }}
-          RUN_ID: ${{ env.RUN_ID }}
-          LOG_DIR: ${{ env.LOG_DIR }}
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-
-          SECR_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GEM_KEY:  ${{ secrets.GEMINI_API_KEY }}
-          OPENAI_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          echo ">>> [api] start (RUN_MODE=${RUN_MODE}, RUN_ID=${RUN_ID})"
-
-          # 공통 함수처럼 쓸 헬퍼(반복 로직) 형태: bash에선 그냥 블록으로 복붙 방식 사용
-          # 우리는 실제로 반복 구현 (Claude / Gemini / OpenAI 순서)
-
-          ##############################################################
-          # 내부 헬퍼: result_summary + severity 계산 함수 흉내
-          # code -> summary/severity
-          ##############################################################
-          classify_severity () {
-            local code="$1"
-            local summary="unknown"
-            local sev="UNKNOWN"
-            if [ "$code" = "200" ] || [ "$code" = "201" ]; then
-              summary="OK-response"
-              sev="OK"
-            elif [ "$code" = "401" ] || [ "$code" = "403" ]; then
-              summary="AUTH-FAIL (check key/permission)"
-              sev="CRITICAL_AUTH"
-            elif [ "$code" = "429" ]; then
-              summary="RATE-LIMIT or QUOTA"
-              sev="LIMIT_QUOTA"
-            elif [ "$code" = "N/A" ]; then
-              summary="NO-RESPONSE (network/timeout?)"
-              sev="NO_RESPONSE"
-            else
-              # 5xx 등
-              case "$code" in
-                5*) summary="SERVER-ERROR"; sev="SERVER_ERROR" ;;
-                4*) summary="CLIENT-ERROR"; sev="CLIENT_ERROR" ;;
-              esac
-            fi
-            echo "${summary}:::${sev}"
-          }
-
-          ##############################################################
-          # 헬퍼: 호출 or 스킵 공통 처리
-          # params:
-          #   $1 : svc_name (예: claude_api)
-          #   $2 : target_url
-          #   $3 : header_cmds   (줄바꿈으로 나열된 curl -H 들)
-          #   $4 : body_json     (printf로 만들어둘 파일경로)
-          #   $5 : req_dir
-          #   $6 : resp_dir
-          ##############################################################
-          do_call () {
-            local svc_name="$1"
-            local tgt="$2"
-            local hdrs="$3"
-            local body_file_in="$4"
-            local req_dir="$5"
-            local resp_dir="$6"
-
-            mkdir -p "${req_dir}" "${resp_dir}"
-
-            local status_file="${resp_dir}/status_code.txt"
-            local body_file="${resp_dir}/body.json"
-            local body_sanit="${resp_dir}/body.sanitized.json"
-            local header_file="${resp_dir}/headers.txt"
-            local usage_log="${resp_dir}/usage.log"
-            local svc_status="${SERVICE_DIR}/${svc_name}/status.log"
-
-            echo "[api:${svc_name}] mode=${RUN_MODE} target=${tgt}"
-
-            if [ "${RUN_MODE}" = "lite" ]; then
-              # 스킵: 더미 응답만 넣는다
-              printf '%s\n' "N/A" > "${status_file}"
-              printf '%s\n' '{"lite_mode": true, "note": "no external call performed"}' > "${body_file}"
-              printf '%s\n' "[lite mode skip]" > "${header_file}"
-              printf '%s\n' "[lite mode skip usage]" > "${usage_log}"
-              printf '%s\n' '{"lite_mode": true}' > "${body_sanit}"
-            else
-              # 실제 curl 호출
-              # hdrs 는 -H 라인들을 그대로 eval-safe하게 사용해야 하므로 while read
-              # 우리는 임시 파일에 curl 명령을 조립해서 sh로 실행
-              local curl_script="${req_dir}/curl_do.sh"
-              {
-                printf '%s' "curl -sS -X POST \"${tgt}\" "
-                echo "$hdrs" | while read hline; do
-                  [ -n "$hline" ] && printf '%s' "$hline "
-                done
-                printf '%s' "-D \"${header_file}\" "
-                printf '%s' "--data @\"${body_file_in}\" "
-                printf '%s' "-o \"${body_file}\" "
-                printf '%s\n' "--write-out \"%{http_code}\" > \"${status_file}\""
-              } > "${curl_script}"
-
-              chmod +x "${curl_script}" || true
-              echo "[api:${svc_name}] executing curl..." | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
-              sh "${curl_script}" 2>> "${LOG_DIR}/curl_init_${svc_name}.log" || true
-
-              echo "[api:${svc_name}] curl done." | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
-
-              # usage 추출 (best-effort)
-              printf '%s\n' "[api:${svc_name}] extracting usage best-effort" | tee "${usage_log}"
-              grep -E '"usage"|input_tokens|output_tokens|prompt_tokens|completion_tokens|total_tokens' "${body_file}" >> "${usage_log}" 2>/dev/null || true
-
-              # body.sanitized.json 생성 (민감 Authorization / Bearer / api_key 등 마스킹)
-              # 단순 치환 기반
-              sed -E 's/"x-api-key"[[:space:]]*:[[:space:]]*"[^"]*"/"x-api-key":"[MASKED]"/g; s/"Authorization"[[:space:]]*:[[:space:]]*"Bearer [^"]*"/"Authorization":"Bearer [MASKED]"/g' "${body_file}" > "${body_sanit}" 2>/dev/null || cp "${body_file}" "${body_sanit}" 2>/dev/null || true
-            fi
-
-            # status code
-            local code="N/A"
-            [ -f "${status_file}" ] && code="$(cat "${status_file}" 2>/dev/null || echo 'N/A')"
-
-            # severity / summary
-            local cinfo
-            cinfo="$(classify_severity "${code}")"
-            local summary="$(echo "${cinfo}" | cut -d':' -f1)"
-            local severity="$(echo "${cinfo}" | cut -d':' -f3)"
-
-            # short preview to log
-            echo "[api:${svc_name}] status=${code} summary=${summary} severity=${severity}" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
-            echo "[api:${svc_name}] headers first lines:" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
-            head -n 20 "${header_file}" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log" || true
-            echo "[api:${svc_name}] body first 500 chars:" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
-            head -c 500 "${body_file}" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log" || true
-            echo "" | tee -a "${LOG_DIR}/curl_init_${svc_name}.log"
-
-            # status.log append
-            {
-              printf '\n%s\n' "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z') run=${RUN_ID}"
-              printf '%s%s\n' "status_code=" "$code"
-              printf '%s\n' "result_summary=${summary}"
-              printf '%s\n' "severity=${severity}"
-              printf '%s\n' "note=See ${svc_name}_response/ for details"
-              printf '%s\n' "mode=${RUN_MODE}"
-            } >> "${svc_status}" || true
-
-            # 민감 로그 최소 권한
-            chmod 600 "${status_file}" "${header_file}" "${body_file}" "${usage_log}" 2>/dev/null || true
-            chmod 600 "${body_sanit}" 2>/dev/null || true
-          }
-
-          ##############################################################
-          # 6-1. Anthropic Claude
-          ##############################################################
-          CLAUDE_URL="${INPUT_URL}"
-          if [ -z "$CLAUDE_URL" ]; then
-            CLAUDE_URL="https://api.anthropic.com/v1/messages"
+          set -Eeo pipefail
+          if [ -d "${{ matrix.project }}" ] && [ -f "${{ matrix.project }}/package.json" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-          CLAUDE_REQ_DIR="${LOG_DIR}/claude_request"
-          CLAUDE_RESP_DIR="${LOG_DIR}/claude_response"
-          mkdir -p "${CLAUDE_REQ_DIR}"
-
-          {
-            printf '%s\n' '{'
-            printf '%s\n' '  "model": "claude-3-opus-20240229",'
-            printf '%s\n' '  "max_tokens": 64,'
-            printf '%s\n' '  "messages": ['
-            printf '%s\n' '    { "role": "user", "content": "안녕, 사용량 usage 필드 보여줘." }'
-            printf '%s\n' '  ]'
-            printf '%s\n' '}'
-          } > "${CLAUDE_REQ_DIR}/request_body.json"
-
-          # header list for Claude
-          CLAUDE_HDRS=$(printf '%s\n' \
-            "-H \"Content-Type: application/json\"" \
-            "-H \"anthropic-version: 2023-06-01\"" \
-            "-H \"x-api-key: ${SECR_KEY}\"" \
-          )
-
-          do_call "claude_api" "${CLAUDE_URL}" "${CLAUDE_HDRS}" "${CLAUDE_REQ_DIR}/request_body.json" "${CLAUDE_REQ_DIR}" "${CLAUDE_RESP_DIR}"
-
-          ##############################################################
-          # 6-2. Google Gemini
-          ##############################################################
-          GEM_URL="https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
-          GEM_REQ_DIR="${LOG_DIR}/gemini_request"
-          GEM_RESP_DIR="${LOG_DIR}/gemini_response"
-          mkdir -p "${GEM_REQ_DIR}"
-
-          {
-            printf '%s\n' '{'
-            printf '%s\n' '  "contents": [{'
-            printf '%s\n' '    "parts": [ { "text": "안녕, usage/토큰 정보 가능해?" } ]'
-            printf '%s\n' '  }]'
-            printf '%s\n' '}'
-          } > "${GEM_REQ_DIR}/request_body.json"
-
-          GEM_HDRS=$(printf '%s\n' \
-            "-H \"Content-Type: application/json\"" \
-            "-H \"x-goog-api-key: ${GEM_KEY}\"" \
-          )
-
-          do_call "gemini_api" "${GEM_URL}" "${GEM_HDRS}" "${GEM_REQ_DIR}/request_body.json" "${GEM_REQ_DIR}" "${GEM_RESP_DIR}"
-
-          ##############################################################
-          # 6-3. OpenAI ChatGPT
-          ##############################################################
-          OAI_URL="https://api.openai.com/v1/chat/completions"
-          OAI_REQ_DIR="${LOG_DIR}/openai_request"
-          OAI_RESP_DIR="${LOG_DIR}/openai_response"
-          mkdir -p "${OAI_REQ_DIR}"
-
-          {
-            printf '%s\n' '{'
-            printf '%s\n' '  "model": "gpt-4o-mini",'
-            printf '%s\n' '  "messages": ['
-            printf '%s\n' '    { "role": "user", "content": "안녕, usage 필드 보여줘." }'
-            printf '%s\n' '  ]'
-            printf '%s\n' '}'
-          } > "${OAI_REQ_DIR}/request_body.json"
-
-          OAI_HDRS=$(printf '%s\n' \
-            "-H \"Content-Type: application/json\"" \
-            "-H \"Authorization: Bearer ${OPENAI_KEY}\"" \
-          )
-
-          do_call "openai_api" "${OAI_URL}" "${OAI_HDRS}" "${OAI_REQ_DIR}/request_body.json" "${OAI_REQ_DIR}" "${OAI_RESP_DIR}"
-
-          echo ">>> [api] done (all vendors processed)" | tee -a "${LOG_DIR}/api.all.log"
-
-      ##################################################################
-      # 7. checksums.txt 생성 (무결성 체인)
-      #    - 핵심 결과 파일들에 대한 sha256sum 목록
-      ##################################################################
-      - name: "[integrity] Build global checksums.txt"
-        env:
-          LOG_DIR: ${{ env.LOG_DIR }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-        run: |
-          echo ">>> [integrity] start"
-          CHECK_FILE="${ARTIFACT_DIR}/checksums.txt"
-          mkdir -p "${ARTIFACT_DIR}" || true
-
-          # sha256sum for selected response artifacts if present
-          {
-            echo "# checksums for audit (sha256)"
-            date
-            echo "LOG_DIR=${LOG_DIR}"
-            find "${LOG_DIR}" -maxdepth 2 -type f \( -name "status_code.txt" -o -name "body.json" -o -name "body.sanitized.json" -o -name "usage.log" -o -name "dr_backup_plan.txt" -o -name "iso_manifest.txt" \) -print0 2>/dev/null | xargs -0 sha256sum 2>/dev/null || true
-          } > "${CHECK_FILE}"
-
-          chmod 644 "${CHECK_FILE}" || true
-          echo ">>> [integrity] done" | tee -a "${LOG_DIR}/integrity.init.log"
-
-      ##################################################################
-      # 8. replay.sh 생성 (재현 스크립트)
-      #    - 민감 키는 마스킹
-      #    - DR 복구 순서/권한 복구 절차/ISO 생성 힌트 포함
-      ##################################################################
-      - name: "[replay] Generate replay.sh for DR rehearsal"
-        env:
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-          PERM_DIR: ${{ env.PERM_DIR }}
-          RUN_ID: ${{ env.RUN_ID }}
-          RUN_MODE: ${{ github.event.inputs.run_mode }}
-        run: |
-          echo ">>> [replay] start"
-          REPLAY_FILE="${ARTIFACT_DIR}/replay.sh"
-          {
-            echo "#!/usr/bin/env bash"
-            echo "# Replay / DR rehearsal script"
-            echo "# RUN_ID=${RUN_ID}"
-            echo "# RUN_MODE=${RUN_MODE}"
-            echo "# (민감 키는 포함하지 않음. Authorization 등은 [MASKED])"
-            echo ""
-            echo "set -euo pipefail"
-            echo ""
-            echo "# 1. 기본 디렉토리 복구 예시"
-            echo "mkdir -p .github/echo_services .github/echo_perm .github/echo_logs .github/echo_artifacts || true"
-            echo ""
-            echo "# 2. 권한 복구 예시"
-            echo "find .github/echo_perm -type f -name permissions.txt -exec chmod 600 {} \\; || true"
-            echo "find .github/echo_services -type f -name status.log -exec chmod 640 {} \\; || true"
-            echo ""
-            echo "# 3. DR 정책/ISO 정책 파일 참고"
-            echo "echo '참고: .github/echo_services/dr_center/dr_backup_plan.txt'"
-            echo "echo '참고: .github/echo_services/iso_builder/iso_manifest.txt'"
-            echo ""
-            echo "# 4. API 재검증 curl 예시 (MASKED KEY)"
-            echo "curl -sS -X POST \"https://api.anthropic.com/v1/messages\" \\"
-            echo "  -H \"Content-Type: application/json\" \\"
-            echo "  -H \"anthropic-version: 2023-06-01\" \\"
-            echo "  -H \"x-api-key: [MASKED]\" \\"
-            echo "  --data '{\"model\":\"claude-3-opus-20240229\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}'"
-            echo ""
-            echo "# 5. severity 확인은 각 서비스 status.log 참고"
-            echo "grep -E \"severity=\" .github/echo_services/*/status.log || true"
-            echo ""
-            echo "# End of replay guidance"
-          } > "${REPLAY_FILE}"
-
-          chmod 755 "${REPLAY_FILE}" || true
-          echo ">>> [replay] done" | tee -a "${LOG_DIR}/replay.init.log"
-
-      ##################################################################
-      # 9. index.md 생성 (상세 리포트 + 에스컬레이션 매뉴얼)
-      #    - severity 요약 / 복구 절차 / 에스컬레이션 가이드 / GitHub 컨텍스트
-      ##################################################################
-      - name: "[report] Build index.md"
-        env:
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          LOG_DIR: ${{ env.LOG_DIR }}
-          RUN_ID: ${{ env.RUN_ID }}
-          RUN_MODE: ${{ github.event.inputs.run_mode }}
-        run: |
-          echo ">>> [report] start"
-          INDEX_FILE="${ARTIFACT_DIR}/index.md"
-
-          # 각 서비스별 마지막 severity/코드 요약 가져오기
-          get_last () {
-            local svc_name="$1"
-            local f="${SERVICE_DIR}/${svc_name}/status.log"
-            local code="N/A"
-            local sev="UNKNOWN"
-            local sum="(no-summary)"
-            if [ -f "$f" ]; then
-              code=$(grep -E "status_code=" "$f" | tail -n 1 | sed 's/.*status_code=//')
-              sev=$(grep -E "severity=" "$f" | tail -n 1 | sed 's/.*severity=//')
-              sum=$(grep -E "result_summary=" "$f" | tail -n 1 | sed 's/.*result_summary=//')
-            fi
-            echo "${code}:::${sev}:::${sum}"
-          }
-
-          CLAUDE_LAST=$(get_last "claude_api")
-          GEMINI_LAST=$(get_last "gemini_api")
-          OPENAI_LAST=$(get_last "openai_api")
-
-          CLAUDE_CODE=$(echo "${CLAUDE_LAST}" | cut -d':' -f1)
-          CLAUDE_SEV=$(echo "${CLAUDE_LAST}"  | cut -d':' -f3)
-          CLAUDE_SUM=$(echo "${CLAUDE_LAST}"  | cut -d':' -f5)
-
-          GEMINI_CODE=$(echo "${GEMINI_LAST}" | cut -d':' -f1)
-          GEMINI_SEV=$(echo "${GEMINI_LAST}"  | cut -d':' -f3)
-          GEMINI_SUM=$(echo "${GEMINI_LAST}"  | cut -d':' -f5)
-
-          OPENAI_CODE=$(echo "${OPENAI_LAST}" | cut -d':' -f1)
-          OPENAI_SEV=$(echo "${OPENAI_LAST}"  | cut -d':' -f3)
-          OPENAI_SUM=$(echo "${OPENAI_LAST}"  | cut -d':' -f5)
-
-          {
-            echo "# Execution Report / DR & Audit"
-            echo ""
-            echo "## Run Info"
-            echo "- Run ID: ${RUN_ID}"
-            echo "- Run Mode: ${RUN_MODE}"
-            echo "- Timestamp: $(date '+%Y-%m-%d %H:%M:%S%z')"
-            echo "- GitHub Actor: ${{ github.actor }}"
-            echo "- Repo:        ${{ github.repository }}"
-            echo "- Ref:         ${{ github.ref }}"
-            echo "- Ref Name:    ${{ github.ref_name }}"
-            echo "- SHA:         ${{ github.sha }}"
-            echo "- Event:       ${{ github.event_name }}"
-            echo "- Trigger:     ${{ github.triggering_actor }}"
-            echo "- Workflow:    ${{ github.workflow }}"
-            echo ""
-            echo "## API Call Summary"
-            echo "### Anthropic Claude"
-            echo "- status_code: ${CLAUDE_CODE}"
-            echo "- severity:    ${CLAUDE_SEV}"
-            echo "- summary:     ${CLAUDE_SUM}"
-            echo "- logs:        .github/echo_logs/claude_response/"
-            echo ""
-            echo "### Google Gemini"
-            echo "- status_code: ${GEMINI_CODE}"
-            echo "- severity:    ${GEMINI_SEV}"
-            echo "- summary:     ${GEMINI_SUM}"
-            echo "- logs:        .github/echo_logs/gemini_response/"
-            echo ""
-            echo "### OpenAI ChatGPT"
-            echo "- status_code: ${OPENAI_CODE}"
-            echo "- severity:    ${OPENAI_SEV}"
-            echo "- summary:     ${OPENAI_SUM}"
-            echo "- logs:        .github/echo_logs/openai_response/"
-            echo ""
-            echo "## Severity Escalation Guide"
-            echo "- OK: 정상 응답 (200/201 등)"
-            echo "- CRITICAL_AUTH: 인증/권한 문제 (401/403) → 키 재발급/보안담당 알림"
-            echo "- LIMIT_QUOTA: 한도/요금 초과 (429) → 비용/쿼터 담당 알림"
-            echo "- SERVER_ERROR: 벤더 서버 오류 (5xx) → 서비스 제공사에 에스컬레이션"
-            echo "- NO_RESPONSE: 네트워크/방화벽/차단 의심 → 인프라/네트워크 담당 알림"
-            echo ""
-            echo "## DR / Recovery Hints"
-            echo "1. .github/echo_services/* 디렉토리를 새 환경에 복제하고 README.md / status.log 복원."
-            echo "2. .github/echo_perm/*/permissions.txt 참고하여 chmod 600 등 최소권한 재적용."
-            echo "3. DR 정책: dr_center/dr_backup_plan.txt"
-            echo "4. ISO 정책: iso_builder/iso_manifest.txt (image_name, includes 목록)."
-            echo "5. replay.sh 실행해 환경 재현 (키는 직접 주입)."
-            echo "6. severity가 CRITICAL_AUTH 면 비밀키/권한 이슈, LIMIT_QUOTA 면 비용/쿼터 이슈 우선 해결."
-            echo ""
-            echo "## Integrity / Audit Trail"
-            echo "- checksums.txt: 주요 산출물 sha256 목록"
-            echo "- env_snapshot.log: 실행 당시 runner 환경, 디스크, GitHub 컨텍스트"
-            echo "- health.log: DNS/TLS/latency 메타 정보(claude_api/health.log 등)"
-            echo "- body.sanitized.json: 민감정보 마스킹된 응답"
-            echo ""
-            echo "## Escalation Procedure (운영 인계용)"
-            echo "- CRITICAL_AUTH: 보안/Secret 관리 담당자에게 보고 (키 만료/권한 부족)."
-            echo "- LIMIT_QUOTA: 비용/Rate Limit 담당자에게 보고 (요금/쿼터 상향 또는 호출 빈도 조정)."
-            echo "- SERVER_ERROR: 벤더 지원 채널로 장애 문의."
-            echo "- NO_RESPONSE: 내부 네트워크/방화벽 점검, DR센터 우회 경로 사용 여부 확인."
-            echo ""
-            echo "끝."
-          } > "${INDEX_FILE}"
-
-          chmod 644 "${INDEX_FILE}" || true
-          echo ">>> [report] done" | tee -a "${LOG_DIR}/report.init.log"
-
-      ##################################################################
-      # 10. 아티팩트 수집 (services/permissions/logs/artifacts)
-      ##################################################################
-      - name: "[collect] Bundle artifacts"
-        env:
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-          PERM_DIR: ${{ env.PERM_DIR }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          LOG_DIR: ${{ env.LOG_DIR }}
-        run: |
-          echo ">>> [collect] start"
-          mkdir -p "${ARTIFACT_DIR}/services" "${ARTIFACT_DIR}/permissions" || true
-          cp -r "${SERVICE_DIR}/."     "${ARTIFACT_DIR}/services/"     || true
-          cp -r "${PERM_DIR}/."        "${ARTIFACT_DIR}/permissions/"  || true
-
-          echo ">>> listing ${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
-          ls -R "${ARTIFACT_DIR}"     | tee -a "${LOG_DIR}/artifact.bundle.log"
-          echo ">>> [collect] done"   | tee -a "${LOG_DIR}/artifact.bundle.log"
-
-      - name: "[artifact] Upload logs + services + perms + artifacts"
-        uses: actions/upload-artifact@v4
+      - name: Setup Node.js
+        if: steps.node_exists.outputs.exists == 'true'
+        uses: actions/setup-node@v4
         with:
-          name: ai-api-dr-audit-all-artifacts
+          node-version: "20"
+
+      - name: Install jq
+        if: steps.node_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+          apt_fix || true
+          sudo apt-get install -y jq || true
+
+      - name: npm install / ci
+        if: steps.node_exists.outputs.exists == 'true'
+        working-directory: ${{ matrix.project }}
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          if [ -f "package-lock.json" ]; then
+            npm ci || npm install
+          else
+            npm install
+          fi
+
+      - name: npm audit (report only)
+        if: steps.node_exists.outputs.exists == 'true'
+        id: node_audit
+        working-directory: ${{ matrix.project }}
+        shell: bash
+        run: |
+          set -Eeo pipefail
+
+          echo "## NPM Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
+
+          npm audit --json > audit.json || true
+          npm audit >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+
+          if command -v jq >/dev/null 2>&1 && [ -f audit.json ]; then
+            HIGH_COUNT=$(jq '.metadata.vulnerabilities.high // 0' audit.json 2>/dev/null || echo 0)
+            CRIT_COUNT=$(jq '.metadata.vulnerabilities.critical // 0' audit.json 2>/dev/null || echo 0)
+          else
+            HIGH_COUNT=0
+            CRIT_COUNT=0
+          fi
+
+          echo "High severity: $HIGH_COUNT"
+          echo "Critical severity: $CRIT_COUNT"
+
+          echo "HIGH_COUNT=${HIGH_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "CRIT_COUNT=${CRIT_COUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: npm upgrade attempt (auto-fix vulnerabilities)
+        if: steps.node_exists.outputs.exists == 'true'
+        working-directory: ${{ matrix.project }}
+        shell: bash
+        run: |
+          set -Eeo pipefail
+
+          UPG_LOG="sec-upgrade.log"
+          {
+            echo "### $(date '+%Y-%m-%d %H:%M:%S%z') npm audit fix try"
+            npm audit fix || true
+            echo
+            echo "### $(date '+%Y-%m-%d %H:%M:%S%z') npm audit fix --force try (may introduce breaking changes)"
+            npm audit fix --force || true
+            echo
+            echo "### re-run npm audit --json after fix"
+            npm audit --json || true
+          } > "$UPG_LOG" 2>&1 || true
+
+      - name: Upload Node audit artifact
+        if: steps.node_exists.outputs.exists == 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: npm-audit-${{ github.run_number }}-${{ matrix.safe }}
           path: |
-            .github/echo_logs
-            .github/echo_artifacts
-            .github/echo_services
-            .github/echo_perm
+            ${{ matrix.project }}/audit.json
+            ${{ matrix.project }}/sec-upgrade.log
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 30
 
-      ##################################################################
-      # 11. (옵션) 요약을 repo에 커밋
-      #     - 민감한 body.json/headers/key 등은 절대 커밋하지 않음
-      #     - status.log 의 상태요약/심각도, index.md, checksums.txt 정도만 커밋
-      ##################################################################
-      - name: "[optional-commit] Commit summary back to repo (safe only)"
-        if: env.RUN_COMMIT_SUMMARY == 'true'
+
+  ##########################################################################
+  # Python audit + upgrade
+  ##########################################################################
+  python-security:
+    name: "Python Dependency Check + Upgrade"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: anthropic-cost-tracker/python
+            safe: anthropic-cost-tracker-python
+          - project: mcp-hello-py
+            safe: mcp-hello-py
+          - project: mcp-python-server
+            safe: mcp-python-server
+          - project: mcp-apache-server
+            safe: mcp-apache-server
+          - project: .
+            safe: root-dot
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare dirs and helper script (no heredoc)
+        id: prep_py
+        shell: bash
+        run: |
+          set -Eeo pipefail
+
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+
+          HELPER_PATH="${REPORT_DIR}/helpers.sh"
+          printf '%s\n' '#!/usr/bin/env bash'                            >  "$HELPER_PATH"
+          printf '%s\n' 'set -Eeo pipefail'                               >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"' >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'safe_run() {'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  local label="$1"; shift || true'              >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'     >> "$HELPER_PATH"
+          printf '%s\n' '  echo "▶ [$label] $(date \"+%Y-%m-%d %H:%M:%S%z\") START" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '  if \"$@\" >> \"$logfile\" 2>&1 ; then'        >> "$HELPER_PATH"
+          printf '%s\n' '    echo \"✅ [$label] OK\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '    return 0'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  else'                                         >> "$HELPER_PATH"
+          printf '%s\n' '    local rc=$?'                                >> "$HELPER_PATH"
+          printf '%s\n' '    echo \"❌ [$label] FAILED exit=${rc}\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '    return $rc'                                 >> "$HELPER_PATH"
+          printf '%s\n' '  fi'                                           >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'apt_fix() {'                                    >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile=\"${LOG_BASE}/apt.fix.log\"'    >> "$HELPER_PATH"
+          printf '%s\n' '  echo \"[fix] apt_fix start\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo dpkg --configure -a || true'             >> "$HELPER_PATH"
+          printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+
+          chmod +x "$HELPER_PATH"
+
+          echo "Python scan target: ${{ matrix.project }} (safe=${{ matrix.safe }})" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Check requirements.txt
+        id: py_exists
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          if [ -d "${{ matrix.project }}" ] && [ -f "${{ matrix.project }}/requirements.txt" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install security tools
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          python -m pip install --upgrade pip
+          pip install pip-audit safety bandit build || true
+
+      - name: Ensure jq (for parsing)
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+          apt_fix || true
+          sudo apt-get install -y jq || true
+
+      - name: pip-audit (report only)
+        if: steps.py_exists.outputs.exists == 'true'
+        id: py_audit
+        shell: bash
+        run: |
+          set -Eeo pipefail
+
+          TARGET_DIR="${{ matrix.project }}"
+          echo "## Pip Audit for ${TARGET_DIR}" >> "$GITHUB_STEP_SUMMARY"
+
+          pip-audit -r "${TARGET_DIR}/requirements.txt" --format json > "${TARGET_DIR}/pip-audit.json" || true
+          pip-audit -r "${TARGET_DIR}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+
+          if command -v jq >/dev/null 2>&1 && [ -f "${TARGET_DIR}/pip-audit.json" ]; then
+            HIGH=$(jq '[.[] | .vulns[]? | select(.severity=="HIGH")] | length' "${TARGET_DIR}/pip-audit.json" 2>/dev/null || echo 0)
+            CRIT=$(jq '[.[] | .vulns[]? | select(.severity=="CRITICAL")] | length' "${TARGET_DIR}/pip-audit.json" 2>/dev/null || echo 0)
+          else
+            HIGH=0
+            CRIT=0
+          fi
+
+          echo "High severity vulns: $HIGH"
+          echo "Critical severity vulns: $CRIT"
+
+          echo "HIGH_COUNT=${HIGH}" >> "$GITHUB_OUTPUT"
+          echo "CRIT_COUNT=${CRIT}" >> "$GITHUB_OUTPUT"
+
+      - name: safety check
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TARGET_DIR="${{ matrix.project }}"
+          echo "## Safety Check for ${TARGET_DIR}" >> "$GITHUB_STEP_SUMMARY"
+          safety check -r "${TARGET_DIR}/requirements.txt" --json > "${TARGET_DIR}/safety.json" || true
+          safety check -r "${TARGET_DIR}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: bandit static analysis
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TARGET_DIR="${{ matrix.project }}"
+          bandit -r "$TARGET_DIR" -f json -o "$TARGET_DIR/bandit.json" || true
+          echo "## Bandit Security Scan for $TARGET_DIR" >> "$GITHUB_STEP_SUMMARY"
+          bandit -r "$TARGET_DIR" || echo "Bandit found issues" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: pip-audit --fix (auto upgrade attempt)
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TARGET_DIR="${{ matrix.project }}"
+          UPG_LOG="${TARGET_DIR}/sec-upgrade.log"
+          {
+            echo "### $(date '+%Y-%m-%d %H:%M:%S%z') pip-audit --fix try"
+            echo "(취약 패키지 자동 업그레이드/패치 시도)"
+            pip-audit -r "${TARGET_DIR}/requirements.txt" --fix || true
+            echo
+            echo "### re-run pip-audit for diff"
+            pip-audit -r "${TARGET_DIR}/requirements.txt" --format json || true
+          } > "$UPG_LOG" 2>&1 || true
+
+      - name: Upload Python audit artifact
+        if: steps.py_exists.outputs.exists == 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: python-audit-${{ github.run_number }}-${{ matrix.safe }}
+          path: |
+            ${{ matrix.project }}/pip-audit.json
+            ${{ matrix.project }}/safety.json
+            ${{ matrix.project }}/bandit.json
+            ${{ matrix.project }}/sec-upgrade.log
+          if-no-files-found: warn
+          retention-days: 30
+
+
+  ##########################################################################
+  # GitHub advisory gate on PR
+  ##########################################################################
+  dependency-review:
+    name: "Dependency Review (PR gate)"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+
+
+  ##########################################################################
+  # 패키지 빌드 + 릴리즈 출시에 사용할 번들 생성 + GitHub Release 게시
+  ##########################################################################
+  package-and-release:
+    name: "Package Projects & Publish Release"
+    runs-on: ubuntu-latest
+    needs: [node-security, python-security]
+    continue-on-error: false   # 이 job은 실패하면 전체 워크플로우는 실패 표시됨
+    env:
+      NODE_PROJECTS: "anthropic-cost-tracker/nodejs mcp-hello-js mcp-fs"
+      PY_PROJECTS: "anthropic-cost-tracker/python mcp-hello-py mcp-python-server mcp-apache-server ."
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (for npm pack)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Python (for build wheels)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python build tooling
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          python -m pip install --upgrade pip
+          pip install build || true
+
+      # 1) 이전 job들이 업로드한 모든 audit 아티팩트(취약점 보고서+업그레이드 로그)를 수집
+      - name: Download all audit artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: collected-artifacts
+
+      # 2) 각 Node 프로젝트에 대해 npm pack (tgz) 생성
+      - name: Build Node packages (npm pack)
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          mkdir -p release_payload/node
+          for P in $NODE_PROJECTS; do
+            if [ -d "$P" ] && [ -f "$P/package.json" ]; then
+              echo "[node-pack] $P"
+              (
+                cd "$P"
+                npm install || true
+                npm pack || true
+              )
+              # npm pack 결과 *.tgz 파일을 release_payload/node 로 복사
+              find "$P" -maxdepth 1 -type f -name "*.tgz" -exec cp {} release_payload/node/ \; || true
+            else
+              echo "[node-pack] skip $P (no package.json)"
+            fi
+          done
+
+      # 3) 각 Python 프로젝트에 대해 sdist / wheel 생성 (python -m build)
+      - name: Build Python packages (python -m build)
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          mkdir -p release_payload/python
+          for P in $PY_PROJECTS; do
+            if [ -d "$P" ] && [ -f "$P/setup.py" -o -f "$P/pyproject.toml" ]; then
+              echo "[py-build] $P"
+              (
+                cd "$P"
+                python -m build || true
+              )
+              # dist/* 내용을 release_payload/python 으로 복사
+              if [ -d "$P/dist" ]; then
+                cp "$P/dist/"* release_payload/python/ 2>/dev/null || true
+              fi
+            else
+              echo "[py-build] skip $P (no setup.py / pyproject.toml)"
+            fi
+          done
+
+      # 4) release_payload + collected-artifacts를 tar.gz로 묶음
+      - name: Create release bundle tar.gz
+        id: bundle
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TS=$(date '+%Y%m%d-%H%M%S')
+          BUNDLE="security-scan-bundle-${TS}-${GITHUB_RUN_NUMBER}.tar.gz"
+          mkdir -p final_bundle
+          cp -r release_payload final_bundle/ 2>/dev/null || true
+          cp -r collected-artifacts final_bundle/ 2>/dev/null || true
+          tar -czf "$BUNDLE" final_bundle
+          echo "bundle_name=$BUNDLE" >> "$GITHUB_OUTPUT"
+
+      # 5) GitHub Release 생성 (tag_name은 실행번호 기반으로 고유하게)
+      - name: Create GitHub Release (soft-fail allowed)
+        id: create_release
+        continue-on-error: true
+        uses: actions/create-release@v1
         env:
-          SERVICE_DIR: ${{ env.SERVICE_DIR }}
-          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
-          RUN_ID: ${{ env.RUN_ID }}
-        run: |
-          echo ">>> [optional-commit] start"
-          git config user.email "automation@example.local"
-          git config user.name "EchoOps-AuditBot"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: secscan-${{ github.run_number }}
+          release_name: "Security Scan ${{ github.run_number }} (AutoUpgrade+Packages)"
+          draft: false
+          prerelease: false
+          body: |
+            자동 보안 점검 & 업그레이드 결과입니다.
 
-          # 안전한 요약본만 stage
-          # status.log, index.md, checksums.txt 등
-          git add "${SERVICE_DIR}/claude_api/status.log" 2>/dev/null || true
-          git add "${SERVICE_DIR}/gemini_api/status.log" 2>/dev/null || true
-          git add "${SERVICE_DIR}/openai_api/status.log" 2>/devnull || true
-          git add "${ARTIFACT_DIR}/index.md" 2>/dev/null || true
-          git add "${ARTIFACT_DIR}/checksums.txt" 2>/dev/null || true
+            포함 내용:
+            - Node 의존성 감사 (npm audit) 및 자동 수정 시도 (npm audit fix / --force)
+            - Python 의존성 감사 (pip-audit / safety / bandit) 및 pip-audit --fix 자동 시도
+            - sec-upgrade.log : 실제로 어떤 패키지들이 업데이트/교체 시도됐는지 기록
+            - 각 프로젝트별 빌드 결과
+              * Node: npm pack (*.tgz)
+              * Python: python -m build 결과 (sdist, wheel)
+            - collected-artifacts/: 감사 결과 JSON, 로그 등
+            - 전체 tar.gz 번들 (final_bundle 포함)
 
-          git commit -m "[EchoOps DR/Audit] RUN_ID=${RUN_ID} status summary (sanitized)" || true
-          git push || true
-          echo ">>> [optional-commit] done"
+      # 6) Release asset 업로드 (번들 tar.gz 첨부)
+      - name: Upload bundle to Release (soft-fail allowed)
+        if: steps.create_release.outcome != 'failure'
+        continue-on-error: true
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.bundle.outputs.bundle_name }}
+          asset_name: ${{ steps.bundle.outputs.bundle_name }}
+          asset_content_type: application/gzip
 
-      ##################################################################
-      # 12. 마지막 리포트 (항상 성공 선언)
-      ##################################################################
-      - name: "[final] Overall status (ALWAYS-SUCCESS)"
-        run: |
-          echo "✅ [FINAL] AI API DR/Audit workflow finished."
-          echo "   - run_mode=${{ github.event.inputs.run_mode }}:"
-          echo "       lite=외부 호출 스킵(비용 0, 모의용)"
-          echo "       full-safe=실제 호출 1회씩 (기본)"
-          echo "       full=full-safe와 동일하게 호출하되 향후 확장용 태그"
-          echo "   - Anthropic / Gemini / OpenAI 각각 status_code, severity, summary 기록."
-          echo "   - status.log에 severity=CRITICAL_AUTH / LIMIT_QUOTA / SERVER_ERROR 등급화해 저장."
-          echo "   - body.sanitized.json 으로 민감정보 마스킹된 응답 버전 생성."
-          echo "   - replay.sh 생성: DR 복구/재현 명령어와 chmod 복원 가이드 포함."
-          echo "   - checksums.txt 생성: 핵심 산출물 sha256 해시 체인 기록."
-          echo "   - health.log에 DNS/TLS/응답 메타 기록."
-          echo "   - index.md에 복구 순서, 에스컬레이션 절차(GitHub 컨텍스트 포함)까지 문서화."
-          echo "   - 오래된 로그(7일 초과)는 자동 삭제."
-          echo "   - 선택적으로 RUN_COMMIT_SUMMARY=true면 요약 상태를 repo에 커밋(민감본 제외)."
-          echo "   - 마지막 단계는 항상 성공으로 종료합니다."
-          echo "DONE."
+
+  ##########################################################################
+  # Weekly scheduled run -> if any job failed in audits, open issue
+  ##########################################################################
+  create-issue-on-weekly-failure:
+    name: "Create Issue on Weekly Failure"
+    runs-on: ubuntu-latest
+    needs: [node-security, python-security]
+    if: github.event_name == 'schedule' && failure()
+
+    steps:
+      - name: Open or reuse security issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'security,dependency-check',
+              state: 'open'
+            });
+            if (existing.data.length === 0) {
+              const bodyText = [
+                "🚨 Weekly dependency check reported failures.",
+                "",
+                "일부 보안 점검 단계(npm audit / pip-audit / bandit / safety 등) 또는",
+                "자동 업그레이드(npm audit fix / pip-audit --fix)에서 에러가 감지되었습니다.",
+                "",
+                "릴리즈(Release)에 업로드된 tar.gz 번들에는",
+                "sec-upgrade.log, 감사 결과, 빌드된 패키지(.tgz / .whl 등)가 포함됩니다.",
+                "",
+                `Run details: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                "",
+                "취약 의존성 또는 수정이 필요한 영역을 확인하시기 바랍니다."
+              ].join("\n");
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: "🚨 Dependency Security Check Failure (Weekly Scan w/ AutoUpgrade & Release)",
+                body: bodyText,
+                labels: ["security", "dependency-check", "automated"]
+              });
+            }
