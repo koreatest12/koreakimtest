@@ -108,6 +108,15 @@ jobs:
           set -Eeuo pipefail
           mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
 
+          # Pre-create cache directories to avoid cache errors
+          mkdir -p ~/.npm ~/.cache/pip ~/.m2/repository /tmp/.buildx-cache
+          mkdir -p .venv anthropic-cost-tracker/python/.venv mcp-hello-py/.venv
+          mkdir -p mcp-python-server/.venv mcp-apache-server/.venv
+          mkdir -p node_modules anthropic-cost-tracker/nodejs/node_modules
+          mkdir -p mcp-hello-js/node_modules mcp-fs/node_modules mcp-hello-java/target
+
+          echo "✅ Cache directories pre-created"
+
           cat > "${REPORT_DIR}/helpers.sh" << 'EOF'
           #!/usr/bin/env bash
           set -Euo pipefail
