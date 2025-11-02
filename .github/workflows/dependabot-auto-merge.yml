@@ -65,6 +65,43 @@ jobs:
           # dependabot PR도 fetch 가능하게
           ref: ${{ github.event.pull_request.head.ref || github.ref }}
 
+      - name: "Cache npm dependencies"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            node_modules
+            anthropic-cost-tracker/nodejs/node_modules
+            mcp-hello-js/node_modules
+            mcp-fs/node_modules
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: "Cache pip packages"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            .venv
+            anthropic-cost-tracker/python/.venv
+            mcp-hello-py/.venv
+            mcp-python-server/.venv
+            mcp-apache-server/.venv
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: "Cache Maven dependencies"
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            mcp-hello-java/target
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-maven-
+
       - name: "Prepare folders & helpers"
         shell: bash
         run: |
@@ -166,7 +203,7 @@ jobs:
           echo "forced=false" >> $GITHUB_OUTPUT
 
       ########################################################################
-      # 2. 시스템/빌드 헬스 체크 (Maven / Python / Docker) - 선택적 실행
+      # 2. 시스템/빌드 헬스 체크 (Maven / Python / Docker / Node.js) - 선택적 실행
       ########################################################################
       - name: "Repair base system if needed (apt/dpkg/docker)"
         if: ${{ github.event.inputs.repair_mode != 'false' }}
@@ -177,11 +214,29 @@ jobs:
           apt_fix || true
           ensure_docker || true
 
-      - name: "Python env quick check"
+      - name: "Setup Node.js with npm cache"
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            anthropic-cost-tracker/nodejs/package-lock.json
+            mcp-hello-js/package-lock.json
+            mcp-fs/package-lock.json
+
+      - name: "Python env quick check with pip cache"
         if: ${{ github.event.inputs.run_python_check != 'false' }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.x"
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements*.txt
+            anthropic-cost-tracker/python/requirements.txt
+            mcp-hello-py/requirements.txt
+            mcp-python-server/requirements.txt
+            mcp-apache-server/requirements.txt
 
       - name: "Run python check script"
         if: ${{ github.event.inputs.run_python_check != 'false' }}
@@ -224,6 +279,24 @@ jobs:
             echo "[maven] no pom.xml in this PR branch" > "${REPORT_DIR}/maven_head.txt"
           fi
 
+      - name: "Setup Docker Buildx with cache"
+        if: ${{ github.event.inputs.run_docker_check != 'false' }}
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver-opts: |
+            image=moby/buildkit:latest
+            network=host
+
+      - name: "Cache Docker layers"
+        if: ${{ github.event.inputs.run_docker_check != 'false' }}
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
       - name: "Docker smoke build/run"
         if: ${{ github.event.inputs.run_docker_check != 'false' }}
         shell: bash
@@ -246,7 +319,15 @@ jobs:
             DOCKERFILE="Dockerfile"
           fi
 
-          safe_run "docker.build" docker build -f "$DOCKERFILE" . -t "${DOCKER_IMG}" || true
+          safe_run "docker.build" docker buildx build \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            -f "$DOCKERFILE" . -t "${DOCKER_IMG}" --load || true
+
+          # 캐시 교체 (GitHub Actions 권장 방식)
+          rm -rf /tmp/.buildx-cache || true
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
+
           safe_run "docker.run"  docker run --rm "${DOCKER_IMG}" || true
 
       ########################################################################
