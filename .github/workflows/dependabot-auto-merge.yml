@@ -1,5 +1,4 @@
-# 파일 경로: .github/workflows/dependabot-auto-merge.yml
-name: "Dependabot Auto Merge (자동 업데이트 통합 점검 및 병합)"
+name: "Dependabot Auto Merge (자동 업데이트+캐시/디렉토리 선생성+절대경로 로그 안정화)"
 
 on:
   pull_request:
@@ -13,38 +12,40 @@ on:
         type: boolean
         default: true
       repair_mode:       # 2
-        description: "빌드/테스트 실패 시 자동 복구(apt/dpkg/docker 등) 시도"
+        description: "빌드/테스트 실패 시 apt/dpkg/docker 복구 시도"
         type: boolean
         default: true
       run_docker_check:  # 3
-        description: "Docker 이미지 빌드/컨테이너 스모크도 같이 수행할지"
+        description: "Docker 빌드/컨테이너 스모크 실행?"
         type: boolean
         default: true
       run_maven_build:   # 4
-        description: "Maven 패키징 빌드를 수행할지(-DskipTests로 빠르게)"
+        description: "Maven 패키징 (-DskipTests)"
         type: boolean
         default: true
       run_python_check:  # 5
-        description: "Python 런타임 체크 수행할지"
+        description: "Python 환경 검사 / pip install"
         type: boolean
         default: true
       upload_artifact:   # 6
-        description: "로그/리포트 artifact 업로드 여부"
+        description: "리포트/로그 artifact 업로드"
         type: boolean
         default: true
       force_labels:      # 7
-        description: "강제로 dependabot 처럼 처리 (라벨 무시)"
+        description: "라벨/actor 검사 없이 의존성 PR로 간주"
         type: boolean
         default: false
 
 permissions:
-  contents: write           # merge / commit 에 필요
-  pull-requests: write      # PR merge 에 필요
+  contents: write
+  pull-requests: write
   packages: write
   id-token: write
 
 env:
   TZ: Asia/Seoul
+
+  # 상대 경로 기반 루트 (repo root 기준)
   REPORT_DIR: .github/dependabot_report
   LOG_DIR: .github/dependabot_report/logs
   ARTIFACT_DIR: .github/dependabot_report/artifacts
@@ -52,19 +53,151 @@ env:
 
 jobs:
   validate_and_merge:
-    name: "🔄 Dependabot PR 검증 & 자동 병합"
+    name: "🔄 Dependabot PR 검증 & 자동 병합 (절대경로 로그 안정화)"
     runs-on: ubuntu-latest
 
     steps:
       ########################################################################
-      # 0. 체크아웃 + 준비
+      # 0. 체크아웃
       ########################################################################
       - name: "Checkout"
         uses: actions/checkout@v4
         with:
-          # dependabot PR도 fetch 가능하게
           ref: ${{ github.event.pull_request.head.ref || github.ref }}
 
+      ########################################################################
+      # 0.1 절대경로 계산 및 캐시/작업 디렉토리/리포트/로그/아티팩트 선제 생성
+      #     - 절대경로를 이후 env 파일로 export해서 모든 step에서 공통 사용
+      ########################################################################
+      - name: "Pre-create dirs, caches, placeholders, helpers (ABSOLUTE PATH READY)"
+        id: prep_all
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          REPO_ROOT="$PWD"
+          ABS_REPORT_DIR="$REPO_ROOT/${REPORT_DIR}"
+          ABS_LOG_DIR="$REPO_ROOT/${LOG_DIR}"
+          ABS_ARTIFACT_DIR="$REPO_ROOT/${ARTIFACT_DIR}"
+
+          echo "ABS_REPORT_DIR=${ABS_REPORT_DIR}"   >> $GITHUB_ENV
+          echo "ABS_LOG_DIR=${ABS_LOG_DIR}"         >> $GITHUB_ENV
+          echo "ABS_ARTIFACT_DIR=${ABS_ARTIFACT_DIR}" >> $GITHUB_ENV
+          echo "REPO_ROOT=${REPO_ROOT}"             >> $GITHUB_ENV
+
+          # 1) 공용 보고/로그/아티팩트 디렉토리 생성
+          mkdir -p "$ABS_REPORT_DIR" "$ABS_LOG_DIR" "$ABS_ARTIFACT_DIR"
+
+          # 2) 캐시/빌드 디렉토리 선제 생성
+          mkdir -p ~/.npm || true
+          mkdir -p node_modules || true
+          mkdir -p anthropic-cost-tracker/nodejs/node_modules || true
+          mkdir -p mcp-hello-js/node_modules || true
+          mkdir -p mcp-fs/node_modules || true
+
+          mkdir -p ~/.cache/pip || true
+          mkdir -p .venv || true
+          mkdir -p anthropic-cost-tracker/python/.venv || true
+          mkdir -p mcp-hello-py/.venv || true
+          mkdir -p mcp-python-server/.venv || true
+          mkdir -p mcp-apache-server/.venv || true
+
+          mkdir -p ~/.m2/repository || true
+          mkdir -p mcp-hello-java/target || true
+
+          mkdir -p /tmp/.buildx-cache || true
+
+          # 3) placeholder 파일들
+          touch "$ABS_REPORT_DIR/SUMMARY.txt"
+          touch "$ABS_REPORT_DIR/cache_stats.txt"
+          touch "$ABS_REPORT_DIR/maven_head.txt"
+          touch "$ABS_REPORT_DIR/pip_check_root.txt"
+          touch "$ABS_REPORT_DIR/pip_list.json"
+          touch "$ABS_REPORT_DIR/pip_outdated.json"
+          touch "$ABS_REPORT_DIR/npm_audit_root.json"
+          touch "$ABS_REPORT_DIR/npm_audit_cost_tracker.json"
+          touch "$ABS_REPORT_DIR/npm_outdated.json"
+          echo '{"init":"placeholder"}' > "$ABS_REPORT_DIR/python_env.json"
+
+          # 4) helpers.sh 생성
+          HELPER_PATH="$ABS_REPORT_DIR/helpers.sh"
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'set -Euo pipefail'
+            echo ''
+            # 절대경로 사용 (런타임에 env 있을 수도, 없을 수도)
+            echo 'ABS_LOG_DIR_DEFAULT="'"$ABS_LOG_DIR"'"'
+            echo 'ABS_REPORT_DIR_DEFAULT="'"$ABS_REPORT_DIR"'"'
+            echo 'LOG_DIR_USE="${ABS_LOG_DIR:-$ABS_LOG_DIR_DEFAULT}"'
+            echo 'REPORT_DIR_USE="${ABS_REPORT_DIR:-$ABS_REPORT_DIR_DEFAULT}"'
+            echo ''
+            echo 'safe_logdir() {'
+            echo '  mkdir -p "$LOG_DIR_USE" "$REPORT_DIR_USE" || true'
+            echo '}'
+            echo ''
+            echo 'safe_run() {'
+            echo '  local label="$1"; shift || true'
+            echo '  safe_logdir'
+            echo '  local logfile="$LOG_DIR_USE/${label}.log"'
+            echo '  echo "▶ [${label}] START $(date \"+%Y-%m-%d %H:%M:%S%z\")" | tee -a "$logfile"'
+            echo '  if "$@" >> "$logfile" 2>&1 ; then'
+            echo '    echo "✅ [${label}] OK" | tee -a "$logfile"'
+            echo '    return 0'
+            echo '  else'
+            echo '    local rc=$?'
+            echo '    echo "❌ [${label}] FAILED exit=${rc}" | tee -a "$logfile"'
+            echo '    return $rc'
+            echo '  fi'
+            echo '}'
+            echo ''
+            echo 'apt_fix() {'
+            echo '  safe_logdir'
+            echo '  local logfile="$LOG_DIR_USE/apt.fix.log"'
+            echo '  echo "[fix] attempting apt/dpkg repair..." | tee -a "$logfile"'
+            echo '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true'
+            echo '  sudo dpkg --configure -a || true'
+            echo '  sudo apt-get update -y || sudo apt-get update -y || true'
+            echo '}'
+            echo ''
+            echo 'ensure_docker() {'
+            echo '  safe_logdir'
+            echo '  local logfile="$LOG_DIR_USE/docker.ensure.log"'
+            echo '  if ! command -v docker >/dev/null 2>&1; then'
+            echo '    echo "[fix] docker not found, installing..." | tee -a "$logfile"'
+            echo '    apt_fix'
+            echo '    sudo apt-get install -y ca-certificates curl gnupg || true'
+            echo '    sudo install -m 0755 -d /etc/apt/keyrings || true'
+            echo '    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg || true'
+            echo '    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null || true'
+            echo '    apt_fix'
+            echo '    sudo apt-get install -y docker.io docker-buildx-plugin docker-compose-plugin || true'
+            echo '    sudo usermod -aG docker $USER || true'
+            echo '  fi'
+            echo '  if ! docker info >/dev/null 2>&1; then'
+            echo '    echo "[fix] starting docker service..." | tee -a "$logfile"'
+            echo '    sudo systemctl start docker || true'
+            echo '    sleep 2'
+            echo '  fi'
+            echo '}'
+          } > "$HELPER_PATH"
+          chmod +x "$HELPER_PATH"
+
+          # 5) SUMMARY 헤더 작성
+          {
+            echo "## Dependabot Auto Merge Report"
+            echo "Run: ${GITHUB_RUN_ID}"
+            echo "Repo: ${GITHUB_REPOSITORY}"
+            echo "PR:   ${GITHUB_REF}"
+            echo "Time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+            echo "----------------------------------------"
+          } >> "$ABS_REPORT_DIR/SUMMARY.txt"
+
+          echo "✅ prep_all complete (absolute paths, dirs, placeholders ready)"
+
+
+      ########################################################################
+      # 0.2 캐시 구성 (경로는 이미 mkdir -p 되어 있음)
+      ########################################################################
       - name: "Cache npm dependencies"
         uses: actions/cache@v4
         with:
@@ -102,128 +235,46 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-maven-
 
-      - name: "Prepare folders & helpers"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
-
-          # Pre-create cache directories to avoid cache errors
-          mkdir -p ~/.npm ~/.cache/pip ~/.m2/repository /tmp/.buildx-cache
-          mkdir -p .venv anthropic-cost-tracker/python/.venv mcp-hello-py/.venv
-          mkdir -p mcp-python-server/.venv mcp-apache-server/.venv
-          mkdir -p node_modules anthropic-cost-tracker/nodejs/node_modules
-          mkdir -p mcp-hello-js/node_modules mcp-fs/node_modules mcp-hello-java/target
-
-          echo "✅ Cache directories pre-created"
-
-          cat > "${REPORT_DIR}/helpers.sh" << 'EOF'
-          #!/usr/bin/env bash
-          set -Euo pipefail
-
-          safe_run() {
-            local label="$1"; shift || true
-            echo "▶ [${label}] START $(date '+%Y-%m-%d %H:%M:%S%z')" | tee -a "${LOG_DIR}/${label}.log"
-            if "$@" >> "${LOG_DIR}/${label}.log" 2>&1 ; then
-              echo "✅ [${label}] OK" | tee -a "${LOG_DIR}/${label}.log"
-              return 0
-            else
-              local rc=$?
-              echo "❌ [${label}] FAILED exit=${rc}" | tee -a "${LOG_DIR}/${label}.log"
-              return $rc
-            fi
-          }
-
-          apt_fix() {
-            echo "[fix] attempting apt/dpkg repair..." | tee -a "${LOG_DIR}/apt.fix.log"
-            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true
-            sudo dpkg --configure -a || true
-            sudo apt-get update -y || sudo apt-get update -y || true
-          }
-
-          ensure_docker() {
-            if ! command -v docker >/dev/null 2>&1; then
-              echo "[fix] docker not found, installing..." | tee -a "${LOG_DIR}/docker.ensure.log"
-              apt_fix
-              sudo apt-get install -y ca-certificates curl gnupg || true
-              sudo install -m 0755 -d /etc/apt/keyrings || true
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg || true
-              echo \
-                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-                $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
-                sudo tee /etc/apt/sources.list.d/docker.list > /dev/null || true
-              apt_fix
-              sudo apt-get install -y docker.io docker-buildx-plugin docker-compose-plugin || true
-              sudo usermod -aG docker $USER || true
-            fi
-
-            if ! docker info >/dev/null 2>&1; then
-              echo "[fix] starting docker service..." | tee -a "${LOG_DIR}/docker.ensure.log"
-              sudo systemctl start docker || true
-              sleep 2
-            fi
-          }
-          EOF
-          chmod +x "${REPORT_DIR}/helpers.sh"
-
-          echo "## Dependabot Auto Merge Report" > "${REPORT_DIR}/SUMMARY.txt"
-          echo "Run: ${GITHUB_RUN_ID}"         >> "${REPORT_DIR}/SUMMARY.txt"
-          echo "Repo: ${GITHUB_REPOSITORY}"    >> "${REPORT_DIR}/SUMMARY.txt"
-          echo "PR:   ${GITHUB_REF}"           >> "${REPORT_DIR}/SUMMARY.txt"
-          echo "Time: $(date '+%Y-%m-%d %H:%M:%S %Z')" >> "${REPORT_DIR}/SUMMARY.txt"
-          echo "----------------------------------------" >> "${REPORT_DIR}/SUMMARY.txt"
-
       ########################################################################
-      # 1. 이 PR이 Dependabot PR인지 확인 (라벨로 판단)
-      #    - 라벨 없더라도 force_labels=true면 그냥 진행
+      # 1. Dependabot PR 여부 확인
       ########################################################################
-      - name: "Check if PR is from Dependabot (label check)"
+      - name: "Check if PR is dependency update"
         id: depcheck
         shell: bash
         run: |
           set -Eeuo pipefail
-
           FORCE="${{ github.event.inputs.force_labels || 'false' }}"
           if [ "$FORCE" = "true" ]; then
             echo "forced=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-
-          # GitHub API 없이 단순하게 event payload를 보고 guess 하는 방법:
-          #  - github.actor == dependabot[bot] 이면 거의 확실
-          #  - 라벨 목록 안에 'dependency' 같은 거 있으면 의존성 업데이트 PR일 확률 큼
           ACTOR="${{ github.actor }}"
           LABELS_JSON='${{ toJson(github.event.pull_request.labels) }}'
-
-          echo "actor=$ACTOR" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "labels=$LABELS_JSON" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-
+          echo "actor=$ACTOR"        | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+          echo "labels=$LABELS_JSON" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
           if echo "$ACTOR" | grep -qi "dependabot"; then
             echo "forced=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-
           if echo "$LABELS_JSON" | grep -qi "dependency"; then
             echo "forced=true" >> $GITHUB_OUTPUT
             exit 0
           fi
-
-          # 의존성 업데이트 PR이 아닐 수도 있음
           echo "forced=false" >> $GITHUB_OUTPUT
 
       ########################################################################
-      # 2. 시스템/빌드 헬스 체크 (Maven / Python / Docker / Node.js) - 선택적 실행
+      # 2. 시스템 준비 / npm 설치 / pip 설치 / Maven / Docker
       ########################################################################
-      - name: "Repair base system if needed (apt/dpkg/docker)"
+      - name: "Repair base system (apt/dpkg/docker)"
         if: ${{ github.event.inputs.repair_mode != 'false' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          source "${ABS_REPORT_DIR}/helpers.sh"
           apt_fix || true
           ensure_docker || true
 
-      - name: "Setup Node.js with npm cache"
+      - name: "Setup Node.js (with npm cache)"
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -234,49 +285,58 @@ jobs:
             mcp-hello-js/package-lock.json
             mcp-fs/package-lock.json
 
-      - name: "Install and cache npm dependencies"
+      - name: "Install npm deps / audit / outdated (absolute logging)"
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          source "${ABS_REPORT_DIR}/helpers.sh"
 
-          echo "=== Installing npm dependencies and creating cache ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "=== Installing npm dependencies and creating cache ===" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+
+          # 다시 한 번 로그 디렉토리 보장
+          mkdir -p "${ABS_LOG_DIR}" "${ABS_ARTIFACT_DIR}" || true
 
           # Root project
           if [ -f "package.json" ]; then
-            echo "▶ Installing root npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
+            echo "▶ Installing root npm dependencies..." | tee -a "${ABS_LOG_DIR}/npm.install.log"
             safe_run "npm.root" npm ci || safe_run "npm.root.fallback" npm install || true
-            safe_run "npm.audit.root" npm audit --json > "${REPORT_DIR}/npm_audit_root.json" || true
+            safe_run "npm.audit.root" npm audit --json > "${ABS_REPORT_DIR}/npm_audit_root.json" || true
           fi
 
-          # Anthropic Cost Tracker
+          # anthropic-cost-tracker/nodejs
           if [ -f "anthropic-cost-tracker/nodejs/package.json" ]; then
-            echo "▶ Installing cost-tracker npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
+            echo "▶ Installing cost-tracker npm dependencies..." | tee -a "${ABS_LOG_DIR}/npm.install.log"
             cd anthropic-cost-tracker/nodejs
             safe_run "npm.cost-tracker" npm ci || safe_run "npm.cost-tracker.fallback" npm install || true
-            safe_run "npm.audit.cost-tracker" npm audit --json > "${REPORT_DIR}/npm_audit_cost_tracker.json" || true
-            cd ../..
+            safe_run "npm.audit.cost-tracker" npm audit --json > "${ABS_REPORT_DIR}/npm_audit_cost_tracker.json" || true
+            cd "$REPO_ROOT"
           fi
 
-          # MCP Hello JS
+          # mcp-hello-js
           if [ -f "mcp-hello-js/package.json" ]; then
-            echo "▶ Installing mcp-hello-js npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
+            echo "▶ Installing mcp-hello-js npm dependencies..." | tee -a "${ABS_LOG_DIR}/npm.install.log"
             cd mcp-hello-js
             safe_run "npm.mcp-hello-js" npm ci || safe_run "npm.mcp-hello-js.fallback" npm install || true
-            cd ..
+            cd "$REPO_ROOT"
           fi
 
-          # MCP FS
+          # mcp-fs
           if [ -f "mcp-fs/package.json" ]; then
-            echo "▶ Installing mcp-fs npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
+            echo "▶ Installing mcp-fs npm dependencies..." | tee -a "${ABS_LOG_DIR}/npm.install.log"
             cd mcp-fs
             safe_run "npm.mcp-fs" npm ci || safe_run "npm.mcp-fs.fallback" npm install || true
-            cd ..
+            cd "$REPO_ROOT"
           fi
 
-          echo "✅ npm dependencies installed and cached" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          # npm outdated
+          if command -v npm >/dev/null 2>&1; then
+            echo "▶ npm outdated snapshot" | tee -a "${ABS_LOG_DIR}/npm.outdated.log"
+            npm outdated --json > "${ABS_REPORT_DIR}/npm_outdated.json" || true
+          fi
 
-      - name: "Python env quick check with pip cache"
+          echo "✅ npm dependencies installed and cached" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+
+      - name: "Setup Python runtime & cache"
         if: ${{ github.event.inputs.run_python_check != 'false' }}
         uses: actions/setup-python@v5
         with:
@@ -289,110 +349,87 @@ jobs:
             mcp-python-server/requirements.txt
             mcp-apache-server/requirements.txt
 
-      - name: "Install and cache pip dependencies"
+      - name: "Install pip deps / snapshot"
         if: ${{ github.event.inputs.run_python_check != 'false' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          source "${ABS_REPORT_DIR}/helpers.sh"
 
-          echo "=== Installing pip dependencies and creating cache ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "=== Installing pip dependencies and creating cache ===" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
 
-          # Upgrade pip first
+          mkdir -p "${ABS_LOG_DIR}" "${ABS_ARTIFACT_DIR}" || true
+
+          # Upgrade pip/setup tools
           safe_run "pip.upgrade" python -m pip install --upgrade pip setuptools wheel || true
 
-          # Root project
+          # root
           if [ -f "requirements.txt" ]; then
-            echo "▶ Installing root pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            echo "▶ Installing root pip dependencies..." | tee -a "${ABS_LOG_DIR}/pip.install.log"
             safe_run "pip.root" pip install -r requirements.txt || true
-            safe_run "pip.check.root" pip check > "${REPORT_DIR}/pip_check_root.txt" || true
+            safe_run "pip.check.root" pip check > "${ABS_REPORT_DIR}/pip_check_root.txt" || true
           fi
 
-          # Anthropic Cost Tracker Python
+          # anthropic-cost-tracker/python
           if [ -f "anthropic-cost-tracker/python/requirements.txt" ]; then
-            echo "▶ Installing cost-tracker pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            echo "▶ Installing cost-tracker pip dependencies..." | tee -a "${ABS_LOG_DIR}/pip.install.log"
             safe_run "pip.cost-tracker" pip install -r anthropic-cost-tracker/python/requirements.txt || true
           fi
 
-          # MCP Hello Python
+          # mcp-hello-py
           if [ -f "mcp-hello-py/requirements.txt" ]; then
-            echo "▶ Installing mcp-hello-py pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            echo "▶ Installing mcp-hello-py pip dependencies..." | tee -a "${ABS_LOG_DIR}/pip.install.log"
             safe_run "pip.mcp-hello-py" pip install -r mcp-hello-py/requirements.txt || true
           fi
 
-          # MCP Python Server
+          # mcp-python-server
           if [ -f "mcp-python-server/requirements.txt" ]; then
-            echo "▶ Installing mcp-python-server pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            echo "▶ Installing mcp-python-server pip dependencies..." | tee -a "${ABS_LOG_DIR}/pip.install.log"
             safe_run "pip.mcp-python" pip install -r mcp-python-server/requirements.txt || true
           fi
 
-          # MCP Apache Server
+          # mcp-apache-server
           if [ -f "mcp-apache-server/requirements.txt" ]; then
-            echo "▶ Installing mcp-apache-server pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
+            echo "▶ Installing mcp-apache-server pip dependencies..." | tee -a "${ABS_LOG_DIR}/pip.install.log"
             safe_run "pip.mcp-apache" pip install -r mcp-apache-server/requirements.txt || true
           fi
 
-          # Install all other requirements files
+          # any requirements-*.txt
           for req in requirements-*.txt; do
             if [ -f "$req" ]; then
-              echo "▶ Installing $req..." | tee -a "${LOG_DIR}/pip.install.log"
-              safe_run "pip.${req}" pip install -r "$req" || true
+              echo "▶ Installing $req ..." | tee -a "${ABS_LOG_DIR}/pip.install.log"
+              safe_run "pip.$req" pip install -r "$req" || true
             fi
           done
 
-          # List installed packages
-          pip list --format=json > "${REPORT_DIR}/pip_list.json" || true
-          pip list --outdated --format=json > "${REPORT_DIR}/pip_outdated.json" || true
+          # snapshot list / outdated
+          pip list --format=json > "${ABS_REPORT_DIR}/pip_list.json" || true
+          pip list --outdated --format=json > "${ABS_REPORT_DIR}/pip_outdated.json" || true
 
-          echo "✅ pip dependencies installed and cached" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "✅ pip dependencies installed and cached" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
 
-      - name: "Check for dependency updates"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-
-          echo "=== Checking for available updates ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-
-          # npm outdated check
-          if command -v npm >/dev/null 2>&1; then
-            echo "▶ Checking npm outdated packages..." | tee -a "${LOG_DIR}/npm.outdated.log"
-            npm outdated --json > "${REPORT_DIR}/npm_outdated.json" || true
-
-            # Count outdated packages
-            if [ -f "${REPORT_DIR}/npm_outdated.json" ]; then
-              OUTDATED_COUNT=$(jq -r 'length' "${REPORT_DIR}/npm_outdated.json" 2>/dev/null || echo "0")
-              echo "Found $OUTDATED_COUNT outdated npm packages" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-            fi
-          fi
-
-          # pip outdated check (already done above)
-          if [ -f "${REPORT_DIR}/pip_outdated.json" ]; then
-            PIP_OUTDATED_COUNT=$(jq -r 'length' "${REPORT_DIR}/pip_outdated.json" 2>/dev/null || echo "0")
-            echo "Found $PIP_OUTDATED_COUNT outdated pip packages" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          fi
-
-          echo "✅ Dependency update check completed" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-
-      - name: "Run python check script"
+      - name: "Record Python runtime info"
         if: ${{ github.event.inputs.run_python_check != 'false' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          source "${ABS_REPORT_DIR}/helpers.sh"
 
-          cat > "${REPORT_DIR}/py_env.py" << 'EOF'
-          import sys, json, platform
-          print(json.dumps({
-            "python_version": sys.version,
-            "platform": platform.platform(),
-            "ok": True
-          }, indent=2))
-          EOF
+          mkdir -p "${ABS_LOG_DIR}" || true
 
-          safe_run "python.env" python "${REPORT_DIR}/py_env.py" | tee "${REPORT_DIR}/python_env.json"
+          # py_env.py to snapshot runtime info
+          {
+            echo 'import sys, json, platform'
+            echo 'print(json.dumps({'
+            echo '  "python_version": sys.version,'
+            echo '  "platform": platform.platform(),'
+            echo '  "ok": True'
+            echo '}, indent=2))'
+          } > "${ABS_REPORT_DIR}/py_env.py"
 
-      - name: "Maven build (skip tests)"
+          safe_run "python.env" python "${ABS_REPORT_DIR}/py_env.py" | tee "${ABS_REPORT_DIR}/python_env.json" || true
+
+      - name: "Setup Java (Maven cache)"
         if: ${{ github.event.inputs.run_maven_build != 'false' }}
         uses: actions/setup-java@v4
         with:
@@ -400,19 +437,20 @@ jobs:
           distribution: "temurin"
           cache: "maven"
 
-      - name: "Run mvn -DskipTests package"
+      - name: "Run mvn -DskipTests package and snapshot deps"
         if: ${{ github.event.inputs.run_maven_build != 'false' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          source "${ABS_REPORT_DIR}/helpers.sh"
+
+          mkdir -p "${ABS_LOG_DIR}" || true
 
           if [ -f "pom.xml" ]; then
             safe_run "maven.build" mvn -B -ntp clean package -DskipTests || true
-            # dependency tree snapshot
-            mvn -B -ntp dependency:tree | head -n 200 > "${REPORT_DIR}/maven_head.txt" || true
+            mvn -B -ntp dependency:tree | head -n 200 > "${ABS_REPORT_DIR}/maven_head.txt" || true
           else
-            echo "[maven] no pom.xml in this PR branch" > "${REPORT_DIR}/maven_head.txt"
+            echo "[maven] no pom.xml in this PR branch" > "${ABS_REPORT_DIR}/maven_head.txt"
           fi
 
       - name: "Setup Docker Buildx with cache"
@@ -433,23 +471,24 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
 
-      - name: "Docker smoke build/run"
+      - name: "Docker smoke build/run (fallback Dockerfile)"
         if: ${{ github.event.inputs.run_docker_check != 'false' }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          source "${ABS_REPORT_DIR}/helpers.sh"
+
+          mkdir -p "${ABS_LOG_DIR}" || true
 
           safe_run "docker.ensure" ensure_docker || true
 
-          # Dockerfile이 있으면 그걸로, 없으면 fallback Dockerfile 생성
-          DF_FALLBACK="${REPORT_DIR}/Dockerfile.ci"
+          DF_FALLBACK="${ABS_REPORT_DIR}/Dockerfile.ci"
           if [ ! -f "Dockerfile" ]; then
-            cat > "${DF_FALLBACK}" <<'EOF'
-          FROM alpine:3.20
-          RUN echo "dependabot smoke container" > /hello.txt
-          CMD ["cat", "/hello.txt"]
-          EOF
+            {
+              echo 'FROM alpine:3.20'
+              echo 'RUN echo "dependabot smoke container" > /hello.txt'
+              echo 'CMD ["cat", "/hello.txt"]'
+            } > "$DF_FALLBACK"
             DOCKERFILE="$DF_FALLBACK"
           else
             DOCKERFILE="Dockerfile"
@@ -460,16 +499,14 @@ jobs:
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
             -f "$DOCKERFILE" . -t "${DOCKER_IMG}" --load || true
 
-          # 캐시 교체 (GitHub Actions 권장 방식)
+          # 캐시 교체
           rm -rf /tmp/.buildx-cache || true
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
 
-          safe_run "docker.run"  docker run --rm "${DOCKER_IMG}" || true
+          safe_run "docker.run" docker run --rm "${DOCKER_IMG}" || true
 
       ########################################################################
-      # 3. 머지 여부 결정
-      #    - depcheck.forced == true  => 의존성 PR로 간주
-      #    - auto_merge == true       => 자동 merge 시도
+      # 3. 자동 머지 (조건: depcheck.forced == true && auto_merge != false)
       ########################################################################
       - name: "Attempt auto-merge if safe"
         if: ${{ steps.depcheck.outputs.forced == 'true' && github.event.inputs.auto_merge != 'false' }}
@@ -477,84 +514,77 @@ jobs:
         run: |
           set -Eeuo pipefail
           PR_NUMBER="${{ github.event.pull_request.number }}"
-          echo "[merge] This looks like a dependency update PR (#$PR_NUMBER)."
-          echo "[merge] Trying to merge via GitHub CLI..."
-
-          # GitHub CLI는 기본 runner에 설치되어 있음(gh)
-          # fast-forward merge or squash merge, pick one:
+          echo "[merge] dependency update PR (#$PR_NUMBER). trying merge..." | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
           gh pr merge "$PR_NUMBER" --squash --auto --delete-branch || \
-          gh pr merge "$PR_NUMBER" --merge --auto --delete-branch || true
-
-          echo "auto-merge attempted" >> "${REPORT_DIR}/SUMMARY.txt"
+          gh pr merge "$PR_NUMBER" --merge  --auto --delete-branch || true
+          echo "auto-merge attempted" >> "${ABS_REPORT_DIR}/SUMMARY.txt"
 
       ########################################################################
-      # 4. 캐시 검증 및 통계
+      # 4. 캐시/환경 통계
       ########################################################################
       - name: "Verify cache creation and generate statistics"
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          echo "=== Cache Verification and Statistics ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          mkdir -p "${ABS_LOG_DIR}" || true
 
-          # Check npm cache
+          echo "=== Cache Verification and Statistics ===" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+
+          # npm cache
           if command -v npm >/dev/null 2>&1; then
             NPM_CACHE_DIR=$(npm config get cache 2>/dev/null || echo "~/.npm")
             if [ -d "$NPM_CACHE_DIR" ]; then
               NPM_CACHE_SIZE=$(du -sh "$NPM_CACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown")
-              echo "✅ npm cache size: $NPM_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-              echo "npm_cache_size=$NPM_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
+              echo "✅ npm cache size: $NPM_CACHE_SIZE" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+              echo "npm_cache_size=$NPM_CACHE_SIZE" >> "${ABS_REPORT_DIR}/cache_stats.txt"
             fi
-
-            # Count node_modules
             NODE_MODULES_COUNT=$(find . -type d -name "node_modules" 2>/dev/null | wc -l || echo "0")
-            echo "Found $NODE_MODULES_COUNT node_modules directories" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+            echo "Found $NODE_MODULES_COUNT node_modules directories" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
           fi
 
-          # Check pip cache
+          # pip cache
           if command -v pip >/dev/null 2>&1; then
             PIP_CACHE_DIR=$(pip cache dir 2>/dev/null || echo "~/.cache/pip")
             if [ -d "$PIP_CACHE_DIR" ]; then
               PIP_CACHE_SIZE=$(du -sh "$PIP_CACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown")
-              echo "✅ pip cache size: $PIP_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-              echo "pip_cache_size=$PIP_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
+              echo "✅ pip cache size: $PIP_CACHE_SIZE" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+              echo "pip_cache_size=$PIP_CACHE_SIZE" >> "${ABS_REPORT_DIR}/cache_stats.txt"
             fi
-
-            # Count installed packages
-            PIP_PACKAGE_COUNT=$(pip list --format=json 2>/dev/null | jq 'length' || echo "0")
-            echo "Installed $PIP_PACKAGE_COUNT pip packages" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+            if command -v jq >/dev/null 2>&1 && pip list --format=json >/tmp/pip_list.json 2>/dev/null; then
+              PIP_PACKAGE_COUNT=$(jq 'length' /tmp/pip_list.json 2>/dev/null || echo "0")
+            else
+              PIP_PACKAGE_COUNT=$(pip list 2>/dev/null | wc -l || echo "0")
+            fi
+            echo "Installed $PIP_PACKAGE_COUNT pip packages" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
           fi
 
-          # Check Maven cache
+          # Maven cache
           if [ -d "$HOME/.m2/repository" ]; then
             MAVEN_CACHE_SIZE=$(du -sh "$HOME/.m2/repository" 2>/dev/null | cut -f1 || echo "unknown")
-            echo "✅ Maven cache size: $MAVEN_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-            echo "maven_cache_size=$MAVEN_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
+            echo "✅ Maven cache size: $MAVEN_CACHE_SIZE" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+            echo "maven_cache_size=$MAVEN_CACHE_SIZE" >> "${ABS_REPORT_DIR}/cache_stats.txt"
           fi
 
-          # Check Docker cache
+          # Docker cache
           if [ -d "/tmp/.buildx-cache" ]; then
             DOCKER_CACHE_SIZE=$(du -sh "/tmp/.buildx-cache" 2>/dev/null | cut -f1 || echo "unknown")
-            echo "✅ Docker buildx cache size: $DOCKER_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-            echo "docker_cache_size=$DOCKER_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
+            echo "✅ Docker buildx cache size: $DOCKER_CACHE_SIZE" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+            echo "docker_cache_size=$DOCKER_CACHE_SIZE" >> "${ABS_REPORT_DIR}/cache_stats.txt"
           fi
 
-          # Actions cache statistics
-          echo "" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "GitHub Actions Cache Information:" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "- Cache keys used in this run:" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "  * npm: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "  * pip: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "  * maven: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "  * docker: ${{ runner.os }}-buildx-${{ github.sha }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-
-          echo "" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "✅ Cache verification completed" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo "" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+          echo "GitHub Actions Cache Keys:" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+          echo "  * npm:    ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+          echo "  * pip:    ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+          echo "  * maven:  ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+          echo "  * docker: ${{ runner.os }}-buildx-${{ github.sha }}" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
+          echo "✅ Cache verification completed" | tee -a "${ABS_REPORT_DIR}/SUMMARY.txt"
 
       ########################################################################
       # 5. 리포트/로그 아티팩트 업로드
       ########################################################################
-      - name: "Upload dependabot-check artifact"
+      - name: "Upload dependabot-check artifact (logs+reports+caches-meta)"
         if: ${{ github.event.inputs.upload_artifact != 'false' }}
         uses: actions/upload-artifact@v4
         with:
