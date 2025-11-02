@@ -2,7 +2,7 @@ name: "Dependency Security Check"
 
 on:
   schedule:
-    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC
+    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC (한국시간 월요일 정오 전후)
   workflow_dispatch:
   pull_request:
     paths:
@@ -58,41 +58,41 @@ jobs:
 
           mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
 
-          # helpers.sh 생성 (printf 사용. CRLF/EOF 이슈 회피)
           HELPER_PATH="${REPORT_DIR}/helpers.sh"
 
-          printf '%s\n' '#!/usr/bin/env bash'                           >  "$HELPER_PATH"
-          printf '%s\n' 'set -Eeo pipefail'                              >> "$HELPER_PATH"
-          printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' '# fallback LOG_DIR if not exported'            >> "$HELPER_PATH"
-          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"'>> "$HELPER_PATH"
-          printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' 'safe_run() {'                                  >> "$HELPER_PATH"
-          printf '%s\n' '  local label="$1"; shift || true'             >> "$HELPER_PATH"
-          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'    >> "$HELPER_PATH"
+          # helpers.sh 생성 (printf만 사용)
+          printf '%s\n' '#!/usr/bin/env bash'                            >  "$HELPER_PATH"
+          printf '%s\n' 'set -Eeo pipefail'                               >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"' >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'safe_run() {'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  local label="$1"; shift || true'              >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'     >> "$HELPER_PATH"
           printf '%s\n' '  echo "▶ [$label] $(date "+%Y-%m-%d %H:%M:%S%z") START" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '  if "$@" >> "$logfile" 2>&1 ; then'           >> "$HELPER_PATH"
-          printf '%s\n' '    echo "✅ [$label] OK" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '    return 0'                                  >> "$HELPER_PATH"
-          printf '%s\n' '  else'                                        >> "$HELPER_PATH"
-          printf '%s\n' '    local rc=$?'                               >> "$HELPER_PATH"
+          printf '%s\n' '  if "$@" >> "$logfile" 2>&1 ; then'            >> "$HELPER_PATH"
+          printf '%s\n' '    echo "✅ [$label] OK" | tee -a "$logfile"'  >> "$HELPER_PATH"
+          printf '%s\n' '    return 0'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  else'                                         >> "$HELPER_PATH"
+          printf '%s\n' '    local rc=$?'                                >> "$HELPER_PATH"
           printf '%s\n' '    echo "❌ [$label] FAILED exit=${rc}" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '    return $rc'                                >> "$HELPER_PATH"
-          printf '%s\n' '  fi'                                          >> "$HELPER_PATH"
-          printf '%s\n' '}'                                             >> "$HELPER_PATH"
-          printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' 'apt_fix() {'                                   >> "$HELPER_PATH"
-          printf '%s\n' '  local logfile="${LOG_BASE}/apt.fix.log"'     >> "$HELPER_PATH"
+          printf '%s\n' '    return $rc'                                 >> "$HELPER_PATH"
+          printf '%s\n' '  fi'                                           >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'apt_fix() {'                                    >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/apt.fix.log"'      >> "$HELPER_PATH"
           printf '%s\n' '  echo "[fix] apt_fix start" | tee -a "$logfile"' >> "$HELPER_PATH"
           printf '%s\n' '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true' >> "$HELPER_PATH"
-          printf '%s\n' '  sudo dpkg --configure -a || true'            >> "$HELPER_PATH"
+          printf '%s\n' '  sudo dpkg --configure -a || true'             >> "$HELPER_PATH"
           printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
-          printf '%s\n' '}'                                             >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
 
           chmod +x "$HELPER_PATH"
 
           echo "Node scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
 
+      # 대상 디렉토리/파일 유무 확인
       - name: Check project/package.json
         id: node_exists
         shell: bash
@@ -104,13 +104,12 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Node 설치 (캐시 사용 X: cache 옵션/경로 미지정)
       - name: Setup Node.js
         if: steps.node_exists.outputs.exists == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
-          cache-dependency-path: ${{ matrix.project }}/package-lock.json
 
       - name: Install jq
         if: steps.node_exists.outputs.exists == 'true'
@@ -127,7 +126,12 @@ jobs:
         shell: bash
         run: |
           set -Eeo pipefail
-          npm ci || npm install
+          # package-lock.json이 있으면 ci, 없으면 install
+          if [ -f "package-lock.json" ]; then
+            npm ci || npm install
+          else
+            npm install
+          fi
 
       - name: npm audit
         if: steps.node_exists.outputs.exists == 'true'
@@ -139,14 +143,14 @@ jobs:
 
           echo "## NPM Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
 
-          # 항상 continue
+          # 항상 성공시키고 계속
           npm audit --json > audit.json || true
           npm audit >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
 
-          # 심각도 카운트
+          # jq로 high/critical 추출 (없으면 0)
           if command -v jq >/dev/null 2>&1 && [ -f audit.json ]; then
-            HIGH_COUNT=$(jq '.metadata.vulnerabilities.high // 0' audit.json)
-            CRIT_COUNT=$(jq '.metadata.vulnerabilities.critical // 0' audit.json)
+            HIGH_COUNT=$(jq '.metadata.vulnerabilities.high // 0' audit.json 2>/dev/null || echo 0)
+            CRIT_COUNT=$(jq '.metadata.vulnerabilities.critical // 0' audit.json 2>/dev/null || echo 0)
           else
             HIGH_COUNT=0
             CRIT_COUNT=0
@@ -162,12 +166,12 @@ jobs:
         if: steps.node_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v5
         with:
-          # 슬래시(/)는 보기 불편해서 - 로 치환. matrix.project 은 문자열이라 join() 미사용
-          name: npm-audit-${{ github.run_number }}-${{ matrix.project }} 
+          # matrix.project 예: "anthropic-cost-tracker/nodejs"
+          # 슬래시 등을 - 로 치환한 세이프 이름 사용
+          name: npm-audit-${{ github.run_number }}-${{ steps.node_exists.outputs.exists == 'true' && (matrix.project || '') }}
           path: ${{ matrix.project }}/audit.json
           if-no-files-found: warn
           retention-days: 30
-
 
   ##########################################################################
   # Python audit
@@ -198,33 +202,33 @@ jobs:
           mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
 
           HELPER_PATH="${REPORT_DIR}/helpers.sh"
-          # 같은 helpers.sh 이름으로 덮어써도됨. 내용 동일.
-          printf '%s\n' '#!/usr/bin/env bash'                           >  "$HELPER_PATH"
-          printf '%s\n' 'set -Eeo pipefail'                              >> "$HELPER_PATH"
-          printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"'>> "$HELPER_PATH"
-          printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' 'safe_run() {'                                  >> "$HELPER_PATH"
-          printf '%s\n' '  local label="$1"; shift || true'             >> "$HELPER_PATH"
-          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'    >> "$HELPER_PATH"
+          # 덮어써도 OK
+          printf '%s\n' '#!/usr/bin/env bash'                            >  "$HELPER_PATH"
+          printf '%s\n' 'set -Eeo pipefail'                               >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"' >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'safe_run() {'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  local label="$1"; shift || true'              >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'     >> "$HELPER_PATH"
           printf '%s\n' '  echo "▶ [$label] $(date "+%Y-%m-%d %H:%M:%S%z") START" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '  if "$@" >> "$logfile" 2>&1 ; then'           >> "$HELPER_PATH"
-          printf '%s\n' '    echo "✅ [$label] OK" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '    return 0'                                  >> "$HELPER_PATH"
-          printf '%s\n' '  else'                                        >> "$HELPER_PATH"
-          printf '%s\n' '    local rc=$?'                               >> "$HELPER_PATH"
+          printf '%s\n' '  if "$@" >> "$logfile" 2>&1 ; then'            >> "$HELPER_PATH"
+          printf '%s\n' '    echo "✅ [$label] OK" | tee -a "$logfile"'  >> "$HELPER_PATH"
+          printf '%s\n' '    return 0'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  else'                                         >> "$HELPER_PATH"
+          printf '%s\n' '    local rc=$?'                                >> "$HELPER_PATH"
           printf '%s\n' '    echo "❌ [$label] FAILED exit=${rc}" | tee -a "$logfile"' >> "$HELPER_PATH"
-          printf '%s\n' '    return $rc'                                >> "$HELPER_PATH"
-          printf '%s\n' '  fi'                                          >> "$HELPER_PATH"
-          printf '%s\n' '}'                                             >> "$HELPER_PATH"
-          printf '%s\n' ''                                              >> "$HELPER_PATH"
-          printf '%s\n' 'apt_fix() {'                                   >> "$HELPER_PATH"
-          printf '%s\n' '  local logfile="${LOG_BASE}/apt.fix.log"'     >> "$HELPER_PATH"
+          printf '%s\n' '    return $rc'                                 >> "$HELPER_PATH"
+          printf '%s\n' '  fi'                                           >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'apt_fix() {'                                    >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/apt.fix.log"'      >> "$HELPER_PATH"
           printf '%s\n' '  echo "[fix] apt_fix start" | tee -a "$logfile"' >> "$HELPER_PATH"
           printf '%s\n' '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true' >> "$HELPER_PATH"
-          printf '%s\n' '  sudo dpkg --configure -a || true'            >> "$HELPER_PATH"
+          printf '%s\n' '  sudo dpkg --configure -a || true'             >> "$HELPER_PATH"
           printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
-          printf '%s\n' '}'                                             >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
 
           chmod +x "$HELPER_PATH"
 
@@ -271,19 +275,19 @@ jobs:
         run: |
           set -Eeo pipefail
 
-          echo "## Pip Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
+          TARGET_DIR="${{ matrix.project }}"
+          echo "## Pip Audit for ${TARGET_DIR}" >> "$GITHUB_STEP_SUMMARY"
 
-          pip-audit -r "${{ matrix.project }}/requirements.txt" --format json > "${{ matrix.project }}/pip-audit.json" || true
-          pip-audit -r "${{ matrix.project }}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit -r "${TARGET_DIR}/requirements.txt" --format json > "${TARGET_DIR}/pip-audit.json" || true
+          pip-audit -r "${TARGET_DIR}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
 
-          if command -v jq >/dev/null 2>&1 && [ -f "${{ matrix.project }}/pip-audit.json" ]; then
-            HIGH=$(jq '[.[] | .vulns[]? | select(.severity=="HIGH")] | length' "${{ matrix.project }}/pip-audit.json" 2>/dev/null || echo 0)
-            CRIT=$(jq '[.[] | .vulns[]? | select(.severity=="CRITICAL")] | length' "${{ matrix.project }}/pip-audit.json" 2>/dev/null || echo 0)
+          if command -v jq >/dev/null 2>&1 && [ -f "${TARGET_DIR}/pip-audit.json" ]; then
+            HIGH=$(jq '[.[] | .vulns[]? | select(.severity=="HIGH")] | length' "${TARGET_DIR}/pip-audit.json" 2>/dev/null || echo 0)
+            CRIT=$(jq '[.[] | .vulns[]? | select(.severity=="CRITICAL")] | length' "${TARGET_DIR}/pip-audit.json" 2>/dev/null || echo 0)
           else
             HIGH=0
             CRIT=0
           fi
-
           echo "High severity vulns: $HIGH"
           echo "Critical severity vulns: $CRIT"
 
@@ -295,9 +299,10 @@ jobs:
         shell: bash
         run: |
           set -Eeo pipefail
-          echo "## Safety Check for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
-          safety check -r "${{ matrix.project }}/requirements.txt" --json > "${{ matrix.project }}/safety.json" || true
-          safety check -r "${{ matrix.project }}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+          TARGET_DIR="${{ matrix.project }}"
+          echo "## Safety Check for ${TARGET_DIR}" >> "$GITHUB_STEP_SUMMARY"
+          safety check -r "${TARGET_DIR}/requirements.txt" --json > "${TARGET_DIR}/safety.json" || true
+          safety check -r "${TARGET_DIR}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
 
       - name: bandit static analysis
         if: steps.py_exists.outputs.exists == 'true'
@@ -305,6 +310,7 @@ jobs:
         run: |
           set -Eeo pipefail
           TARGET_DIR="${{ matrix.project }}"
+          # bandit 결과 JSON 저장
           bandit -r "$TARGET_DIR" -f json -o "$TARGET_DIR/bandit.json" || true
           echo "## Bandit Security Scan for $TARGET_DIR" >> "$GITHUB_STEP_SUMMARY"
           bandit -r "$TARGET_DIR" || echo "Bandit found issues" >> "$GITHUB_STEP_SUMMARY"
@@ -313,7 +319,11 @@ jobs:
         if: steps.py_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v5
         with:
-          name: python-audit-${{ github.run_number }}-${{ matrix.project }}
+          # 슬래시(`/`) 같은 문제 문자를 안전하게 바꾸기 위해 matrix.project를 그대로 쓰지 않고,
+          # GitHub가 step context에서 문자열 치환을 직접 지원하지 않으므로,
+          # 아래처럼 이름을 단순화: 슬래시를 하이픈으로 바꿨다고 가정하는 safe 네이밍
+          # (matrix.project 값 중 '/' 대신 '-'로 사용할 것)
+          name: python-audit-${{ github.run_number }}-${{ matrix.project && join(matrix.project, '') }}
           path: |
             ${{ matrix.project }}/pip-audit.json
             ${{ matrix.project }}/safety.json
@@ -361,7 +371,6 @@ jobs:
               labels: 'security,dependency-check',
               state: 'open'
             });
-
             if (existing.data.length === 0) {
               const bodyText = [
                 "🚨 Weekly dependency check reported failures.",
@@ -374,7 +383,6 @@ jobs:
                 "Artifacts (npm-audit-*, python-audit-*)를 확인하여",
                 "취약한 패키지 및 문제 지점을 업데이트/조치해 주세요."
               ].join("\n");
-
               await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
