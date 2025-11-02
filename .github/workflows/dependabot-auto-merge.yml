@@ -309,11 +309,11 @@ jobs:
           # Dockerfile이 있으면 그걸로, 없으면 fallback Dockerfile 생성
           DF_FALLBACK="${REPORT_DIR}/Dockerfile.ci"
           if [ ! -f "Dockerfile" ]; then
-            cat > "${DF_FALLBACK}" << 'EOF'
-            FROM alpine:3.20
-            RUN echo "dependabot smoke container" > /hello.txt
-            CMD ["cat", "/hello.txt"]
-            EOF
+            cat > "${DF_FALLBACK}" <<'EOF'
+          FROM alpine:3.20
+          RUN echo "dependabot smoke container" > /hello.txt
+          CMD ["cat", "/hello.txt"]
+          EOF
             DOCKERFILE="$DF_FALLBACK"
           else
             DOCKERFILE="Dockerfile"
