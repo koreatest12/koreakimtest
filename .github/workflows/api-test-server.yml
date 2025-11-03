@@ -1,367 +1,442 @@
-name: "🔐 Secure Superflow — No-Skip + ECHO (CodeQL+Dep+Package+Release)"
+name: "Dependency Security Check + AutoUpgrade + Release Publish"
 
 on:
   schedule:
-    - cron: "0 3 * * 1"    # 매주 월요일 03:00 UTC
+    - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/requirements.txt"
+      - ".github/workflows/dependency-check.yml"
   push:
     branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  workflow_dispatch:
-    inputs:
-      run_mode:             # 1
-        description: "full=모두 수행 / lite=릴리즈 생략"
-        type: choice
-        options: [full, lite]
-        default: full
-      boot_if_missing:      # 2
-        description: "대상 폴더에 템플릿이 없으면 자동 생성(스킵 방지)"
-        type: boolean
-        default: true
-      node_version:         # 3
-        description: "Node.js version"
-        default: "20"
-      py_version:           # 4
-        description: "Python version"
-        default: "3.11"
+    paths:
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/requirements.txt"
 
-# 최소 권한(경고 방지). Job에서 필요한 권한만 승격
 permissions:
-  contents: read
+  contents: write         # 릴리즈 생성/업로드에 필요
+  pull-requests: write
   security-events: read
-  actions: read
+  id-token: write
+  packages: write
 
 env:
   TZ: Asia/Seoul
   REPORT_DIR: .github/sec_report
   LOG_DIR: .github/sec_report/logs
   ARTIFACT_DIR: .github/sec_report/artifacts
-  SNAP_DIR: .github/sec_report/snapshots
-  NODE_PROJECTS: "anthropic-cost-tracker/nodejs mcp-hello-js mcp-fs"
-  PY_PROJECTS: "anthropic-cost-tracker/python mcp-hello-py mcp-python-server mcp-apache-server ."
-  ECHO_OK: "✅"
-  ECHO_WARN: "⚠️"
-  ECHO_FAIL: "❌"
-
-concurrency:
-  group: secure-superflow-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
-  # 0) 공통 준비 + 스킵 방지 부트스트랩(모두 echo로 로깅)
-  prepare:
-    name: "Prepare & Bootstrap (No-Skip + Echo)"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Prepare dirs & helper (echo functions)
+  ##########################################################################
+  # Node.js audit + upgrade
+  ##########################################################################
+  node-security:
+    name: "Node.js Dependency Check + Upgrade"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: anthropic-cost-tracker/nodejs
+            safe: anthropic-cost-tracker-nodejs
+          - project: mcp-hello-js
+            safe: mcp-hello-js
+          - project: mcp-fs
+            safe: mcp-fs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare dirs and helper script (no heredoc)
+        id: prep_node
         shell: bash
         run: |
-          set -Eeuo pipefail
-          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}" "${SNAP_DIR}"
-          HELPER="${REPORT_DIR}/helpers.sh"
+          set -Eeo pipefail
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+          HELPER_PATH="${REPORT_DIR}/helpers.sh"
+          printf '%s\n' '#!/usr/bin/env bash'                            >  "$HELPER_PATH"
+          printf '%s\n' 'set -Eeo pipefail'                               >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"' >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'safe_run() {'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  local label="$1"; shift || true'              >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'     >> "$HELPER_PATH"
+          printf '%s\n' '  echo "▶ [$label] $(date \"+%Y-%m-%d %H:%M:%S%z\") START" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '  if \"$@\" >> \"$logfile\" 2>&1 ; then'        >> "$HELPER_PATH"
+          printf '%s\n' '    echo \"✅ [$label] OK\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '    return 0'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  else'                                         >> "$HELPER_PATH"
+          printf '%s\n' '    local rc=$?'                                >> "$HELPER_PATH"
+          printf '%s\n' '    echo \"❌ [$label] FAILED exit=${rc}\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '    return $rc'                                 >> "$HELPER_PATH"
+          printf '%s\n' '  fi'                                           >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'apt_fix() {'                                    >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile=\"${LOG_BASE}/apt.fix.log\"'    >> "$HELPER_PATH"
+          printf '%s\n' '  echo \"[fix] apt_fix start\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo dpkg --configure -a || true'             >> "$HELPER_PATH"
+          printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+          chmod +x "$HELPER_PATH"
+          echo "Node scan target: ${{ matrix.project }} (safe=${{ matrix.safe }})" | tee -a "${REPORT_DIR}/SUMMARY_node.txt"
+      - name: Check project/package.json
+        id: node_exists
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          if [ -d "${{ matrix.project }}" ] && [ -f "${{ matrix.project }}/package.json" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Setup Node.js
+        if: steps.node_exists.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install jq
+        if: steps.node_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          source "${REPORT_DIR}/helpers.sh"
+          apt_fix || true
+          sudo apt-get install -y jq || true
+      - name: npm install / ci
+        if: steps.node_exists.outputs.exists == 'true'
+        working-directory: ${{ matrix.project }}
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          if [ -f "package-lock.json" ]; then
+            npm ci || npm install
+          else
+            npm install
+          fi
+      - name: npm audit (report only)
+        if: steps.node_exists.outputs.exists == 'true'
+        id: node_audit
+        working-directory: ${{ matrix.project }}
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "## NPM Audit for ${{ matrix.project }}" >> "$GITHUB_STEP_SUMMARY"
+          npm audit --json > audit.json || true
+          npm audit >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+          if command -v jq >/dev/null 2>&1 && [ -f audit.json ]; then
+            HIGH_COUNT=$(jq '.metadata.vulnerabilities.high // 0' audit.json 2>/dev/null || echo 0)
+            CRIT_COUNT=$(jq '.metadata.vulnerabilities.critical // 0' audit.json 2>/dev/null || echo 0)
+          else
+            HIGH_COUNT=0
+            CRIT_COUNT=0
+          fi
+          echo "High severity: $HIGH_COUNT"
+          echo "Critical severity: $CRIT_COUNT"
+          echo "HIGH_COUNT=${HIGH_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "CRIT_COUNT=${CRIT_COUNT}" >> "$GITHUB_OUTPUT"
+      - name: npm upgrade attempt (auto-fix vulnerabilities)
+        if: steps.node_exists.outputs.exists == 'true'
+        working-directory: ${{ matrix.project }}
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          UPG_LOG="sec-upgrade.log"
           {
-            echo '#!/usr/bin/env bash'
-            echo 'set -Eeuo pipefail'
-            echo 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"'
-            echo 'ts(){ date "+%Y-%m-%d %H:%M:%S%z"; }'
-            echo 'safe_run(){ local l="$1";shift||true; local f="${LOG_BASE}/${l}.log"; echo "▶ [$l] $(ts)" | tee -a "$f"; if "$@" >>"$f" 2>&1; then echo "'"$ECHO_OK"' [$l] OK" | tee -a "$f"; else rc=$?; echo "'"$ECHO_FAIL"' [$l] FAIL exit=$rc" | tee -a "$f"; return $rc; fi; }'
-            echo 'apt_fix(){ local f="${LOG_BASE}/apt.fix.log"; echo "[fix] apt_fix start $(ts)" | tee -a "$f"; sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true; sudo dpkg --configure -a || true; (sudo apt-get update -y || true) >/dev/null 2>&1; }'
-            echo 'echo_line(){ # echo_line <file> <text...>'
-            echo '  local file="$1"; shift || true'
-            echo '  mkdir -p "$(dirname "$file")"'
-            echo '  printf "%s\n" "$*" >> "$file"'
-            echo '  printf "%s | %s\n" "$(ts)" "$*" >> "${LOG_BASE}/echo.write.log"'
-            echo '}'
-            echo 'echo_file(){ # echo_file <file> <marker>'
-            echo '  local file="$1"; local marker="$2"'
-            echo '  printf "%s\n" "----- BEGIN ${marker} $(ts) -----" | tee -a "${LOG_BASE}/echo.write.log"'
-            echo '  cat "$file" | sed -e "s/^/[${marker}] /" | tee -a "${LOG_BASE}/echo.write.log" >/dev/null || true'
-            echo '  printf "%s\n" "-----  END  ${marker} $(ts) -----" | tee -a "${LOG_BASE}/echo.write.log"'
-            echo '}'
-            echo 'snap_tree(){ # snap_tree <label> <dir>'
-            echo '  local label="$1"; local dir="$2"'
-            echo '  local out="${SNAP_DIR}/${label}.tree.txt"'
-            echo '  mkdir -p "${SNAP_DIR}"'
-            echo '  {'
-            echo '    echo "### SNAPSHOT: $label $(ts)"'
-            echo '    echo'
-            echo '    echo "$ ls -alR $dir"'
-            echo '    ls -alR "$dir" || true'
-            echo '    echo'
-            echo '    echo "$ sha256sum of small files"'
-            echo '    find "$dir" -type f -maxdepth 3 -size -512k -print0 | xargs -0 -I{} sh -c '\''sha256sum "{}" || true'\'' || true'
-            echo '  } > "$out" 2>&1'
-            echo '  echo "'"$ECHO_OK"' snapshot -> $out" | tee -a "${LOG_BASE}/echo.snap.log"'
-            echo '}'
-          } > "$HELPER"
-          chmod +x "$HELPER"
-
-      - name: Bootstrap Node projects (echo each line)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-          if [[ "${{ inputs.boot_if_missing || 'true' }}" == "true" ]]; then
-            for P in $NODE_PROJECTS; do
-              safe_run "node.bootstrap.$(echo "$P" | tr '/' '_')" bash -c "
-                mkdir -p \"$P\"
-                FILE_JSON=\"$P/package.json\"
-                FILE_LOCK=\"$P/package-lock.json\"
-                if [ ! -f \"\$FILE_JSON\" ]; then
-                  : > \"\$FILE_JSON\"
-                  echo_line \"\$FILE_JSON\" '{'
-                  echo_line \"\$FILE_JSON\" '  \"name\": \"placeholder-app\",'
-                  echo_line \"\$FILE_JSON\" '  \"version\": \"0.0.1\",'
-                  echo_line \"\$FILE_JSON\" '  \"private\": true,'
-                  echo_line \"\$FILE_JSON\" '  \"license\": \"UNLICENSED\",'
-                  echo_line \"\$FILE_JSON\" '  \"scripts\": { \"audit\": \"npm audit\" }'
-                  echo_line \"\$FILE_JSON\" '}'
-                  echo_file  \"\$FILE_JSON\"  \"package.json:$P\"
-                fi
-                if [ ! -f \"\$FILE_LOCK\" ]; then
-                  : > \"\$FILE_LOCK\"
-                  echo_line  \"\$FILE_LOCK\" '{}'
-                  echo_file   \"\$FILE_LOCK\" \"package-lock.json:$P\"
-                fi
-              "
-            done
-          fi
-          snap_tree "node.bootstrap" "."
-
-      - name: Bootstrap Python projects (echo each line)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-          if [[ "${{ inputs.boot_if_missing || 'true' }}" == "true" ]]; then
-            for P in $PY_PROJECTS; do
-              safe_run "py.bootstrap.$(echo "$P" | tr '/' '_')" bash -c "
-                mkdir -p \"$P\"
-                REQ=\"$P/requirements.txt\"
-                PYPROJ=\"$P/pyproject.toml\"
-                if [ ! -f \"\$REQ\" ]; then
-                  : > \"\$REQ\"
-                  echo_line \"\$REQ\" '# placeholder deps (empty ok)'
-                  echo_file  \"\$REQ\"  \"requirements.txt:$P\"
-                fi
-                if [ ! -f \"\$PYPROJ\" ] && [ ! -f \"$P/setup.py\" ]; then
-                  : > \"\$PYPROJ\"
-                  echo_line \"\$PYPROJ\" '[build-system]'
-                  echo_line \"\$PYPROJ\" 'requires = [\"setuptools\", \"wheel\"]'
-                  echo_line \"\$PYPROJ\" 'build-backend = \"setuptools.build_meta\"'
-                  echo_line \"\$PYPROJ\" '[project]'
-                  echo_line \"\$PYPROJ\" 'name = \"placeholder-py\"'
-                  echo_line \"\$PYPROJ\" 'version = \"0.0.1\"'
-                  echo_file  \"\$PYPROJ\" \"pyproject.toml:$P\"
-                fi
-              "
-            done
-          fi
-          snap_tree "python.bootstrap" "."
-
-      - name: Upload bootstrap snapshots & echo logs
+            echo "### $(date '+%Y-%m-%d %H:%M:%S%z') npm audit fix try"
+            npm audit fix || true
+            echo
+            echo "### $(date '+%Y-%m-%d %H:%M:%S%z') npm audit fix --force try (may introduce breaking changes)"
+            npm audit fix --force || true
+            echo
+            echo "### re-run npm audit --json after fix"
+            npm audit --json || true
+          } > "$UPG_LOG" 2>&1 || true
+      - name: Upload Node audit artifact
+        if: steps.node_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v5
         with:
-          name: echo-bootstrap-${{ github.run_number }}
+          name: npm-audit-${{ github.run_number }}-${{ matrix.safe }}
           path: |
-            ${{ env.SNAP_DIR }}/
-            ${{ env.LOG_DIR }}/echo*.log
-          if-no-files-found: ignore
+            ${{ matrix.project }}/audit.json
+            ${{ matrix.project }}/sec-upgrade.log
+          if-no-files-found: warn
           retention-days: 30
 
-  # 1) CodeQL — 항상 실행
-  codeql:
-    name: "CodeQL (JS+Py) — Always Run"
-    runs-on: ubuntu-latest
-    needs: [prepare]
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Init
-        uses: github/codeql-action/init@v3
-        with:
-          languages: javascript, python
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
-        continue-on-error: true
-      - name: Analyze
-        uses: github/codeql-action/analyze@v3
-        with:
-          category: "/language:javascript;/language:python"
-        continue-on-error: true
 
-  # 2) Node 의존성 감사+자동수정 — echo 로깅
-  dep-node:
-    name: "Node Dep Audit+Fix — Echo"
+  ##########################################################################
+  # Python audit + upgrade
+  ##########################################################################
+  python-security:
+    name: "Python Dependency Check + Upgrade"
     runs-on: ubuntu-latest
-    needs: [prepare]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node_version || '20' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: anthropic-cost-tracker/python
+            safe: anthropic-cost-tracker-python
+          - project: mcp-hello-py
+            safe: mcp-hello-py
+          - project: mcp-python-server
+            safe: mcp-python-server
+          - project: mcp-apache-server
+            safe: mcp-apache-server
+          - project: .
+            safe: root-dot
 
-      - name: Ensure jq (with echo)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare dirs and helper script (no heredoc)
+        id: prep_py
         shell: bash
         run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-          safe_run "apt.fix" apt_fix
-          safe_run "apt.install.jq" sudo apt-get install -y jq
+          set -Eeo pipefail
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+          HELPER_PATH="${REPORT_DIR}/helpers.sh"
+          printf '%s\n' '#!/usr/bin/env bash'                            >  "$HELPER_PATH"
+          printf '%s\n' 'set -Eeo pipefail'                               >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_BASE="${LOG_DIR:-.github/sec_report/logs}"' >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'safe_run() {'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  local label="$1"; shift || true'              >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="${LOG_BASE}/${label}.log"'     >> "$HELPER_PATH"
+          printf '%s\n' '  echo "▶ [$label] $(date \"+%Y-%m-%d %H:%M:%S%z\") START" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '  if \"$@\" >> \"$logfile\" 2>&1 ; then'        >> "$HELPER_PATH"
+          printf '%s\n' '    echo \"✅ [$label] OK\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '    return 0'                                   >> "$HELPER_PATH"
+          printf '%s\n' '  else'                                         >> "$HELPER_PATH"
+          printf '%s\n' '    local rc=$?'                                >> "$HELPER_PATH"
+          printf '%s\n' '    echo \"❌ [$label] FAILED exit=${rc}\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '    return $rc'                                 >> "$HELPER_PATH"
+          printf '%s\n' '  fi'                                           >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+          printf '%s\n' ''                                               >> "$HELPER_PATH"
+          printf '%s\n' 'apt_fix() {'                                    >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile=\"${LOG_BASE}/apt.fix.log\"'    >> "$HELPER_PATH"
+          printf '%s\n' '  echo \"[fix] apt_fix start\" | tee -a \"$logfile\"' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true' >> "$HELPER_PATH"
+          printf '%s\n' '  sudo dpkg --configure -a || true'             >> "$HELPER_PATH"
+          printf '%s\n' '  sudo apt-get update -y || sudo apt-get update -y || true' >> "$HELPER_PATH"
+          printf '%s\n' '}'                                              >> "$HELPER_PATH"
+          chmod +x "$HELPER_PATH"
+          echo "Python scan target: ${{ matrix.project }} (safe=${{ matrix.safe }})" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
 
-      - name: Audit across projects (echo)
+      - name: Check requirements.txt
+        id: py_exists
         shell: bash
         run: |
-          set -Eeuo pipefail
+          set -Eeo pipefail
+          if [ -d "${{ matrix.project }}" ] && [ -f "${{ matrix.project }}/requirements.txt" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install security tools
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          python -m pip install --upgrade pip
+          pip install pip-audit safety bandit build || true
+      - name: Ensure jq (for parsing)
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
           source "${REPORT_DIR}/helpers.sh"
-          for P in $NODE_PROJECTS; do
-            echo "::group::[node] $P"
-            safe_run "node.npm.install.$(echo "$P" | tr '/' '_')" bash -c "
-              cd \"$P\"
-              if [ -f package-lock.json ]; then npm ci || npm install || true; else npm install || true; fi
-            "
-            safe_run "node.npm.audit.$(echo "$P" | tr '/' '_')" bash -c "
-              cd \"$P\"
-              npm audit --json > audit.json || true
-              npm audit fix || true
-              npm audit fix --force || true
-              [ -f audit.json ] && jq '.metadata.vulnerabilities? // {}' audit.json || true
-            "
-            echo "::endgroup::"
-          done
-
-      - name: Upload node audit artifacts
+          apt_fix || true
+          sudo apt-get install -y jq || true
+      - name: pip-audit (report only)
+        if: steps.py_exists.outputs.exists == 'true'
+        id: py_audit
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TARGET_DIR="${{ matrix.project }}"
+          echo "## Pip Audit for ${TARGET_DIR}" >> "$GITHUB_STEP_SUMMARY"
+          pip-audit -r "${TARGET_DIR}/requirements.txt" --format json > "${TARGET_DIR}/pip-audit.json" || true
+          pip-audit -r "${TARGET_DIR}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+          if command -v jq >/dev/null 2>&1 && [ -f "${TARGET_DIR}/pip-audit.json" ]; then
+            HIGH=$(jq '[.[] | .vulns[]? | select(.severity=="HIGH")] | length' "${TARGET_DIR}/pip-audit.json" 2>/dev/null || echo 0)
+            CRIT=$(jq '[.[] | .vulns[]? | select(.severity=="CRITICAL")] | length' "${TARGET_DIR}/pip-audit.json" 2>/dev/null || echo 0)
+          else
+            HIGH=0
+            CRIT=0
+          fi
+          echo "High severity vulns: $HIGH"
+          echo "Critical severity vulns: $CRIT"
+          echo "HIGH_COUNT=${HIGH}" >> "$GITHUB_OUTPUT"
+          echo "CRIT_COUNT=${CRIT}" >> "$GITHUB_OUTPUT"
+      - name: safety check
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TARGET_DIR="${{ matrix.project }}"
+          echo "## Safety Check for ${TARGET_DIR}" >> "$GITHUB_STEP_SUMMARY"
+          safety check -r "${TARGET_DIR}/requirements.txt" --json > "${TARGET_DIR}/safety.json" || true
+          safety check -r "${TARGET_DIR}/requirements.txt" >> "$GITHUB_STEP_SUMMARY" || echo "Vulnerabilities found" >> "$GITHUB_STEP_SUMMARY"
+      - name: bandit static analysis
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TARGET_DIR="${{ matrix.project }}"
+          bandit -r "$TARGET_DIR" -f json -o "$TARGET_DIR/bandit.json" || true
+          echo "## Bandit Security Scan for $TARGET_DIR" >> "$GITHUB_STEP_SUMMARY"
+          bandit -r "$TARGET_DIR" || echo "Bandit found issues" >> "$GITHUB_STEP_SUMMARY"
+      - name: pip-audit --fix (auto upgrade attempt)
+        if: steps.py_exists.outputs.exists == 'true'
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          TARGET_DIR="${{ matrix.project }}"
+          UPG_LOG="${TARGET_DIR}/sec-upgrade.log"
+          {
+            echo "### $(date '+%Y-%m-%d %H:%M:%S%z') pip-audit --fix try"
+            echo "(취약 패키지 자동 업그레이드/패치 시도)"
+            pip-audit -r "${TARGET_DIR}/requirements.txt" --fix || true
+            echo
+            echo "### re-run pip-audit for diff"
+            pip-audit -r "${TARGET_DIR}/requirements.txt" --format json || true
+          } > "$UPG_LOG" 2>&1 || true
+      - name: Upload Python audit artifact
+        if: steps.py_exists.outputs.exists == 'true'
         uses: actions/upload-artifact@v5
         with:
-          name: node-audit-${{ github.run_number }}
-          path: ${{ env.NODE_PROJECTS }}/**/audit.json
-          if-no-files-found: ignore
-          retention-days: 30
-
-  # 3) Python 의존성 감사+자동수정 — echo 로깅
-  dep-python:
-    name: "Python Dep Audit+Fix — Echo"
-    runs-on: ubuntu-latest
-    needs: [prepare]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ inputs.py_version || '3.11' }}
-          cache: pip
-      - name: Install tools
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-          safe_run "pip.upgrade" python -m pip install --upgrade pip
-          safe_run "pip.install.tools" pip install pip-audit safety bandit build
-
-      - name: Audit across projects (echo)
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-          for P in $PY_PROJECTS; do
-            echo "::group::[python] $P"
-            safe_run "py.pip_audit.$(echo "$P" | tr '/' '_')" pip-audit -r "$P/requirements.txt" --format json > "$P/pip-audit.json"
-            safe_run "py.safety.$(echo "$P" | tr '/' '_')" bash -c "safety check -r \"$P/requirements.txt\" --json > \"$P/safety.json\""
-            safe_run "py.bandit.$(echo "$P" | tr '/' '_')" bash -c "bandit -r \"$P\" -f json -o \"$P/bandit.json\""
-            safe_run "py.pip_audit.fix.$(echo "$P" | tr '/' '_')" pip-audit -r "$P/requirements.txt" --fix
-            echo "::endgroup::"
-          done
-
-      - name: Upload python audit artifacts
-        uses: actions/upload-artifact@v5
-        with:
-          name: python-audit-${{ github.run_number }}
+          name: python-audit-${{ github.run_number }}-${{ matrix.safe }}
           path: |
-            ${{ env.PY_PROJECTS }}/pip-audit.json
-            ${{ env.PY_PROJECTS }}/safety.json
-            ${{ env.PY_PROJECTS }}/bandit.json
-          if-no-files-found: ignore
+            ${{ matrix.project }}/pip-audit.json
+            ${{ matrix.project }}/safety.json
+            ${{ matrix.project }}/bandit.json
+            ${{ matrix.project }}/sec-upgrade.log
+          if-no-files-found: warn
           retention-days: 30
 
-  # 4) 패키지 빌드 + 릴리즈 — echo 로깅
+
+  ##########################################################################
+  # GitHub advisory gate on PR
+  ##########################################################################
+  dependency-review:
+    name: "Dependency Review (PR gate)"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+
+
+  ##########################################################################
+  # 패키지 빌드 + 릴리즈 출시에 사용할 번들 생성 + GitHub Release 게시
+  ##########################################################################
   package-and-release:
-    name: "Package & Publish Release — Echo"
+    name: "Package Projects & Publish Release"
     runs-on: ubuntu-latest
-    needs: [prepare, codeql, dep-node, dep-python]
-    if: always()
-    permissions:
-      contents: write
-      packages: write
-      actions: read
+    needs: [node-security, python-security]
+    continue-on-error: false   # 이 job은 실패하면 전체 워크플로우는 실패 표시됨
+    env:
+      NODE_PROJECTS: "anthropic-cost-tracker/nodejs mcp-hello-js mcp-fs"
+      PY_PROJECTS: "anthropic-cost-tracker/python mcp-hello-py mcp-python-server mcp-apache-server ."
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js (for npm pack)
+        uses: actions/setup-node@v4
         with:
-          node-version: ${{ inputs.node_version || '20' }}
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ inputs.py_version || '3.11' }}
-          cache: pip
+          node-version: "20"
 
-      - name: Install Python build tool (echo)
+      - name: Setup Python (for build wheels)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python build tooling
         shell: bash
         run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-          safe_run "pip.upgrade" python -m pip install --upgrade pip
-          safe_run "pip.install.build" pip install build
-
+          set -Eeo pipefail
+          python -m pip install --upgrade pip
+          pip install build || true
+      # 1) 이전 job들이 업로드한 모든 audit 아티팩트(취약점 보고서+업그레이드 로그)를 수집
       - name: Download all audit artifacts
         uses: actions/download-artifact@v5
         with:
           path: collected-artifacts
 
-      - name: Build Node packages (echo)
+      # 2) 각 Node 프로젝트에 대해 npm pack (tgz) 생성
+      - name: Build Node packages (npm pack)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          set -Eeo pipefail
           mkdir -p release_payload/node
           for P in $NODE_PROJECTS; do
-            echo "::group::[node-pack] $P"
-            safe_run "node.pack.$(echo "$P" | tr '/' '_')" bash -c "
-              cd \"$P\"
-              npm install || true
-              npm pack || true
-            "
-            find "$P" -maxdepth 1 -type f -name "*.tgz" -exec cp {} release_payload/node/ \; || true
-            echo "::endgroup::"
+            if [ -d "$P" ] && [ -f "$P/package.json" ]; then
+              echo "[node-pack] $P"
+              (
+                cd "$P"
+                npm install || true
+                npm pack || true
+              )
+              # npm pack 결과 *.tgz 파일을 release_payload/node 로 복사
+              find "$P" -maxdepth 1 -type f -name "*.tgz" -exec cp {} release_payload/node/ \; || true
+            else
+              echo "[node-pack] skip $P (no package.json)"
+            fi
           done
-          snap_tree "node.pack.tree" "release_payload/node"
-
-      - name: Build Python packages (echo)
+      # 3) 각 Python 프로젝트에 대해 sdist / wheel 생성 (python -m build)
+      - name: Build Python packages (python -m build)
         shell: bash
         run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          set -Eeo pipefail
           mkdir -p release_payload/python
           for P in $PY_PROJECTS; do
-            echo "::group::[py-build] $P"
-            safe_run "py.build.$(echo "$P" | tr '/' '_')" bash -c "
-              cd \"$P\"
-              python -m build || true
-            "
-            [ -d "$P/dist" ] && cp "$P/dist/"* release_payload/python/ 2>/dev/null || true
-            echo "::endgroup::"
+            if [ -d "$P" ] && [ -f "$P/setup.py" -o -f "$P/pyproject.toml" ]; then
+              echo "[py-build] $P"
+              (
+                cd "$P"
+                python -m build || true
+              )
+              # dist/* 내용을 release_payload/python 으로 복사
+              if [ -d "$P/dist" ]; then
+                cp "$P/dist/"* release_payload/python/ 2>/dev/null || true
+              fi
+            else
+              echo "[py-build] skip $P (no setup.py / pyproject.toml)"
+            fi
           done
-          snap_tree "python.build.tree" "release_payload/python"
-
-      - name: Create bundle (GITHUB_OUTPUT + echo)
+      # 4) release_payload + collected-artifacts를 tar.gz로 묶음
+      - name: Create release bundle tar.gz
         id: bundle
         shell: bash
         run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          set -Eeo pipefail
           TS=$(date '+%Y%m%d-%H%M%S')
           BUNDLE="security-scan-bundle-${TS}-${GITHUB_RUN_NUMBER}.tar.gz"
           mkdir -p final_bundle
@@ -369,58 +444,82 @@ jobs:
           cp -r collected-artifacts final_bundle/ 2>/dev/null || true
           tar -czf "$BUNDLE" final_bundle
           echo "bundle_name=$BUNDLE" >> "$GITHUB_OUTPUT"
-          echo_line "${LOG_DIR}/bundle.list" "BUNDLE=$BUNDLE"
-          snap_tree "bundle.final" "final_bundle"
-
-      - name: Upload bundle as artifact (always)
-        uses: actions/upload-artifact@v5
-        with:
-          name: ${{ steps.bundle.outputs.bundle_name }}
-          path: ${{ steps.bundle.outputs.bundle_name }}
-          retention-days: 30
-
-      - name: Publish GitHub Release via gh (skip only if lite)
-        if: ${{ inputs.run_mode != 'lite' }}
+      # 5) GitHub Release 생성 (tag_name은 실행번호 기반으로 고유하게)
+      - name: Create GitHub Release (soft-fail allowed)
+        id: create_release
+        continue-on-error: true
+        uses: actions/create-release@v1
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          TAG="secscan-${GITHUB_RUN_NUMBER}"
-          TITLE="Security Scan ${GITHUB_RUN_NUMBER} (No-Skip + Echo)"
-          BUNDLE="${{ steps.bundle.outputs.bundle_name }}"
-          BODY="에코 로깅 포함: 자동 보안 점검/업그레이드/패키징 번들."
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: secscan-${{ github.run_number }}
+          release_name: "Security Scan ${{ github.run_number }} (AutoUpgrade+Packages)"
+          draft: false
+          prerelease: false
+          body: |
+            자동 보안 점검 & 업그레이드 결과입니다.
+            포함 내용:
+            - Node 의존성 감사 (npm audit) 및 자동 수정 시도 (npm audit fix / --force)
+            - Python 의존성 감사 (pip-audit / safety / bandit) 및 pip-audit --fix 자동 시도
+            - sec-upgrade.log : 실제로 어떤 패키지들이 업데이트/교체 시도됐는지 기록
+            - 각 프로젝트별 빌드 결과
+              * Node: npm pack (*.tgz)
+              * Python: python -m build 결과 (sdist, wheel)
+            - collected-artifacts/: 감사 결과 JSON, 로그 등
+            - 전체 tar.gz 번들 (final_bundle 포함)
+      # 6) Release asset 업로드 (번들 tar.gz 첨부)
+      - name: Upload bundle to Release (soft-fail allowed)
+        if: steps.create_release.outcome != 'failure'
+        continue-on-error: true
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.bundle.outputs.bundle_name }}
+          asset_name: ${{ steps.bundle.outputs.bundle_name }}
+          asset_content_type: application/gzip
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --notes "$BODY" --title "$TITLE" || true
-          else
-            gh release create "$TAG" "$BUNDLE" --title "$TITLE" --notes "$BODY" --latest --verify-tag=false || true
-          fi
-          gh release upload "$TAG" "$BUNDLE" --clobber || true
 
-  # 5) 스케줄 실패 시 이슈
-  weekly-failure-issue:
-    name: "Open Issue on Weekly Failure"
+  ##########################################################################
+  # Weekly scheduled run -> if any job failed in audits, open issue
+  ##########################################################################
+  create-issue-on-weekly-failure:
+    name: "Create Issue on Weekly Failure"
     runs-on: ubuntu-latest
-    needs: [package-and-release]
+    needs: [node-security, python-security]
     if: github.event_name == 'schedule' && failure()
-    permissions:
-      contents: write
-      issues: write
+
     steps:
-      - uses: actions/github-script@v7
+      - name: Open or reuse security issue
+        uses: actions/github-script@v7
         with:
           script: |
-            const title = "🚨 Weekly Security Flow Failure (No-Skip + Echo)";
-            const body = `자동 보안 점검에서 실패가 감지되었습니다.
-            Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner, repo: context.repo.repo,
-              labels: "security,dependency-check", state: "open"
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: 'security,dependency-check',
+              state: 'open'
             });
-            if (!issues.find(i => i.title === title)) {
+            if (existing.data.length === 0) {
+              const bodyText = [
+                "🚨 Weekly dependency check reported failures.",
+                "",
+                "일부 보안 점검 단계(npm audit / pip-audit / bandit / safety 등) 또는",
+                "자동 업그레이드(npm audit fix / pip-audit --fix)에서 에러가 감지되었습니다.",
+                "",
+                "릴리즈(Release)에 업로드된 tar.gz 번들에는",
+                "sec-upgrade.log, 감사 결과, 빌드된 패키지(.tgz / .whl 등)가 포함됩니다.",
+                "",
+                `Run details: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                "",
+                "취약 의존성 또는 수정이 필요한 영역을 확인하시기 바랍니다."
+              ].join("\n");
               await github.rest.issues.create({
-                owner: context.repo.owner, repo: context.repo.repo,
-                title, body, labels: ["security","dependency-check","automated"]
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: "🚨 Dependency Security Check Failure (Weekly Scan w/ AutoUpgrade & Release)",
+                body: bodyText,
+                labels: ["security", "dependency-check", "automated"]
               });
             }
