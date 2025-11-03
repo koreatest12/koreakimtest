@@ -168,7 +168,7 @@ jobs:
         continue-on-error: true
 
       - name: Setup Python runtime (with fallback)
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.python_version != '' && inputs.python_version || env.PY_VERSION_FALLBACK }}
         continue-on-error: true
@@ -915,7 +915,7 @@ jobs:
           } | tee "${LOG_DIR}/00_preflight_banking_${DB_MATRIX}.txt"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
         continue-on-error: true
