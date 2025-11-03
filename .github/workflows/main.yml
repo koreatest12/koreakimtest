@@ -110,7 +110,7 @@ jobs:
 
       - name: Upload runner-prep logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: runner-prep
           path: |
@@ -210,7 +210,7 @@ jobs:
 
       - name: Upload attempt1 logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: attempt1-logs
           path: |
@@ -286,7 +286,7 @@ jobs:
 
       - name: Upload attempt2 logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: attempt2-logs
           path: |
@@ -335,7 +335,7 @@ jobs:
 
       - name: Upload final bundle
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: final-summary-and-logs
           path: |

@@ -184,7 +184,7 @@ jobs:
 
       - name: Upload build logs/artifacts snapshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: defenderbot-build-step
           path: |
@@ -319,7 +319,7 @@ jobs:
 
       - name: Upload docker logs/artifacts snapshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: defenderbot-docker-step
           path: |
@@ -369,7 +369,7 @@ jobs:
 
       - name: Upload release prep logs/artifacts snapshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: defenderbot-release-prep-step
           path: |
@@ -509,7 +509,7 @@ jobs:
 
       - name: Upload upgrade logs/artifacts snapshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: defenderbot-upgrade-step
           path: |
@@ -548,7 +548,7 @@ jobs:
 
       - name: Upload ALL logs/final snapshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: defenderbot-full-run
           path: |

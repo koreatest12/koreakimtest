@@ -845,7 +845,7 @@ jobs:
 
       - name: Upload artifacts (logs, db, sources, configs, reports)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         continue-on-error: true
         with:
           name: mcp-mega-artifacts
@@ -1066,7 +1066,7 @@ jobs:
           cp "$LOG_DIR/bank_ctx_${DB_MATRIX}.log" "$REL_DIR/" 2>/dev/null || true
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         continue-on-error: true
         with:
           name: reports-${{ matrix.db }}
@@ -1207,7 +1207,7 @@ jobs:
           ls -lh "$RELEASE_BUNDLE_DIR" || true
 
       - name: Upload consolidated release bundle as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         continue-on-error: true
         with:
           name: release-bundle
