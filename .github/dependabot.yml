@@ -42,6 +42,8 @@ updates:
       - "security"
     reviewers:
       - "koreatest12"
+    assignees:
+      - "koreatest12"
     versioning-strategy: increase
 
   - package-ecosystem: "npm"
@@ -60,6 +62,10 @@ updates:
       - "npm"
       - "security"
     versioning-strategy: increase
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
 
   - package-ecosystem: "npm"
     directory: "/mcp-fs"
@@ -77,6 +83,10 @@ updates:
       - "npm"
       - "security"
     versioning-strategy: increase
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
 
   # Python Projects
   - package-ecosystem: "pip"
@@ -87,6 +97,12 @@ updates:
       time: "09:00"
       timezone: "Asia/Seoul"
     open-pull-requests-limit: 10
+    pip_requirements:
+      - "requirements.txt"
+      - "requirements-cli.txt"
+      - "requirements-lag-features.txt"
+      - "requirements-secure-backup.txt"
+      - "requirements-security.txt"
     commit-message:
       prefix: "pip"
       include: "scope"
@@ -95,6 +111,8 @@ updates:
       - "python"
       - "security"
     reviewers:
+      - "koreatest12"
+    assignees:
       - "koreatest12"
     versioning-strategy: increase
 
@@ -114,6 +132,10 @@ updates:
       - "python"
       - "security"
     versioning-strategy: increase
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
 
   - package-ecosystem: "pip"
     directory: "/mcp-hello-py"
@@ -131,6 +153,10 @@ updates:
       - "python"
       - "security"
     versioning-strategy: increase
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
 
   - package-ecosystem: "pip"
     directory: "/mcp-python-server"
@@ -148,6 +174,10 @@ updates:
       - "python"
       - "security"
     versioning-strategy: increase
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
 
   - package-ecosystem: "pip"
     directory: "/mcp-apache-server"
@@ -164,6 +194,32 @@ updates:
       - "dependencies"
       - "python"
       - "security"
+    versioning-strategy: increase
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
+
+  - package-ecosystem: "pip"
+    directory: "/sql/teradata/dependencies"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "pip(teradata)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "python"
+      - "teradata"
+      - "security"
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
     versioning-strategy: increase
 
   # Maven (Java) Projects
@@ -185,6 +241,8 @@ updates:
       - "security"
     reviewers:
       - "koreatest12"
+    assignees:
+      - "koreatest12"
     versioning-strategy: increase
 
   - package-ecosystem: "maven"
@@ -204,6 +262,10 @@ updates:
       - "maven"
       - "security"
     versioning-strategy: increase
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -223,6 +285,8 @@ updates:
       - "security"
     reviewers:
       - "koreatest12"
+    assignees:
+      - "koreatest12"
 
   # Docker
   - package-ecosystem: "docker"
@@ -241,4 +305,46 @@ updates:
       - "docker"
       - "security"
     reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
+
+  - package-ecosystem: "docker"
+    directory: "/docker/ubi"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "docker(ubi)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "security"
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
+
+  - package-ecosystem: "docker"
+    directory: "/docker/ubuntu"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "docker(ubuntu)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "security"
+    reviewers:
+      - "koreatest12"
+    assignees:
       - "koreatest12"

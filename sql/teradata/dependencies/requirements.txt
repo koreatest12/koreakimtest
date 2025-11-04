@@ -1,0 +1,3 @@
+# Additional Teradata-specific Python connectors for data operations
+teradatasql==17.20.0.12
+teradatasqlalchemy==17.20.0.4
