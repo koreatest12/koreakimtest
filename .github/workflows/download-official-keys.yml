@@ -1,0 +1,54 @@
+name: Download Official Package Keys
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  fetch-keys:
+    name: Fetch package repository keys
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prepare key storage directory
+        run: |
+          mkdir -p keys
+          chmod 700 keys
+
+      - name: Download Temurin Java repository key
+        run: |
+          curl -fsSL https://packages.adoptium.net/artifactory/api/gpg/key/public \
+            | gpg --dearmor -o keys/adoptium-java.gpg
+
+      - name: Download Docker repository key
+        run: |
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            | gpg --dearmor -o keys/docker.gpg
+
+      - name: Download Azure CLI repository key
+        run: |
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+            | gpg --dearmor -o keys/azure-cli.gpg
+
+      - name: Download Ubuntu archive key
+        run: |
+          curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x3B4FE6ACC0B21F32" \
+            | gpg --dearmor -o keys/ubuntu-archive.gpg
+
+      - name: Download PostgreSQL repository key
+        run: |
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | gpg --dearmor -o keys/postgresql.gpg
+
+      - name: List stored keys
+        run: ls -l keys
+
+      - name: Upload keys artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-package-keys
+          path: keys
+          if-no-files-found: error
