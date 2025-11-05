@@ -1,0 +1,39 @@
+name: "🛡️ DefenderBot Autonomous Patrol"
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"  # 24시간 순환 감시 (6시간 간격)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  security-events: read
+
+jobs:
+  patrol:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: docker
+            distro: none
+            upgrade: "true"
+          - variant: linux
+            distro: ubuntu
+            upgrade: "true"
+          - variant: java
+            distro: none
+            upgrade: "true"
+          - variant: python
+            distro: none
+            upgrade: "true"
+    uses: ./.github/workflows/defenderbot.yml
+    with:
+      release_tag: ""
+      image_tag: ""
+      upgrade: ${{ matrix.upgrade }}
+      distro_image: ${{ matrix.distro }}
+      variant: ${{ matrix.variant }}
+    secrets: inherit

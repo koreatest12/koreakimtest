@@ -30,6 +30,32 @@ on:
         description: "추가 base 이미지 빌드 (ubuntu|ubi|none)"
         required: false
         default: "none"
+      variant:
+        description: "선택 실행 모드 라벨 (예: docker/linux/java/python)"
+        required: false
+        default: ""
+  workflow_call:
+    inputs:
+      release_tag:
+        required: false
+        type: string
+        default: ""
+      image_tag:
+        required: false
+        type: string
+        default: ""
+      upgrade:
+        required: false
+        type: string
+        default: "false"
+      distro_image:
+        required: false
+        type: string
+        default: "none"
+      variant:
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write      # GH Release
@@ -68,6 +94,34 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Resolve workflow inputs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release=""
+          image=""
+          upgrade="false"
+          distro="none"
+          variant=""
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            release="${{ github.event.inputs.release_tag || '' }}"
+            image="${{ github.event.inputs.image_tag || '' }}"
+            upgrade="${{ github.event.inputs.upgrade || 'false' }}"
+            distro="${{ github.event.inputs.distro_image || 'none' }}"
+            variant="${{ github.event.inputs.variant || '' }}"
+          elif [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            release="${{ inputs.release_tag }}"
+            image="${{ inputs.image_tag }}"
+            upgrade="${{ inputs.upgrade }}"
+            distro="${{ inputs.distro_image }}"
+            variant="${{ inputs.variant }}"
+          fi
+          echo "WF_RELEASE=$release" >> "$GITHUB_ENV"
+          echo "WF_IMAGE=$image" >> "$GITHUB_ENV"
+          echo "WF_UPGRADE=$upgrade" >> "$GITHUB_ENV"
+          echo "WF_DISTRO=$distro" >> "$GITHUB_ENV"
+          echo "WF_VARIANT=$variant" >> "$GITHUB_ENV"
+
       ########################################################################
       # 1. 공용 디렉토리 준비 + 컨텍스트/러너 상태 덤프 (운영 감사용)
       ########################################################################
@@ -95,6 +149,11 @@ jobs:
             echo "RUN_NUMBER=${{ github.run_number }}"
             echo "WORKFLOW=${{ github.workflow }}"
             echo "TZ=$TZ"
+            echo "WF_RELEASE=${WF_RELEASE}"
+            echo "WF_IMAGE=${WF_IMAGE}"
+            echo "WF_UPGRADE=${WF_UPGRADE}"
+            echo "WF_DISTRO=${WF_DISTRO}"
+            echo "WF_VARIANT=${WF_VARIANT}"
             echo "-----------------------------"
             env | sort
           } | tee "${LOG_DIR}/01_context_dump.log"
@@ -229,8 +288,8 @@ jobs:
           SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
           FINAL_TAG="sha-${SHORT_SHA}"
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.image_tag }}" ]]; then
-            FINAL_TAG="${{ github.event.inputs.image_tag }}"
+          if [[ -n "${WF_IMAGE}" ]]; then
+            FINAL_TAG="${WF_IMAGE}"
           fi
 
           echo "final_tag=$FINAL_TAG" >> $GITHUB_OUTPUT
@@ -281,9 +340,9 @@ jobs:
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" target "${DIST_DIR}"
           touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" target/.keep "${DIST_DIR}/.keep"
 
-          DISTRO_REQ="none"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            DISTRO_REQ="${{ github.event.inputs.distro_image }}"
+          DISTRO_REQ="${WF_DISTRO:-none}"
+          if [[ -z "$DISTRO_REQ" ]]; then
+            DISTRO_REQ="none"
           fi
 
           IMG_TAG="${{ steps.image_tag_calc.outputs.final_tag }}"
@@ -358,8 +417,8 @@ jobs:
           FALLBACK="manual-${SHORT_SHA}"
           FINAL_REL_TAG="$FALLBACK"
 
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.release_tag }}" ]]; then
-            FINAL_REL_TAG="${{ github.event.inputs.release_tag }}"
+          if [[ -n "${WF_RELEASE}" ]]; then
+            FINAL_REL_TAG="${WF_RELEASE}"
           elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             FINAL_REL_TAG="${GITHUB_REF##refs/tags/}"
           fi
@@ -423,15 +482,20 @@ jobs:
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${DIST_DIR}" target
           touch "${LOG_DIR}/.keep" "${ARTIFACT_DIR}/.keep" "${DIST_DIR}/.keep" target/.keep
 
-          UPG_REQ="false"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.upgrade }}" == "true" ]]; then
-            UPG_REQ="true"
-          fi
+          UPG_REQ="${WF_UPGRADE:-false}"
+          case "$UPG_REQ" in
+            true|TRUE|True|yes|YES)
+              UPG_REQ="true"
+              ;;
+            *)
+              UPG_REQ="false"
+              ;;
+          esac
 
           SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
           FINAL_TAG="sha-${SHORT_SHA}"
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.image_tag }}" ]]; then
-            FINAL_TAG="${{ github.event.inputs.image_tag }}"
+          if [[ -n "${WF_IMAGE}" ]]; then
+            FINAL_TAG="${WF_IMAGE}"
           fi
 
           echo "upgrade_request=$UPG_REQ" >> $GITHUB_OUTPUT
