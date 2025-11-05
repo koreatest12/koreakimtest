@@ -43,6 +43,13 @@ jobs:
           curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
             | gpg --dearmor -o keys/postgresql.gpg
 
+
+      - name: Download Python (Deadsnakes PPA) repository key
+        run: |
+          curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xF23C5A6CF475977595C89F51BA6932366A755776" \
+            | gpg --dearmor -o keys/python-deadsnakes.gpg
+
+
       - name: List stored keys
         run: ls -l keys
 
