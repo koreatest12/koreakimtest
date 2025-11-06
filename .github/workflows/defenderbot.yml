@@ -122,6 +122,23 @@ jobs:
           echo "WF_DISTRO=$distro" >> "$GITHUB_ENV"
           echo "WF_VARIANT=$variant" >> "$GITHUB_ENV"
 
+          suffix="$variant"
+          if [[ -z "$suffix" ]]; then
+            suffix="default"
+          fi
+          if [[ -n "$distro" && "$distro" != "none" ]]; then
+            suffix="${suffix}-${distro}"
+          fi
+          # sanitize (replace spaces/unsafe chars with dash)
+          suffix="${suffix//[^a-zA-Z0-9_-]/-}"
+          echo "ARTIFACT_SUFFIX=$suffix" >> "$GITHUB_ENV"
+
+          if [[ -z "$variant" || "$variant" == "docker" ]]; then
+            echo "IS_PRIMARY_VARIANT=true" >> "$GITHUB_ENV"
+          else
+            echo "IS_PRIMARY_VARIANT=false" >> "$GITHUB_ENV"
+          fi
+
       ########################################################################
       # 1. 공용 디렉토리 준비 + 컨텍스트/러너 상태 덤프 (운영 감사용)
       ########################################################################
@@ -245,7 +262,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: defenderbot-build-step
+          name: defenderbot-build-step-${{ env.ARTIFACT_SUFFIX }}
           path: |
             ${{ env.LOG_DIR }}/00_pipeline_start.log
             ${{ env.LOG_DIR }}/01_context_dump.log
@@ -330,7 +347,7 @@ jobs:
           echo "▶ Smoke run container for ${IMAGE_FULL}" | tee "${LOG_DIR}/23b_docker_healthcheck.log"
           # 여기서는 단순하게 컨테이너 한 번 띄워보고 java -version 비슷한 동작만 시도.
           # Spring Boot app이라 바로 종료 안 할 수도 있지만 어쨌든 시도만: 실패해도 true 처리
-          docker run --rm "${IMAGE_FULL}" java -version \
+          docker run --rm "${IMAGE_FULL}" sh -c 'if command -v java >/dev/null 2>&1; then java -version; elif command -v python >/dev/null 2>&1; then python --version; else echo "No java or python runtime detected"; fi' \
             2>&1 | tee -a "${LOG_DIR}/23b_docker_healthcheck.log" || true
 
       - name: Optionally build distro images (ubuntu / ubi)
@@ -380,7 +397,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: defenderbot-docker-step
+          name: defenderbot-docker-step-${{ env.ARTIFACT_SUFFIX }}
           path: |
             ${{ env.LOG_DIR }}/20_image_tag.log
             ${{ env.LOG_DIR }}/21_docker_build_main.log
@@ -395,6 +412,7 @@ jobs:
       # 4. Release 생성 (항상 시도, 태그 없으면 manual-<sha7>)
       ########################################################################
       - name: Prepare dist dir & checksum
+        if: ${{ env.IS_PRIMARY_VARIANT == 'true' }}
         id: release_prep
         shell: bash
         run: |
@@ -425,12 +443,13 @@ jobs:
 
           echo "release_tag_final=$FINAL_REL_TAG" >> $GITHUB_OUTPUT
           echo "FINAL_RELEASE_TAG=$FINAL_REL_TAG" | tee -a "${LOG_DIR}/30_release_prep.log"
+          echo "FINAL_RELEASE_TAG=$FINAL_REL_TAG" >> "$GITHUB_ENV"
 
       - name: Upload release prep logs/artifacts snapshot
-        if: always()
+        if: ${{ env.IS_PRIMARY_VARIANT == 'true' && always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: defenderbot-release-prep-step
+          name: defenderbot-release-prep-step-${{ env.ARTIFACT_SUFFIX }}
           path: |
             ${{ env.LOG_DIR }}/30_release_prep.log
             ${{ env.LOG_DIR }}/.keep
@@ -440,10 +459,11 @@ jobs:
           if-no-files-found: warn
 
       - name: Create / Update GitHub Release
+        if: ${{ env.IS_PRIMARY_VARIANT == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release_prep.outputs.release_tag_final }}
-          name: DefenderBot ${{ steps.release_prep.outputs.release_tag_final }}
+          tag_name: ${{ env.FINAL_RELEASE_TAG }}
+          name: DefenderBot ${{ env.FINAL_RELEASE_TAG }}
           draft: false
           prerelease: false
           files: |
@@ -455,6 +475,7 @@ jobs:
       # 5. Remote Upgrade (ssh-agent 없이, soft-pass / 러너상태 재기록)
       ########################################################################
       - name: Install SSH client
+        if: ${{ env.IS_PRIMARY_VARIANT == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -475,6 +496,7 @@ jobs:
           } | tee "${LOG_DIR}/40b_runner_snapshot_pre_upgrade.log"
 
       - name: Compute upgrade enable & tag
+        if: ${{ env.IS_PRIMARY_VARIANT == 'true' }}
         id: upgrade_calc
         shell: bash
         run: |
@@ -507,6 +529,7 @@ jobs:
           } | tee "${LOG_DIR}/41_upgrade_calc.log"
 
       - name: Register known_hosts (if host provided)
+        if: ${{ env.IS_PRIMARY_VARIANT == 'true' }}
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -522,6 +545,7 @@ jobs:
           fi
 
       - name: Remote pull & restart container
+        if: ${{ env.IS_PRIMARY_VARIANT == 'true' }}
         shell: bash
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
@@ -572,10 +596,10 @@ jobs:
           " || true
 
       - name: Upload upgrade logs/artifacts snapshot
-        if: always()
+        if: ${{ env.IS_PRIMARY_VARIANT == 'true' && always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: defenderbot-upgrade-step
+          name: defenderbot-upgrade-step-${{ env.ARTIFACT_SUFFIX }}
           path: |
             ${{ env.LOG_DIR }}/40_upgrade_sshclient.log
             ${{ env.LOG_DIR }}/40b_runner_snapshot_pre_upgrade.log
@@ -614,7 +638,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: defenderbot-full-run
+          name: defenderbot-full-run-${{ env.ARTIFACT_SUFFIX }}
           path: |
             ${{ env.LOG_DIR }}/
             ${{ env.ARTIFACT_DIR }}/
