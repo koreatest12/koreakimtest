@@ -47,8 +47,11 @@ jobs:
 
             echo "Writing Dockerfile for ${service}"
 
+
+            echo "Composing Dockerfile template for ${service}"
+
             cat <<DOCKERFILE > "${service_dir}/Dockerfile"
-# Auto-generated Dockerfile for ${title} service
+# ${title} 서비스를 위한 자동 생성된 Dockerfile
 FROM ${image}
 LABEL org.opencontainers.image.title="${title} service"
 LABEL org.opencontainers.image.description="Container for ${title} workloads managed by Dependabot workflows"
@@ -119,6 +122,8 @@ DOC
             echo "Created assets for ${service}" >&2
           done
 
+          echo "Completed service asset generation"
+
 
       - name: Build container images
         run: |
@@ -132,11 +137,14 @@ DOC
             docker build --tag "dependabot/${service}-service:ci" "infrastructure/${service}"
           done
 
+          echo "Finished container image builds"
+
       - name: Summarize generated structure
         run: |
           set -euo pipefail
           echo "Listing generated service assets"
           find infrastructure -maxdepth 2 -type f -print | sort
+          echo "Service asset listing complete"
 
       - name: Upload service artifacts
         uses: actions/upload-artifact@v4
@@ -155,3 +163,4 @@ DOC
             echo "Removing network for ${service}"
             docker network rm "${service}-network" >/dev/null 2>&1 || true
           done
+          echo "Docker network cleanup complete"
