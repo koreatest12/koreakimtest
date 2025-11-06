@@ -25,6 +25,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Initializing service asset generation"
+
           declare -A images
           images[python]='python:3.11-slim'
           images[java]='eclipse-temurin:17-jdk'
@@ -34,11 +36,16 @@ jobs:
           images[teradata]='alpine:3.19'
           images[nodejs]='node:20-alpine'
 
+          echo "Configured image map: ${!images[@]}"
+
           for service in "${!images[@]}"; do
+            echo "Generating assets for ${service}"
             service_dir="infrastructure/${service}"
             mkdir -p "${service_dir}/config"
             image="${images[$service]}"
             title="${service^}"
+
+            echo "Writing Dockerfile for ${service}"
 
             cat <<DOCKERFILE > "${service_dir}/Dockerfile"
 # Auto-generated Dockerfile for ${title} service
@@ -55,6 +62,7 @@ WORKDIR /opt/service
 CMD ["/bin/sh", "-c", "echo '${title} container ready'; sleep 5"]
 DOCKERFILE
 
+            echo "Creating server install script for ${service}"
             cat <<SERVER > "${service_dir}/server-install.sh"
 #!/usr/bin/env bash
 set -euo pipefail
@@ -68,6 +76,7 @@ echo "[${title}] Installation complete" >> "${log_dir}/server-install.log"
 SERVER
             chmod +x "${service_dir}/server-install.sh"
 
+            echo "Creating firewall rules script for ${service}"
             cat <<FIREWALL > "${service_dir}/firewall-rules.sh"
 #!/usr/bin/env bash
 set -euo pipefail
@@ -81,6 +90,7 @@ RULES
 FIREWALL
             chmod +x "${service_dir}/firewall-rules.sh"
 
+            echo "Creating network setup script for ${service}"
             cat <<NETWORK > "${service_dir}/network-setup.sh"
 #!/usr/bin/env bash
 set -euo pipefail
@@ -92,6 +102,7 @@ docker network create "${network_name}" >/dev/null 2>&1 || docker network inspec
 NETWORK
             chmod +x "${service_dir}/network-setup.sh"
 
+            echo "Writing documentation blueprint for ${service}"
             cat <<DOC > "${service_dir}/${service}.md"
 # ${title} Service Blueprint
 
@@ -112,7 +123,9 @@ DOC
       - name: Build container images
         run: |
           set -euo pipefail
+          echo "Starting container image builds"
           services=(python java linux ubuntu docker teradata nodejs)
+          echo "Ensuring shared CI network exists"
           docker network create dependabot-ci-network >/dev/null 2>&1 || docker network inspect dependabot-ci-network >/dev/null
           for service in "${services[@]}"; do
             echo "Building image for ${service}"
@@ -122,6 +135,7 @@ DOC
       - name: Summarize generated structure
         run: |
           set -euo pipefail
+          echo "Listing generated service assets"
           find infrastructure -maxdepth 2 -type f -print | sort
 
       - name: Upload service artifacts
@@ -135,7 +149,9 @@ DOC
         if: always()
         run: |
           set -euo pipefail
+          echo "Cleaning up Docker networks"
           docker network rm dependabot-ci-network >/dev/null 2>&1 || true
           for service in python java linux ubuntu docker teradata nodejs; do
+            echo "Removing network for ${service}"
             docker network rm "${service}-network" >/dev/null 2>&1 || true
           done
