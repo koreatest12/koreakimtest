@@ -47,7 +47,9 @@ jobs:
 
             echo "Writing Dockerfile for ${service}"
 
+
             echo "Composing Dockerfile template for ${service}"
+
             cat <<DOCKERFILE > "${service_dir}/Dockerfile"
 # ${title} 서비스를 위한 자동 생성된 Dockerfile
 FROM ${image}
