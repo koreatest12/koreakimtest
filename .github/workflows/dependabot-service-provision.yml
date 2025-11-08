@@ -25,9 +25,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify checkout
+        run: |
+          echo "============================================"
+          echo "Repository checked out successfully"
+          echo "Working directory: $(pwd)"
+          echo "============================================"
+
       - name: Prepare service directories and assets
         run: |
           set -euo pipefail
+          echo "============================================"
+          echo "Starting: Prepare service directories and assets"
+          echo "============================================"
           echo "Initializing service asset generation"
           declare -A images
           images[python]='python:3.11-slim'
@@ -39,8 +49,11 @@ jobs:
           images[nodejs]='node:20-alpine'
           echo "Configured image map: ${!images[@]}"
           for service in "${!images[@]}"; do
+            echo "--------------------------------------------"
             echo "Generating assets for ${service}"
+            echo "--------------------------------------------"
             service_dir="infrastructure/${service}"
+            echo "Creating directory: ${service_dir}/config"
             mkdir -p "${service_dir}/config"
             image="${images[$service]}"
             title="${service^}"
@@ -59,6 +72,7 @@ jobs:
               echo ""
               echo "CMD [\"/bin/sh\", \"-c\", \"echo '${title} container ready'; sleep 5\"]"
             } > "${service_dir}/Dockerfile"
+            echo "✓ Dockerfile created for ${service}"
 
             echo "Creating server install script for ${service}"
             {
@@ -72,19 +86,19 @@ jobs:
               echo "echo \"[${title}] Installation complete\" >> \"\${log_dir}/server-install.log\""
             } > "${service_dir}/server-install.sh"
             chmod +x "${service_dir}/server-install.sh"
+            echo "✓ Server install script created for ${service}"
 
             echo "Creating firewall rules script for ${service}"
             {
               echo "#!/usr/bin/env bash"
               echo "set -euo pipefail"
               echo "# Simulated firewall configuration for ${title} service"
-              cat <<'RULES'
-allow from 10.0.0.0/8 to any port 443
-allow from 172.16.0.0/12 to any port 8443
-allow from 192.168.0.0/16 to any port 9000
-RULES
+              echo "echo 'allow from 10.0.0.0/8 to any port 443'"
+              echo "echo 'allow from 172.16.0.0/12 to any port 8443'"
+              echo "echo 'allow from 192.168.0.0/16 to any port 9000'"
             } > "${service_dir}/firewall-rules.sh"
             chmod +x "${service_dir}/firewall-rules.sh"
+            echo "✓ Firewall rules script created for ${service}"
 
             echo "Creating network setup script for ${service}"
             {
@@ -96,6 +110,7 @@ RULES
               echo "docker network create \"\${network_name}\" >/dev/null 2>&1 || docker network inspect \"\${network_name}\" >/dev/null"
             } > "${service_dir}/network-setup.sh"
             chmod +x "${service_dir}/network-setup.sh"
+            echo "✓ Network setup script created for ${service}"
 
             echo "Writing documentation blueprint for ${service}"
             {
@@ -109,32 +124,52 @@ RULES
               echo "- **Firewall Rules:** \`firewall-rules.sh\`"
               echo "- **Network Setup:** \`network-setup.sh\`"
             } > "${service_dir}/${service}.md"
+            echo "✓ Documentation created for ${service}"
 
             touch "${service_dir}/config/${service}-config.yaml"
+            echo "✓ Config file created for ${service}"
             echo "Created assets for ${service}" >&2
           done
+          echo "============================================"
           echo "Completed service asset generation"
+          echo "============================================"
 
       - name: Build container images
         run: |
           set -euo pipefail
+          echo "============================================"
+          echo "Starting: Build container images"
+          echo "============================================"
           echo "Starting container image builds"
           services=(python java linux ubuntu docker teradata nodejs)
+          echo "Services to build: ${services[*]}"
           echo "Ensuring shared CI network exists"
           docker network create dependabot-ci-network >/dev/null 2>&1 || docker network inspect dependabot-ci-network >/dev/null
+          echo "✓ Docker network dependabot-ci-network is ready"
           for service in "${services[@]}"; do
+            echo "--------------------------------------------"
             echo "Building image for ${service}"
+            echo "--------------------------------------------"
             docker build --tag "dependabot/${service}-service:ci" "infrastructure/${service}"
+            echo "✓ Image built: dependabot/${service}-service:ci"
           done
+          echo "============================================"
           echo "Finished container image builds"
+          echo "============================================"
 
       # 새로 추가: 빌드 즉시 컨테이너를 실행해 구동 메시지 확인(스모크 테스트)
       - name: Smoke test containers (run & verify)
         run: |
           set -euo pipefail
+          echo "============================================"
+          echo "Starting: Smoke test containers"
+          echo "============================================"
           services=(python java linux ubuntu docker teradata nodejs)
+          echo "Services to test: ${services[*]}"
           for service in "${services[@]}"; do
+            echo "--------------------------------------------"
             echo "Running container for ${service}"
+            echo "--------------------------------------------"
             # 컨테이너가 '... container ready' 메시지를 출력하는지 확인
             output="$(docker run --rm --network dependabot-ci-network "dependabot/${service}-service:ci" 2>&1 || true)"
             echo "${output}"
@@ -142,18 +177,31 @@ RULES
               echo "::error::${service} container did not report ready state"
               exit 1
             fi
+            echo "✓ ${service} container passed smoke test"
           done
+          echo "============================================"
           echo "All containers reported ready state"
+          echo "============================================"
 
       - name: Summarize generated structure
         run: |
           set -euo pipefail
+          echo "============================================"
+          echo "Starting: Summarize generated structure"
+          echo "============================================"
           echo "Listing generated service assets"
           find infrastructure -maxdepth 2 -type f -print | sort
+          echo "--------------------------------------------"
           echo "Service asset listing complete"
+          echo "============================================"
 
       - name: Upload service artifacts
-        uses: actions/upload-artifact@v4
+        run: |
+          echo "============================================"
+          echo "Preparing to upload service artifacts"
+          echo "============================================"
+
+      - uses: actions/upload-artifact@v4
         with:
           name: dependabot-service-assets
           path: infrastructure/
@@ -164,10 +212,17 @@ RULES
         if: always()
         run: |
           set -euo pipefail
+          echo "============================================"
+          echo "Starting: Cleanup provisioned networks"
+          echo "============================================"
           echo "Cleaning up Docker networks"
           docker network rm dependabot-ci-network >/dev/null 2>&1 || true
+          echo "✓ Removed dependabot-ci-network (if existed)"
           for service in python java linux ubuntu docker teradata nodejs; do
             echo "Removing network for ${service}"
             docker network rm "${service}-network" >/dev/null 2>&1 || true
+            echo "✓ Removed ${service}-network (if existed)"
           done
+          echo "============================================"
           echo "Docker network cleanup complete"
+          echo "============================================"
