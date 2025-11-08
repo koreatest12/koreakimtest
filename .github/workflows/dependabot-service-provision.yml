@@ -2,21 +2,25 @@ name: Dependabot Service Provisioning
 
 on:
   pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
+    types: [opened, reopened, synchronize]
   workflow_dispatch:
 
 permissions:
   contents: read
   pull-requests: read
 
+# bash 기능(예: ${var^})을 확실히 쓰기 위해 기본 셸 지정
+defaults:
+  run:
+    shell: bash
+
 jobs:
   provision:
-    if: github.actor == 'dependabot[bot]' || github.actor == 'dependabot-preview[bot]'
+    # 수동 실행(workflow_dispatch) 때도 동작하도록 조건 확대
+    if: github.event_name == 'workflow_dispatch' || github.actor == 'dependabot[bot]' || github.actor == 'dependabot-preview[bot]'
     runs-on: ubuntu-latest
     name: Provision service containers for Dependabot updates
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -24,9 +28,7 @@ jobs:
       - name: Prepare service directories and assets
         run: |
           set -euo pipefail
-
           echo "Initializing service asset generation"
-
           declare -A images
           images[python]='python:3.11-slim'
           images[java]='eclipse-temurin:17-jdk'
@@ -35,82 +37,83 @@ jobs:
           images[docker]='docker:dind'
           images[teradata]='alpine:3.19'
           images[nodejs]='node:20-alpine'
-
           echo "Configured image map: ${!images[@]}"
-
           for service in "${!images[@]}"; do
             echo "Generating assets for ${service}"
             service_dir="infrastructure/${service}"
             mkdir -p "${service_dir}/config"
             image="${images[$service]}"
             title="${service^}"
-
             echo "Writing Dockerfile for ${service}"
-            echo "Composing Dockerfile template for ${service}"
-            echo "# ${title} 서비스를 위한 자동 생성된 Dockerfile" > "${service_dir}/Dockerfile"
-            echo "FROM ${image}" >> "${service_dir}/Dockerfile"
-            echo "LABEL org.opencontainers.image.title=\"${title} service\"" >> "${service_dir}/Dockerfile"
-            echo "LABEL org.opencontainers.image.description=\"Container for ${title} workloads managed by Dependabot workflows\"" >> "${service_dir}/Dockerfile"
-            echo "" >> "${service_dir}/Dockerfile"
-            echo "RUN mkdir -p /opt/service && \\" >> "${service_dir}/Dockerfile"
-            echo "    echo \"Provisioning ${title} runtime\" > /opt/service/INSTALLATION.log" >> "${service_dir}/Dockerfile"
-            echo "" >> "${service_dir}/Dockerfile"
-            echo "COPY config /opt/service/config" >> "${service_dir}/Dockerfile"
-            echo "WORKDIR /opt/service" >> "${service_dir}/Dockerfile"
-            echo "" >> "${service_dir}/Dockerfile"
-            echo "CMD [\"/bin/sh\", \"-c\", \"echo '${title} container ready'; sleep 5\"]" >> "${service_dir}/Dockerfile"
+            {
+              echo "# ${title} 서비스를 위한 자동 생성된 Dockerfile"
+              echo "FROM ${image}"
+              echo "LABEL org.opencontainers.image.title=\"${title} service\""
+              echo "LABEL org.opencontainers.image.description=\"Container for ${title} workloads managed by Dependabot workflows\""
+              echo ""
+              echo "RUN mkdir -p /opt/service && \\"
+              echo "    echo \"Provisioning ${title} runtime\" > /opt/service/INSTALLATION.log"
+              echo ""
+              echo "COPY config /opt/service/config"
+              echo "WORKDIR /opt/service"
+              echo ""
+              echo "CMD [\"/bin/sh\", \"-c\", \"echo '${title} container ready'; sleep 5\"]"
+            } > "${service_dir}/Dockerfile"
 
             echo "Creating server install script for ${service}"
-            echo "#!/usr/bin/env bash" > "${service_dir}/server-install.sh"
-            echo "set -euo pipefail" >> "${service_dir}/server-install.sh"
-            echo "" >> "${service_dir}/server-install.sh"
-            echo "# Simulated server installation script for ${title} service" >> "${service_dir}/server-install.sh"
-            echo "log_dir=\"/opt/service\"" >> "${service_dir}/server-install.sh"
-            echo "mkdir -p \"\${log_dir}\"" >> "${service_dir}/server-install.sh"
-            echo "echo \"[${title}] Starting server installation\" > \"\${log_dir}/server-install.log\"" >> "${service_dir}/server-install.sh"
-            echo "echo \"[${title}] Installing core packages\" >> \"\${log_dir}/server-install.log\"" >> "${service_dir}/server-install.sh"
-            echo "echo \"[${title}] Installation complete\" >> \"\${log_dir}/server-install.log\"" >> "${service_dir}/server-install.sh"
+            {
+              echo "#!/usr/bin/env bash"
+              echo "set -euo pipefail"
+              echo "# Simulated server installation script for ${title} service"
+              echo "log_dir=\"/opt/service\""
+              echo "mkdir -p \"\${log_dir}\""
+              echo "echo \"[${title}] Starting server installation\" > \"\${log_dir}/server-install.log\""
+              echo "echo \"[${title}] Installing core packages\" >> \"\${log_dir}/server-install.log\""
+              echo "echo \"[${title}] Installation complete\" >> \"\${log_dir}/server-install.log\""
+            } > "${service_dir}/server-install.sh"
             chmod +x "${service_dir}/server-install.sh"
 
             echo "Creating firewall rules script for ${service}"
-            echo "#!/usr/bin/env bash" > "${service_dir}/firewall-rules.sh"
-            echo "set -euo pipefail" >> "${service_dir}/firewall-rules.sh"
-            echo "" >> "${service_dir}/firewall-rules.sh"
-            echo "# Simulated firewall configuration for ${title} service" >> "${service_dir}/firewall-rules.sh"
-            echo "cat <<RULES" >> "${service_dir}/firewall-rules.sh"
-            echo "allow from 10.0.0.0/8 to any port 443" >> "${service_dir}/firewall-rules.sh"
-            echo "allow from 172.16.0.0/12 to any port 8443" >> "${service_dir}/firewall-rules.sh"
-            echo "allow from 192.168.0.0/16 to any port 9000" >> "${service_dir}/firewall-rules.sh"
-            echo "RULES" >> "${service_dir}/firewall-rules.sh"
+            {
+              echo "#!/usr/bin/env bash"
+              echo "set -euo pipefail"
+              echo "# Simulated firewall configuration for ${title} service"
+              cat <<'RULES'
+allow from 10.0.0.0/8 to any port 443
+allow from 172.16.0.0/12 to any port 8443
+allow from 192.168.0.0/16 to any port 9000
+RULES
+            } > "${service_dir}/firewall-rules.sh"
             chmod +x "${service_dir}/firewall-rules.sh"
 
             echo "Creating network setup script for ${service}"
-            echo "#!/usr/bin/env bash" > "${service_dir}/network-setup.sh"
-            echo "set -euo pipefail" >> "${service_dir}/network-setup.sh"
-            echo "" >> "${service_dir}/network-setup.sh"
-            echo "# Simulated network creation for ${title} service" >> "${service_dir}/network-setup.sh"
-            echo "network_name=\"${service}-network\"" >> "${service_dir}/network-setup.sh"
-            echo "echo \"Creating network \${network_name}\"" >> "${service_dir}/network-setup.sh"
-            echo "docker network create \"\${network_name}\" >/dev/null 2>&1 || docker network inspect \"\${network_name}\" >/dev/null" >> "${service_dir}/network-setup.sh"
+            {
+              echo "#!/usr/bin/env bash"
+              echo "set -euo pipefail"
+              echo "# Simulated network creation for ${title} service"
+              echo "network_name=\"${service}-network\""
+              echo "echo \"Creating network \${network_name}\""
+              echo "docker network create \"\${network_name}\" >/dev/null 2>&1 || docker network inspect \"\${network_name}\" >/dev/null"
+            } > "${service_dir}/network-setup.sh"
             chmod +x "${service_dir}/network-setup.sh"
 
             echo "Writing documentation blueprint for ${service}"
-            echo "# ${title} Service Blueprint" > "${service_dir}/${service}.md"
-            echo "" >> "${service_dir}/${service}.md"
-            echo "This document is automatically generated by the Dependabot service provisioning workflow." >> "${service_dir}/${service}.md"
-            echo "" >> "${service_dir}/${service}.md"
-            echo "- **Container Image:** ${image}" >> "${service_dir}/${service}.md"
-            echo "- **Purpose:** Provision containerized resources for ${title} updates." >> "${service_dir}/${service}.md"
-            echo "- **Server Installation Script:** \`server-install.sh\`" >> "${service_dir}/${service}.md"
-            echo "- **Firewall Rules:** \`firewall-rules.sh\`" >> "${service_dir}/${service}.md"
-            echo "- **Network Setup:** \`network-setup.sh\`" >> "${service_dir}/${service}.md"
+            {
+              echo "# ${title} Service Blueprint"
+              echo ""
+              echo "This document is automatically generated by the Dependabot service provisioning workflow."
+              echo ""
+              echo "- **Container Image:** ${image}"
+              echo "- **Purpose:** Provision containerized resources for ${title} updates."
+              echo "- **Server Installation Script:** \`server-install.sh\`"
+              echo "- **Firewall Rules:** \`firewall-rules.sh\`"
+              echo "- **Network Setup:** \`network-setup.sh\`"
+            } > "${service_dir}/${service}.md"
 
             touch "${service_dir}/config/${service}-config.yaml"
             echo "Created assets for ${service}" >&2
           done
-
           echo "Completed service asset generation"
-
 
       - name: Build container images
         run: |
@@ -123,8 +126,24 @@ jobs:
             echo "Building image for ${service}"
             docker build --tag "dependabot/${service}-service:ci" "infrastructure/${service}"
           done
-
           echo "Finished container image builds"
+
+      # 새로 추가: 빌드 즉시 컨테이너를 실행해 구동 메시지 확인(스모크 테스트)
+      - name: Smoke test containers (run & verify)
+        run: |
+          set -euo pipefail
+          services=(python java linux ubuntu docker teradata nodejs)
+          for service in "${services[@]}"; do
+            echo "Running container for ${service}"
+            # 컨테이너가 '... container ready' 메시지를 출력하는지 확인
+            output="$(docker run --rm --network dependabot-ci-network "dependabot/${service}-service:ci" 2>&1 || true)"
+            echo "${output}"
+            if [[ "${output}" != *"container ready"* ]]; then
+              echo "::error::${service} container did not report ready state"
+              exit 1
+            fi
+          done
+          echo "All containers reported ready state"
 
       - name: Summarize generated structure
         run: |
@@ -139,6 +158,7 @@ jobs:
           name: dependabot-service-assets
           path: infrastructure/
           if-no-files-found: error
+          retention-days: 7
 
       - name: Cleanup provisioned networks
         if: always()
