@@ -59,6 +59,14 @@ def print_available_tools():
                 "schedule <script> --interval daily|hourly|weekly [--time HH:MM]",
                 "report [--last N]"
             ]
+        },
+        "selfintro": {
+            "description": "Programming self-development self-introduction workflow assistant",
+            "commands": [
+                "list",
+                "run [--non-interactive]",
+                "generate-template [--output FILE]"
+            ]
         }
     }
 
@@ -73,14 +81,29 @@ def print_available_tools():
 def get_tool_module(tool_name: str):
     """Import and return the appropriate tool module."""
     if tool_name == "files":
-        import file_organizer
+        try:
+            from . import file_organizer  # type: ignore
+        except ImportError:  # pragma: no cover - fallback for script execution
+            import file_organizer  # type: ignore
         return file_organizer
     elif tool_name == "convert":
-        import bulk_converter
+        try:
+            from . import bulk_converter  # type: ignore
+        except ImportError:  # pragma: no cover
+            import bulk_converter  # type: ignore
         return bulk_converter
     elif tool_name == "schedule":
-        import task_scheduler
+        try:
+            from . import task_scheduler  # type: ignore
+        except ImportError:  # pragma: no cover
+            import task_scheduler  # type: ignore
         return task_scheduler
+    elif tool_name == "selfintro":
+        try:
+            from . import self_intro_workflow  # type: ignore
+        except ImportError:  # pragma: no cover
+            import self_intro_workflow  # type: ignore
+        return self_intro_workflow
     else:
         return None
 
@@ -119,17 +142,11 @@ def main():
         # Modify sys.argv to pass remaining args to tool
         sys.argv = [sys.argv[0]] + remaining
 
-        if args.tool == "files":
-            import file_organizer
-            file_organizer.main()
-        elif args.tool == "convert":
-            import bulk_converter
-            bulk_converter.main()
-        elif args.tool == "schedule":
-            import task_scheduler
-            task_scheduler.main()
+        module = get_tool_module(args.tool)
+        if module and hasattr(module, "main"):
+            module.main()
         else:
-            print(f"❌ Unknown tool: {args.tool}")
+            print(f"❌ Unknown tool or missing entry point: {args.tool}")
             print_available_tools()
             sys.exit(1)
     else:
