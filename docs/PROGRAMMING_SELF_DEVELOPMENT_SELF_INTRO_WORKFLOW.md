@@ -99,4 +99,25 @@
 - [K-Digital Training 우수 수기 사례집](https://www.hrdkorea.or.kr/)
 - [GitHub 포트폴리오 가이드](https://docs.github.com/)
 
+
+## CLI 도구로 워크플로우 실행하기
+
+> 🛠️ `python -m src.cli.cli_main selfintro <command>` 형식으로 실행합니다.
+
+| 명령 | 설명 |
+| --- | --- |
+| `list` | 전체 워크플로우를 체크리스트 형태로 출력합니다. |
+| `run [--non-interactive]` | 각 단계를 순차적으로 안내합니다. 기본적으로 Enter 키로 다음 항목으로 이동하며, `--non-interactive` 옵션으로 로그 형태 출력이 가능합니다. |
+| `generate-template [--output 파일]` | 추천 마크다운 템플릿을 생성합니다. 기본 파일명은 `self_intro_template.md` 입니다. |
+
+```bash
+# 예시: 워크플로우 진행
+python -m src.cli.cli_main selfintro run
+
+# 예시: 템플릿 생성
+python -m src.cli.cli_main selfintro generate-template --output my_intro.md
+```
+
+=======
+
 > ℹ️ 본 워크플로우는 지원 기관의 제출 양식 및 요구사항에 따라 유연하게 조정할 수 있으며, 최신 채용 동향을 수시로 확인하는 것을 권장합니다.
