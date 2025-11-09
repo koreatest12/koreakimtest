@@ -17,6 +17,8 @@
     "update-status": "tsx src/utils/updateCli.ts status",
     "update-enable": "tsx src/utils/updateCli.ts enable",
     "update-disable": "tsx src/utils/updateCli.ts disable",
+    "build": "tsc",
+    "test": "npm run lint && npm run format:check && npm run build",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "format": "prettier --write \"src/**/*.ts\"",

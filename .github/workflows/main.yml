@@ -138,6 +138,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
       - name: Prep dirs (post-checkout)
         shell: bash
         run: |
@@ -172,41 +184,79 @@ jobs:
             docker ps -a || true
           } | tee "${LOG_DIR}/10_snapshot_attempt1_start.txt"
 
+      - name: Install Node.js dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+          
+          echo "📦 Installing Node.js dependencies..." | tee "${LOG_DIR}/11_npm_install.txt"
+          npm ci 2>&1 | tee -a "${LOG_DIR}/11_npm_install.txt"
+          echo "✅ Node.js dependencies installed" | tee -a "${LOG_DIR}/11_npm_install.txt"
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+          
+          echo "🐍 Installing Python dependencies..." | tee "${LOG_DIR}/12_pip_install.txt"
+          pip install -r requirements.txt 2>&1 | tee -a "${LOG_DIR}/12_pip_install.txt"
+          echo "✅ Python dependencies installed" | tee -a "${LOG_DIR}/12_pip_install.txt"
+
       - name: Build/Test main logic
         id: buildtest
         shell: bash
         run: |
-          # 여기서 -e를 걸면 중간 실패시 바로 죽기 때문에,
-          # 실제 CI 작업에 따라 조정 가능. 여기서는 죽지 않게 -Eeuo pipefail 그대로 사용
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
           touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
 
           echo "⚙ Attempt #1 running on ${{ github.ref }} (commit ${{ github.sha }})" \
-            | tee "${LOG_DIR}/11_attempt1_run.txt"
+            | tee "${LOG_DIR}/13_attempt1_run.txt"
 
-          # 실제 작업(빌드/테스트/도커 등) 넣을 부분
-          echo "Simulating heavy workload in attempt #1..."
-          sleep 60
+          # Run Node.js lint, format check, and build
+          echo "🔍 Running TypeScript lint..." | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+          npm run lint 2>&1 | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+          
+          echo "💅 Checking code formatting..." | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+          npm run format:check 2>&1 | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+          
+          echo "🏗️  Building TypeScript project..." | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+          npm run build 2>&1 | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+          
+          # Verify build output
+          echo "✅ Verifying build artifacts..." | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+          if [ -d "dist" ] && [ -n "$(ls -A dist)" ]; then
+            echo "✅ Build artifacts created successfully" | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+            ls -la dist/ | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+          else
+            echo "❌ Build artifacts not found" | tee -a "${LOG_DIR}/13_attempt1_run.txt"
+            exit 1
+          fi
 
-          echo "Attempt #1 work finished." | tee -a "${LOG_DIR}/11_attempt1_run.txt"
+          echo "Attempt #1 work finished." | tee -a "${LOG_DIR}/13_attempt1_run.txt"
 
       - name: Mark attempt1 status
         id: mark
+        if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
           touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
 
-          # 여기서 실패 감지 로직을 커스터마이즈 가능:
-          # 예: 빌드 단계에서 echo "::error::"가 있었는지 검사하거나,
-          #     빌드 exit code를 잡아두고 비교.
-          # 현재는 성공 가정.
-          STATUS="success"
+          # Check if buildtest step succeeded
+          if [ "${{ steps.buildtest.outcome }}" == "success" ]; then
+            STATUS="success"
+          else
+            STATUS="failure"
+          fi
 
           echo "attempt1_status=$STATUS" >> $GITHUB_OUTPUT
-          echo "attempt1_status=$STATUS" | tee "${LOG_DIR}/12_attempt1_status.txt"
+          echo "attempt1_status=$STATUS" | tee "${LOG_DIR}/14_attempt1_status.txt"
 
       - name: Upload attempt1 logs
         if: always()
@@ -216,8 +266,10 @@ jobs:
           path: |
             ${{ env.LOG_DIR }}/09_attempt1_context.txt
             ${{ env.LOG_DIR }}/10_snapshot_attempt1_start.txt
-            ${{ env.LOG_DIR }}/11_attempt1_run.txt
-            ${{ env.LOG_DIR }}/12_attempt1_status.txt
+            ${{ env.LOG_DIR }}/11_npm_install.txt
+            ${{ env.LOG_DIR }}/12_pip_install.txt
+            ${{ env.LOG_DIR }}/13_attempt1_run.txt
+            ${{ env.LOG_DIR }}/14_attempt1_status.txt
             ${{ env.LOG_DIR }}/.keep
           if-no-files-found: warn
 
@@ -235,6 +287,18 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Prep dirs (post-checkout)
         shell: bash
@@ -269,6 +333,28 @@ jobs:
             docker ps -a || true
           } | tee "${LOG_DIR}/20_snapshot_attempt2_start.txt"
 
+      - name: Install Node.js dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+          
+          echo "📦 Installing Node.js dependencies (retry)..." | tee "${LOG_DIR}/21_npm_install.txt"
+          npm ci 2>&1 | tee -a "${LOG_DIR}/21_npm_install.txt"
+          echo "✅ Node.js dependencies installed" | tee -a "${LOG_DIR}/21_npm_install.txt"
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "${LOG_DIR}" "${REPORT_DIR}"
+          touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
+          
+          echo "🐍 Installing Python dependencies (retry)..." | tee "${LOG_DIR}/22_pip_install.txt"
+          pip install -r requirements.txt 2>&1 | tee -a "${LOG_DIR}/22_pip_install.txt"
+          echo "✅ Python dependencies installed" | tee -a "${LOG_DIR}/22_pip_install.txt"
+
       - name: Build/Test retry logic
         shell: bash
         run: |
@@ -277,12 +363,29 @@ jobs:
           touch "${LOG_DIR}/.keep" "${REPORT_DIR}/.keep"
 
           echo "⚠ Attempt #2 retry due to resource/previous failure" \
-            | tee "${LOG_DIR}/21_attempt2_run.txt"
+            | tee "${LOG_DIR}/23_attempt2_run.txt"
 
-          echo "Retrying heavy workload in attempt #2..."
-          sleep 60
+          # Run Node.js lint, format check, and build
+          echo "🔍 Running TypeScript lint (retry)..." | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+          npm run lint 2>&1 | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+          
+          echo "💅 Checking code formatting (retry)..." | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+          npm run format:check 2>&1 | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+          
+          echo "🏗️  Building TypeScript project (retry)..." | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+          npm run build 2>&1 | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+          
+          # Verify build output
+          echo "✅ Verifying build artifacts..." | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+          if [ -d "dist" ] && [ -n "$(ls -A dist)" ]; then
+            echo "✅ Build artifacts created successfully" | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+            ls -la dist/ | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+          else
+            echo "❌ Build artifacts not found" | tee -a "${LOG_DIR}/23_attempt2_run.txt"
+            exit 1
+          fi
 
-          echo "Attempt #2 finished." | tee -a "${LOG_DIR}/21_attempt2_run.txt"
+          echo "Attempt #2 finished." | tee -a "${LOG_DIR}/23_attempt2_run.txt"
 
       - name: Upload attempt2 logs
         if: always()
@@ -292,7 +395,9 @@ jobs:
           path: |
             ${{ env.LOG_DIR }}/19_attempt2_context.txt
             ${{ env.LOG_DIR }}/20_snapshot_attempt2_start.txt
-            ${{ env.LOG_DIR }}/21_attempt2_run.txt
+            ${{ env.LOG_DIR }}/21_npm_install.txt
+            ${{ env.LOG_DIR }}/22_pip_install.txt
+            ${{ env.LOG_DIR }}/23_attempt2_run.txt
             ${{ env.LOG_DIR }}/.keep
           if-no-files-found: warn
 
