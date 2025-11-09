@@ -3,24 +3,23 @@ name: "🏦 Teradata FinOps Batch — EchoOps + Audit + Snapshot + ISO + DR(1일
 on:
   push:
     branches: [ "main" ]
-
   # 수동 실행 (dispatch inputs는 10개 이하)
   workflow_dispatch:
     inputs:
-      mode:                  # 1
+      mode: # 1
         description: "실행 모드(full=전체 / lite=일부 단계만)"
         type: choice
         options: [full, lite]
         default: full
-      gen_rows:              # 2
+      gen_rows: # 2
         description: "생성할 가상 데이터 행 수 (빈값이면 기본 GEN_ROWS)"
         required: false
         default: ""
-      expected_rows:         # 3
+      expected_rows: # 3
         description: "품질검증 기대 로우 수 (빈값이면 기본 EXPECTED_ROWCOUNT)"
         required: false
         default: ""
-      dr_backup:             # 4
+      dr_backup: # 4
         description: "DR(외부) 백업 시도 여부 (true/false)"
         type: choice
         options: ["true", "false"]
@@ -30,43 +29,39 @@ on:
         type: choice
         options: ["true", "false"]
         default: "true"
-      include_healthcheck:   # 6
+      include_healthcheck: # 6
         description: "시스템 헬스/보안 점검 로그 포함 여부"
         type: choice
         options: ["true", "false"]
         default: "true"
-      include_schema_diff:   # 7
+      include_schema_diff: # 7
         description: "DDL/TPT 변경 diff 기록 여부"
         type: choice
         options: ["true", "false"]
         default: "true"
-      sla_tracking:          # 8
+      sla_tracking: # 8
         description: "SLA/SLO 시간 측정, 재시도 기록 여부"
         type: choice
         options: ["true", "false"]
         default: "true"
 
+  # 매일 15:30 UTC == 한국시간(KST) 새벽 00:30 자동 야간배치
   schedule:
-    # 매일 15:30 UTC == 한국시간(KST) 새벽 00:30 자동 야간배치
     - cron: "30 15 * * *"
 
 permissions:
-  contents: write   # 릴리즈 태그/자산 업로드용 (gh release create)
+  contents: write # 릴리즈 태그/자산 업로드용 (gh release create)
 
 env:
   ###########################################################################
   # 공통 경로 / 대상 테이블
   ###########################################################################
-  DATA_ROOT: /home/runner/td_data
-
-  # EchoOps 공통 로그 디렉토리 (로컬 수집용)
+  DATA_ROOT: /home/runner/td_data          # EchoOps 공통 로그 디렉토리 (로컬 수집용)
   LOG_DIR: .github/echo_logs
-
   # 서비스/도메인별 테이블 (Staging -> Final -> Audit)
   TBL_STAGE: STG_DATA
   TBL_FINAL: FINAL_DATA
   TBL_AUDIT: LOAD_AUDIT_LOG
-
   # 병합 타깃 운영 테이블
   TARGET_TABLE: FINAL_DATA
 
@@ -79,14 +74,13 @@ env:
   ###########################################################################
   # DR / 보관주기 정책
   ###########################################################################
-  DR_RETENTION_DAYS: "1"          # DR 데이터센터 보관주기 = 1일
-  DR_DIR_NAME: "dr_backup"        # DR 스냅샷 로컬 보관 디렉토리
+  DR_RETENTION_DAYS: "1" # DR 데이터센터 보관주기 = 1일
+  DR_DIR_NAME: "dr_backup" # DR 스냅샷 로컬 보관 디렉토리
   DR_TOPOLOGY_DIR: "governance/dr_site"
 
 jobs:
   teradata_pipeline_job:
     runs-on: ubuntu-latest
-
     steps:
       #######################################################################
       # 0. 코드 체크아웃
@@ -100,7 +94,6 @@ jobs:
       - name: 🔧 Echo 부트스트랩 (/tmp/echo_helpers.sh 생성)
         run: |
           set -e
-
           # 공통 디렉토리 전처리
           mkdir -p "${DATA_ROOT}"/{logs,quality,release,tmp,landing_zone,governance,history,health,extract_out}
           mkdir -p "${DATA_ROOT}/${DR_DIR_NAME}"
@@ -111,28 +104,19 @@ jobs:
           cat > /tmp/echo_helpers.sh <<'EOSH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
-
           # 기본 경로 환경변수 보장
           : "${DATA_ROOT:=/home/runner/td_data}"
           : "${LOG_DIR:=.github/echo_logs}"
-
           SNAP_INFO="${DATA_ROOT}/logs/snapshot_tag.txt"
 
-          ts() {
-            date +%Y-%m-%dT%H:%M:%S%z
-          }
-
-          echo_note() {
-            # echo 노이즈 표준화 + 중앙 로그 저장
+          ts() { date +%Y-%m-%dT%H:%M:%S%z; }
+          echo_note() { # echo 노이즈 표준화 + 중앙 로그 저장
             local msg="$1"
             printf "▶ %s %s\n" "$(ts)" "$msg" | tee -a "${LOG_DIR}/echo.log"
           }
 
-          kv_set() {
-            # key=value 형태로 파일에 저장 (갱신 가능)
-            local file="$1"
-            local key="$2"
-            local val="$3"
+          kv_set() { # key=value 형태로 파일에 저장 (갱신 가능)
+            local file="$1" key="$2" val="$3"
             mkdir -p "$(dirname "$file")"
             touch "$file"
             if grep -qE "^${key}=" "$file" 2>/dev/null; then
@@ -141,39 +125,21 @@ jobs:
               printf "%s=%s\n" "$key" "$val" >> "$file"
             fi
           }
-
-          kv_get() {
-            # file에서 key 조회, 없으면 빈 문자열로 리턴 (exit 0 유지)
-            local file="$1"
-            local key="$2"
+          kv_get() { # file에서 key 조회, 없으면 빈 문자열로 리턴
+            local file="$1" key="$2"
             if [ -f "$file" ]; then
               local line
               line="$(grep -E "^${key}=" "$file" 2>/dev/null || true)"
-              if [ -n "$line" ]; then
-                echo "${line#*=}"
-                return 0
-              fi
+              if [ -n "$line" ]; then echo "${line#*=}"; return 0; fi
             fi
-            echo ""
-            return 0
+            echo ""; return 0
           }
 
-          snapshot_set() {
-            # SNAP_INFO에 SNAP_TAG, SNAP_FILE 같은 메타 저장
-            local key="$1"
-            local val="$2"
-            kv_set "$SNAP_INFO" "$key" "$val"
-          }
-
-          snapshot_get() {
-            # SNAP_INFO에서 키 읽기 (없어도 실패 안 함)
-            local key="$1"
-            kv_get "$SNAP_INFO" "$key"
-          }
+          snapshot_set() { kv_set "$SNAP_INFO" "$1" "$2"; }
+          snapshot_get() { kv_get "$SNAP_INFO" "$1"; }
 
           trap 'echo_note "trap: last command failed (rc=$?)"' ERR
           EOSH
-
           chmod +x /tmp/echo_helpers.sh
           echo "::notice::/tmp/echo_helpers.sh 생성 및 디렉토리 부트스트랩 완료"
 
@@ -184,17 +150,13 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           echo_note "Teradata 통합 워크플로우 시작"
           echo_note "DATA_ROOT=${DATA_ROOT}, TARGET_TABLE=${TARGET_TABLE}, GEN_ROWS=${GEN_ROWS}"
           echo_note "dispatch.mode=${{ github.event.inputs.mode || 'N/A' }}"
           echo_note "dispatch.dr_backup=${{ github.event.inputs.dr_backup || 'N/A' }}"
-
           mkdir -p "${DATA_ROOT}/logs"
           date +%s > "${DATA_ROOT}/logs/start_epoch.txt"
-          {
-            echo "SLA_START_TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
-          } > "${DATA_ROOT}/logs/sla_timing.log"
+          { echo "SLA_START_TS=$(date +%Y-%m-%dT%H:%M:%S%z)"; } > "${DATA_ROOT}/logs/sla_timing.log"
 
       #######################################################################
       # 0.3 DR 데이터센터 구조도/정책 문서 생성
@@ -203,7 +165,6 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           TOPO_DIR="${DATA_ROOT}/${DR_TOPOLOGY_DIR}"
           mkdir -p "$TOPO_DIR"
           DR_TOPO_FILE="${TOPO_DIR}/dr_topology.txt"
@@ -247,7 +208,6 @@ jobs:
             echo
             echo "NOTE=이 문서는 자동으로 생성되며 감사에 포함됩니다."
           } > "$DR_TOPO_FILE"
-
           echo_note "DR 데이터센터 토폴로지 기록 완료 -> $DR_TOPO_FILE"
           ls -R "${DATA_ROOT}/${DR_TOPOLOGY_DIR}" || true
 
@@ -259,11 +219,9 @@ jobs:
         run: |
           set +e
           source /tmp/echo_helpers.sh
-
           UPG_LOG="${DATA_ROOT}/logs/system_upgrade.log"
           BEFORE_LIST="${DATA_ROOT}/logs/pkg_list_before.txt"
           AFTER_LIST="${DATA_ROOT}/logs/pkg_list_after.txt"
-
           dpkg -l > "$BEFORE_LIST" 2>/dev/null || true
           {
             echo "===== SYSTEM UPGRADE START ====="
@@ -280,12 +238,9 @@ jobs:
             lsb_release -a 2>/dev/null || echo "lsb_release not available"
             echo "===== SYSTEM UPGRADE END ====="
           } > "$UPG_LOG" 2>&1
-
           dpkg -l > "$AFTER_LIST" 2>/dev/null || true
           diff -u "$BEFORE_LIST" "$AFTER_LIST" > "${DATA_ROOT}/logs/pkg_upgrade_diff.txt" || true
-
           echo_note "시스템 업그레이드(패키지 최신화) 시도 완료. 상세 ${UPG_LOG}"
-
           set -e
 
       #######################################################################
@@ -295,12 +250,9 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           echo_note "디렉토리 구조 생성 및 확인"
           mkdir -p "${DATA_ROOT}"/{source_files,landing_zone,logs,archive,extract_out,tmp,quality,release,history,governance,health,"${DR_DIR_NAME}"}
-
           ls -R "${DATA_ROOT}" || true
-
           cat > "${DATA_ROOT}/logs/retention_policy.log" <<'EOF'
           [RETENTION POLICY SIMULATION]
           - STG_DATA: 일자 파티션, 30일 초과 파티션은 아카이브 후 삭제 대상
@@ -316,22 +268,18 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           ROWS_INPUT="${{ github.event.inputs.gen_rows || '' }}"
           if [ -n "$ROWS_INPUT" ]; then
             ROWS="$ROWS_INPUT"
           else
             ROWS="${GEN_ROWS}"
           fi
-
           SRC_FILE="${DATA_ROOT}/landing_zone/input_$(date +%Y%m%d).csv"
-
           echo "COL1,COL2,AMOUNT,LOAD_TS" > "$SRC_FILE"
           echo_note "가상 데이터 ${ROWS}행 생성 시작 -> $SRC_FILE"
-
           i=1
           while [ $i -le $ROWS ]; do
-            AMT=$(( (RANDOM % 999800) + 100 ))        # 100~약100만
+            AMT=$(( (RANDOM % 999800) + 100 )) # 100~약100만
             MERCH=$(( (RANDOM % 9000) + 1000 ))
             if [ $AMT -gt 900000 ]; then
               NOTE="MERCHANT_${MERCH}_FLAG-HIGH_${i}"
@@ -341,13 +289,10 @@ jobs:
             echo "${i},${NOTE},${AMT},$(date +%Y-%m-%dT%H:%M:%S%z)" >> "$SRC_FILE"
             i=$((i+1))
           done
-
           ls -lh "$SRC_FILE"
           head -n 5 "$SRC_FILE"
           tail -n 5 "$SRC_FILE"
-
           echo "${ROWS}" > "${DATA_ROOT}/tmp/generated_rowcount.txt"
-
           echo_note "가상 CSV 생성 완료 (${ROWS} rows)"
 
       #######################################################################
@@ -357,7 +302,6 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           SNAP="${DATA_ROOT}/logs/env_snapshot.txt"
           {
             echo "===== ENV SNAPSHOT ====="
@@ -378,7 +322,6 @@ jobs:
             echo "SHA=$GITHUB_SHA"
             echo "BRANCH=$GITHUB_REF_NAME"
           } > "$SNAP"
-
           echo_note "환경 스냅샷 기록 완료 -> $SNAP"
 
       #######################################################################
@@ -389,7 +332,6 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           HEALTH_LOG="${DATA_ROOT}/health/system_health.log"
           {
             echo "===== SYSTEM HEALTH CHECK ====="
@@ -409,7 +351,6 @@ jobs:
             echo "--- 외부 연결 테스트 (curl example.com) ---"
             curl -I https://example.com 2>&1 | head -n 5 || echo "curl external check failed or blocked"
           } > "$HEALTH_LOG"
-
           echo_note "시스템 헬스 체크 로그 생성 완료 -> $HEALTH_LOG"
 
       #######################################################################
@@ -419,44 +360,43 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           mkdir -p "${DATA_ROOT}/source_files/sql"
           mkdir -p "${DATA_ROOT}/source_files/tpt"
 
           cat > "${DATA_ROOT}/source_files/sql/create_tables.sql" <<'SQL'
           -- [STAGING TABLE]
           CREATE TABLE STG_DATA (
-            COL1       INTEGER,
-            COL2       VARCHAR(100),
-            AMOUNT     BIGINT,
-            LOAD_TS    TIMESTAMP,
-            BATCH_ID   VARCHAR(40)
+            COL1 INTEGER,
+            COL2 VARCHAR(100),
+            AMOUNT BIGINT,
+            LOAD_TS TIMESTAMP,
+            BATCH_ID VARCHAR(40)
           );
 
           -- [FINAL TABLE]
           CREATE TABLE FINAL_DATA (
-            COL1       INTEGER,
-            COL2       VARCHAR(100),
-            AMOUNT     BIGINT,
-            LOAD_TS    TIMESTAMP,
-            ETL_TS     TIMESTAMP,
-            SRC_BATCH  VARCHAR(40)
+            COL1 INTEGER,
+            COL2 VARCHAR(100),
+            AMOUNT BIGINT,
+            LOAD_TS TIMESTAMP,
+            ETL_TS TIMESTAMP,
+            SRC_BATCH VARCHAR(40)
           );
 
           -- [AUDIT TABLE]
           CREATE TABLE LOAD_AUDIT_LOG (
-            AUDIT_TS        TIMESTAMP,
-            BATCH_ID        VARCHAR(40),
-            SRC_FILE        VARCHAR(255),
-            ROW_LOADED      INTEGER,
-            ROW_EXPECTED    INTEGER,
-            STATUS_CODE     INTEGER,
-            STATUS_MESSAGE  VARCHAR(2000),
-            OPERATOR        VARCHAR(128)
+            AUDIT_TS TIMESTAMP,
+            BATCH_ID VARCHAR(40),
+            SRC_FILE VARCHAR(255),
+            ROW_LOADED INTEGER,
+            ROW_EXPECTED INTEGER,
+            STATUS_CODE INTEGER,
+            STATUS_MESSAGE VARCHAR(2000),
+            OPERATOR VARCHAR(128)
           );
 
           CREATE INDEX IDX_FINAL_DATA_COL1 ON FINAL_DATA (COL1);
-          CREATE INDEX IDX_AUDIT_BATCH     ON LOAD_AUDIT_LOG (BATCH_ID);
+          CREATE INDEX IDX_AUDIT_BATCH ON LOAD_AUDIT_LOG (BATCH_ID);
           SQL
 
           cat > "${DATA_ROOT}/source_files/sql/proc_LOAD_AND_MERGE.sql" <<'SQL'
@@ -466,30 +406,17 @@ jobs:
           )
           BEGIN
             INSERT INTO FINAL_DATA (COL1, COL2, AMOUNT, LOAD_TS, ETL_TS, SRC_BATCH)
-            SELECT
-              COL1,
-              TRIM(COL2),
-              AMOUNT,
-              LOAD_TS,
-              CURRENT_TIMESTAMP,
-              p_batch_id
+            SELECT COL1, TRIM(COL2), AMOUNT, LOAD_TS, CURRENT_TIMESTAMP, p_batch_id
             FROM STG_DATA
             WHERE BATCH_ID = p_batch_id;
 
             INSERT INTO LOAD_AUDIT_LOG (
-              AUDIT_TS, BATCH_ID, SRC_FILE,
-              ROW_LOADED, ROW_EXPECTED,
+              AUDIT_TS, BATCH_ID, SRC_FILE, ROW_LOADED, ROW_EXPECTED,
               STATUS_CODE, STATUS_MESSAGE, OPERATOR
             )
             VALUES (
-              CURRENT_TIMESTAMP,
-              p_batch_id,
-              p_src_file,
-              NULL,
-              NULL,
-              0,
-              'LOAD_AND_MERGE executed',
-              USER
+              CURRENT_TIMESTAMP, p_batch_id, p_src_file,
+              NULL, NULL, 0, 'LOAD_AND_MERGE executed', USER
             );
           END;
           SQL
@@ -499,10 +426,10 @@ jobs:
           (
             DEFINE SCHEMA STG_SCHEMA
             (
-              COL1       INTEGER,
-              COL2       VARCHAR(100),
-              AMOUNT     BIGINT,
-              LOAD_TS    VARCHAR(30)
+              COL1   INTEGER,
+              COL2   VARCHAR(100),
+              AMOUNT BIGINT,
+              LOAD_TS VARCHAR(30)
             );
 
             DEFINE OPERATOR FILE_READER
@@ -519,10 +446,10 @@ jobs:
             TARGET TABLE STG_DATA
             ATTRIBUTES
             (
-              TdpId        = 'TERADATA_SID',
-              UserName     = 'ETL_USER',
+              TdpId      = 'TERADATA_SID',
+              UserName   = 'ETL_USER',
               UserPassword = 'ETL_PASS',
-              LogTable     = 'ETL_LOG_TABLE'
+              LogTable   = 'ETL_LOG_TABLE'
             );
 
             APPLY
@@ -531,20 +458,14 @@ jobs:
                VALUES (:COL1, :COL2, :AMOUNT, TIMESTAMP :LOAD_TS, ''BATCH_PLACEHOLDER'');'
             )
             TO OPERATOR (TPT_INSERTER[1])
-            SELECT
-              COL1, COL2, AMOUNT, LOAD_TS
+            SELECT COL1, COL2, AMOUNT, LOAD_TS
             FROM OPERATOR (FILE_READER[1]);
           );
           TPT
 
           cat > "${DATA_ROOT}/source_files/sql/quality_queries.sql" <<'SQL'
-          SELECT COUNT(*) AS CNT_STG
-          FROM STG_DATA
-          WHERE BATCH_ID = :BATCH_ID;
-
-          SELECT COUNT(*) AS CNT_FINAL
-          FROM FINAL_DATA
-          WHERE SRC_BATCH = :BATCH_ID;
+          SELECT COUNT(*) AS CNT_STG FROM STG_DATA WHERE BATCH_ID = :BATCH_ID;
+          SELECT COUNT(*) AS CNT_FINAL FROM FINAL_DATA WHERE SRC_BATCH = :BATCH_ID;
 
           SELECT
             SUM(CASE WHEN COL2 IS NULL OR TRIM(COL2) = '' THEN 1 ELSE 0 END) AS NULL_MEMO_ROWS,
@@ -552,13 +473,11 @@ jobs:
             COUNT(*) AS TOTAL_ROWS,
             SUM(AMOUNT) AS SUM_AMOUNT,
             AVG(AMOUNT) AS AVG_AMOUNT
-          FROM FINAL_DATA
-          WHERE SRC_BATCH = :BATCH_ID;
+          FROM FINAL_DATA WHERE SRC_BATCH = :BATCH_ID;
 
           SELECT *
           FROM LOAD_AUDIT_LOG
-          QUALIFY ROW_NUMBER()
-            OVER (PARTITION BY BATCH_ID ORDER BY AUDIT_TS DESC) = 1
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY BATCH_ID ORDER BY AUDIT_TS DESC) = 1
           ORDER BY AUDIT_TS DESC;
           SQL
 
@@ -572,19 +491,15 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           PREV_SCHEMA="${DATA_ROOT}/history/last_create_tables.sql"
           CURR_SCHEMA="${DATA_ROOT}/source_files/sql/create_tables.sql"
           DIFF_LOG="${DATA_ROOT}/logs/schema_diff.log"
-
           if [ -f "$PREV_SCHEMA" ]; then
             diff -u "$PREV_SCHEMA" "$CURR_SCHEMA" > "$DIFF_LOG" || true
           else
             echo "[first run or no prev schema]" > "$DIFF_LOG"
           fi
-
           cp "$CURR_SCHEMA" "$PREV_SCHEMA" 2>/dev/null || cp "$CURR_SCHEMA" "$PREV_SCHEMA"
-
           echo_note "스키마 diff 결과 -> $DIFF_LOG"
           head -n 200 "$DIFF_LOG" || true
 
@@ -596,15 +511,12 @@ jobs:
         run: |
           set +e
           source /tmp/echo_helpers.sh
-
           mkdir -p "${DATA_ROOT}/logs"
           BATCH_ID="BATCH_$(date +%Y%m%d_%H%M%S)"
           echo "$BATCH_ID" > "${DATA_ROOT}/logs/batch_id.txt"
-
           SRC_FILE="${DATA_ROOT}/landing_zone/input_$(date +%Y%m%d).csv"
           PIPELINE_LOG="${DATA_ROOT}/logs/pipeline_load_merge.log"
           STATUS_FILE="${DATA_ROOT}/logs/pipeline_status.log"
-
           GENERATED_COUNT=$(cat "${DATA_ROOT}/tmp/generated_rowcount.txt" 2>/dev/null || echo "${GEN_ROWS}")
           EXPECTED_IN="${{ github.event.inputs.expected_rows || '' }}"
           if [ -n "$EXPECTED_IN" ]; then
@@ -612,7 +524,6 @@ jobs:
           else
             EXPECTED_LOCAL="${EXPECTED_ROWCOUNT}"
           fi
-
           {
             echo "=== LOAD+MERGE START ==="
             echo "BATCH_ID=$BATCH_ID"
@@ -631,7 +542,6 @@ jobs:
 
           STATUS_CODE=0
           STATUS_MSG="OK(vdata-bulk-load)"
-
           SLA_ON="${{ github.event.inputs.sla_tracking || 'true' }}"
           if [ "$SLA_ON" != "false" ]; then
             echo "SLA: first attempt success" | tee -a "$PIPELINE_LOG"
@@ -653,15 +563,39 @@ jobs:
           set -e
 
       #######################################################################
+      # 4.3 DBA: Long-Running Query (LRQ) 감지 시뮬  <<<< 추가
+      #######################################################################
+      - name: ⏱️ 장기 실행 쿼리(LRQ) 감지 로그 생성
+        run: |
+          set -e
+          source /tmp/echo_helpers.sh
+          LRQ_LOG="${DATA_ROOT}/logs/dba_lrq_check.log"
+          echo_note "DBA: 장기 실행 쿼리(LRQ) 감지 시작"
+          {
+            echo "=== LONG-RUNNING QUERY (LRQ) AUDIT ==="
+            echo "TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
+            echo "LRQ_THRESHOLD_SEC=300 (Simulated)"
+            echo
+            echo "--- Query Log Analysis (Example Rows > 300sec) ---"
+            echo "SELECT QueryText, TotalIOCount, AMPCPUTime, StartTime, FirstRespTime"
+            echo "FROM DBC.QryLogV"
+            echo "WHERE StartTime >= CURRENT_DATE AND (AMPCPUTime/100.0) > 300"
+            echo "ORDER BY AMPCPUTime DESC;"
+            echo
+            echo "[RESULT SIMULATION]"
+            echo "Status: OK. No query exceeded 300 seconds."
+            echo "Note: Watch MERGE step (CALL LOAD_AND_MERGE) in next batch."
+          } > "$LRQ_LOG"
+          echo_note "장기 실행 쿼리(LRQ) 감지 로그 생성 완료 -> $LRQ_LOG"
+
+      #######################################################################
       # 4.5 DBA: 파티션 / 락 / 플랜 / 튜닝
       #######################################################################
       - name: 🧠 DBA 성능/락/파티션 분석 로그 생성
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           BATCH_ID_VAL="$(cat "${DATA_ROOT}/logs/batch_id.txt" 2>/dev/null || echo 'UNKNOWN_BATCH')"
-
           PARTITION_LOG="${DATA_ROOT}/logs/partition_access.log"
           {
             echo "=== PARTITION ACCESS REPORT ==="
@@ -710,20 +644,15 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           QUALITY_LOG="${DATA_ROOT}/quality/quality_check.log"
           STATUS_FILE="${DATA_ROOT}/logs/pipeline_status.log"
-
           EXPECTED="$(grep '^ROW_EXPECTED=' \"$STATUS_FILE\" 2>/dev/null | cut -d= -f2 || true)"
-          ACTUAL="$(grep '^ROW_LOADED='   \"$STATUS_FILE\" 2>/dev/null | cut -d= -f2 || true)"
-
+          ACTUAL="$(grep '^ROW_LOADED=' \"$STATUS_FILE\" 2>/dev/null | cut -d= -f2 || true)"
           [ -z "$EXPECTED" ] && EXPECTED="${EXPECTED_ROWCOUNT}"
           [ -z "$ACTUAL" ] && ACTUAL="0"
 
           ROW_COUNT_OK="false"
-          if [ "$EXPECTED" = "$ACTUAL" ]; then
-            ROW_COUNT_OK="true"
-          fi
+          if [ "$EXPECTED" = "$ACTUAL" ]; then ROW_COUNT_OK="true"; fi
 
           HIGH_COUNT=$(grep 'FLAG-HIGH' "${DATA_ROOT}/landing_zone"/input_*.csv 2>/dev/null | wc -l || echo "0")
           if [ "$ACTUAL" -gt 0 ]; then
@@ -733,8 +662,7 @@ jobs:
           fi
 
           LAST_HIST="${DATA_ROOT}/history/last_run_stats.txt"
-          PREV_ROWS="N/A"
-          GROWTH="N/A"
+          PREV_ROWS="N/A"; GROWTH="N/A"
           if [ -f "$LAST_HIST" ]; then
             PREV_ROWS=$(grep '^ACTUAL_ROWCOUNT=' "$LAST_HIST" | cut -d= -f2)
             if [ -n "$PREV_ROWS" ] && [ "$PREV_ROWS" != "N/A" ] && [ "$PREV_ROWS" -gt 0 ]; then
@@ -774,15 +702,84 @@ jobs:
           head -n 50 "$QUALITY_LOG" || true
 
       #######################################################################
+      # 5.3 DBA: 데이터 분포 불균형(Skewness) 분석  <<<< 추가
+      #######################################################################
+      - name: ⚖️ 데이터 분포 불균형(Skewness) 분석
+        run: |
+          set -e
+          source /tmp/echo_helpers.sh
+          SKEW_LOG="${DATA_ROOT}/logs/dba_skewness_check.log"
+          echo_note "DBA: 데이터 분포 불균형(Skewness) 분석 시작"
+          CURR_ROWS=$(cat "${DATA_ROOT}/tmp/generated_rowcount.txt" 2>/dev/null || echo "0")
+          AMPS=6
+          AVG_AMP_ROWS=$(( (CURR_ROWS + AMPS - 1) / AMPS ))
+          MAX_AMP_ROWS=$(( AVG_AMP_ROWS + (AVG_AMP_ROWS * 20 / 100) ))
+          if [ "$AVG_AMP_ROWS" -gt 0 ]; then
+            SKEW_PERCENT=$(( (MAX_AMP_ROWS - AVG_AMP_ROWS) * 100 / AVG_AMP_ROWS ))
+          else
+            SKEW_PERCENT=0
+          fi
+          {
+            echo "=== DATA SKEWNESS AUDIT ==="
+            echo "TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
+            echo "TARGET_TABLE=${TARGET_TABLE}"
+            echo "PI_DEFINITION=COL1 (Primary Index)"
+            echo "TOTAL_ROWS=$CURR_ROWS"
+            echo "SIMULATED_AMPS=$AMPS"
+            echo "AVG_ROWS_PER_AMP=$AVG_AMP_ROWS"
+            echo "MAX_ROWS_PER_AMP=$MAX_AMP_ROWS (Simulated)"
+            echo "SKEW_PERCENTAGE=${SKEW_PERCENT}%"
+            echo
+            echo "[ANALYSIS]"
+            if [ "$SKEW_PERCENT" -gt 30 ]; then
+              echo "Status: WARNING. Skewness exceeds 30%."
+              echo "Action: Consider PI/Partition review or Columnar/Hash changes."
+            else
+              echo "Status: OK. Skewness within acceptable range."
+            fi
+          } > "$SKEW_LOG"
+          echo_note "데이터 분포 불균형(Skewness) 분석 로그 생성 완료 -> $SKEW_LOG"
+
+      #######################################################################
+      # 5.4 DBA: 실행 계획 변경 Diff 기록  <<<< 추가
+      #######################################################################
+      - name: 🧾 실행 계획 변경 Diff 기록
+        run: |
+          set -e
+          source /tmp/echo_helpers.sh
+          PREV_PLAN="${DATA_ROOT}/history/last_query_plan.txt"
+          CURR_PLAN="${DATA_ROOT}/logs/current_query_plan.txt"
+          PLAN_DIFF_LOG="${DATA_ROOT}/logs/plan_diff.log"
+          echo_note "DBA: 실행 계획 변경 Diff 시작"
+          QUERY="SELECT COUNT(*) FROM ${TARGET_TABLE} WHERE SRC_BATCH = 'BATCH_PLACEHOLDER';"
+          CURRENT_PLAN_SIMULATED="1) Lock ${TARGET_TABLE} for access
+2) Partitioned access on SRC_BATCH only
+3) Aggregation (COUNT(*)) on partition
+4) End transaction"
+          {
+            echo "=== CURRENT QUERY PLAN ==="
+            echo "TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
+            echo "QUERY: $QUERY"
+            echo "$CURRENT_PLAN_SIMULATED"
+          } > "$CURR_PLAN"
+          if [ -f "$PREV_PLAN" ]; then
+            echo_note "이전 플랜과 현재 플랜 비교 중..."
+            diff -u "$PREV_PLAN" "$CURR_PLAN" > "$PLAN_DIFF_LOG" || true
+          else
+            echo "[first run or no previous plan]" > "$PLAN_DIFF_LOG"
+          fi
+          cp "$CURR_PLAN" "$PREV_PLAN" 2>/dev/null || cp "$CURR_PLAN" "$PREV_PLAN"
+          echo_note "실행 계획 Diff 결과 -> $PLAN_DIFF_LOG"
+          head -n 200 "$PLAN_DIFF_LOG" || true
+
+      #######################################################################
       # 5.5 DBA 유지보수 / DR 복구 플랜 / 용량 / RPO-RTO
       #######################################################################
       - name: 🧮 DBA 유지보수/DR/용량/RPO-RTO 로그 생성
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           BATCH_ID_VAL="$(cat "${DATA_ROOT}/logs/batch_id.txt" 2>/dev/null || echo 'UNKNOWN_BATCH')"
-
           STATS_LOG="${DATA_ROOT}/logs/stats_maintenance.log"
           {
             echo "=== STATS MAINTENANCE REPORT ==="
@@ -858,7 +855,6 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           MASK_LOG="${DATA_ROOT}/logs/masking_audit.log"
           {
             echo "[MASKING POLICY SIMULATION]"
@@ -869,7 +865,6 @@ jobs:
             echo "- ANALYST_ROLE 은 지점별 row-level filter로 제한"
             echo "- 변경 승인자(DATA_OWNER_X) 승인일=$(date +%Y-%m-%dT%H:%M:%S%z)"
           } > "$MASK_LOG"
-
           echo_note "민감 데이터 마스킹 정책 로그 생성 완료 -> $MASK_LOG"
           head -n 40 "$MASK_LOG" || true
 
@@ -880,7 +875,6 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           ACL_LOG="${DATA_ROOT}/logs/acl_audit.sql"
           {
             echo "-- 권한 감사 로그 (시뮬레이션)"
@@ -902,7 +896,6 @@ jobs:
             echo "-- COMMIT_SHA=$GITHUB_SHA"
             echo "-- BRANCH=$GITHUB_REF_NAME"
           } > "$ACL_LOG"
-
           echo_note "권한 감사 로그 생성 완료 -> $ACL_LOG"
           head -n 60 "$ACL_LOG" || true
 
@@ -913,14 +906,11 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           SNAP_TAG="td-snapshot-$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA:0:8}"
           SNAP_DIR="${DATA_ROOT}/release"
           SNAP_FILE="${SNAP_DIR}/${SNAP_TAG}.tar.gz"
-
           mkdir -p "$SNAP_DIR"
-
-          # 스냅샷 대상들 압축 (권한 문제는 continue-on-error 없이도 || true 사용)
+          # 스냅샷 대상들 압축
           tar -czf "$SNAP_FILE" \
             -C "${DATA_ROOT}" \
             logs \
@@ -939,7 +929,6 @@ jobs:
           snapshot_set SNAP_FILE "$SNAP_FILE"
 
           sha256sum "$SNAP_FILE" > "${DATA_ROOT}/logs/snapshot_hash.txt" 2>/dev/null || echo "hash_failed" > "${DATA_ROOT}/logs/snapshot_hash.txt"
-
           echo_note "tar.gz 스냅샷 생성 -> $SNAP_FILE"
           ls -lh "$SNAP_FILE" || true
           head -n 5 "${DATA_ROOT}/logs/snapshot_hash.txt" || true
@@ -952,7 +941,6 @@ jobs:
         run: |
           set +e
           source /tmp/echo_helpers.sh
-
           SNAP_TAG="$(snapshot_get SNAP_TAG)"
           SNAP_FILE="$(snapshot_get SNAP_FILE)"
           SNAP_DIR="${DATA_ROOT}/release"
@@ -981,14 +969,14 @@ jobs:
           DR_RETENTION_DAYS=${DR_RETENTION_DAYS}
           EOF
 
-          cp -r "${DATA_ROOT}/logs"                 "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
-          cp -r "${DATA_ROOT}/quality"              "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
-          cp -r "${DATA_ROOT}/governance"           "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
-          cp -r "${DATA_ROOT}/health"               "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
-          cp -r "${DATA_ROOT}/source_files"         "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
-          cp -r "${DATA_ROOT}/landing_zone"         "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
-          cp -r "${DATA_ROOT}/history"              "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
-          cp -r "${DATA_ROOT}/${DR_TOPOLOGY_DIR}"   "${ISO_SRC_DIR}/dr_topology" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/logs" "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/quality" "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/governance" "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/health" "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/source_files" "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/landing_zone" "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/history" "${ISO_SRC_DIR}/" 2>>"$ISO_BUILD_LOG" || true
+          cp -r "${DATA_ROOT}/${DR_TOPOLOGY_DIR}" "${ISO_SRC_DIR}/dr_topology" 2>>"$ISO_BUILD_LOG" || true
 
           echo "[TRY] installing genisoimage/xorriso" >> "$ISO_BUILD_LOG"
           sudo apt-get update -y >> "$ISO_BUILD_LOG" 2>&1 || true
@@ -996,16 +984,11 @@ jobs:
 
           if command -v genisoimage >/dev/null 2>&1 ; then
             echo "[USE] genisoimage" >> "$ISO_BUILD_LOG"
-            genisoimage -quiet -J -r -o "$ISO_FILE" "$ISO_SRC_DIR" >> "$ISO_BUILD_LOG" 2>&1 || {
-              echo "[WARN] genisoimage failed" >> "$ISO_BUILD_LOG"
-            }
+            genisoimage -quiet -J -r -o "$ISO_FILE" "$ISO_SRC_DIR" >> "$ISO_BUILD_LOG" 2>&1 || { echo "[WARN] genisoimage failed" >> "$ISO_BUILD_LOG"; }
           fi
-
           if [ ! -s "$ISO_FILE" ] && command -v xorriso >/dev/null 2>&1 ; then
             echo "[USE] xorriso -as mkisofs" >> "$ISO_BUILD_LOG"
-            xorriso -as mkisofs -J -r -o "$ISO_FILE" "$ISO_SRC_DIR" >> "$ISO_BUILD_LOG" 2>&1 || {
-              echo "[WARN] xorriso mkisofs failed" >> "$ISO_BUILD_LOG"
-            }
+            xorriso -as mkisofs -J -r -o "$ISO_FILE" "$ISO_SRC_DIR" >> "$ISO_BUILD_LOG" 2>&1 || { echo "[WARN] xorriso mkisofs failed" >> "$ISO_BUILD_LOG"; }
           fi
 
           if [ -s "$ISO_FILE" ]; then
@@ -1028,7 +1011,6 @@ jobs:
         run: |
           set +e
           source /tmp/echo_helpers.sh
-
           SNAP_TAG="$(snapshot_get SNAP_TAG)"
           SNAP_FILE="$(snapshot_get SNAP_FILE)"
           SNAP_DIR="${DATA_ROOT}/release"
@@ -1049,20 +1031,14 @@ jobs:
           DR_META_PATH="${DR_DATE_DIR}/${SNAP_TAG}.meta.txt"
 
           cp -f "$SNAP_FILE" "$DR_COPY_TAR" 2>/dev/null || true
-          if [ -s "$ISO_FILE" ]; then
-            cp -f "$ISO_FILE" "$DR_COPY_ISO" 2>/dev/null || true
-          fi
+          if [ -s "$ISO_FILE" ]; then cp -f "$ISO_FILE" "$DR_COPY_ISO" 2>/dev/null || true; fi
 
           {
             echo "TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
             echo "SNAP_TAG=$SNAP_TAG"
             echo "SNAP_FILE_LOCAL=$SNAP_FILE"
             echo "DR_STORED_TAR=$DR_COPY_TAR"
-            if [ -s "$ISO_FILE" ]; then
-              echo "DR_STORED_ISO=$DR_COPY_ISO"
-            else
-              echo "DR_STORED_ISO=(none)"
-            fi
+            if [ -s "$ISO_FILE" ]; then echo "DR_STORED_ISO=$DR_COPY_ISO"; else echo "DR_STORED_ISO=(none)"; fi
             echo "DR_RETENTION_DAYS=${DR_RETENTION_DAYS}"
             if [ -n "$DUMMY_KEY" ]; then
               echo "DR_KEY_PRESENT=yes"
@@ -1110,7 +1086,6 @@ jobs:
           echo_note "DR 백업/로테이션 처리 완료"
           head -n 80 "$DR_LOG" || true
           head -n 80 "$ROTATE_LOG" || true
-
           set -e
 
       #######################################################################
@@ -1123,7 +1098,6 @@ jobs:
         run: |
           set +e
           source /tmp/echo_helpers.sh
-
           SNAP_TAG="$(snapshot_get SNAP_TAG)"
           SNAP_FILE="$(snapshot_get SNAP_FILE)"
           SNAP_DIR="${DATA_ROOT}/release"
@@ -1135,7 +1109,6 @@ jobs:
           fi
 
           echo_note "릴리즈 태그 ${SNAP_TAG} 업로드 시도"
-
           if [ -s "$ISO_FILE" ]; then
             gh release create "$SNAP_TAG" "$SNAP_FILE" "$ISO_FILE" \
               --title "$SNAP_TAG" \
@@ -1147,7 +1120,6 @@ jobs:
               --notes "자동 Teradata 배치 스냅샷 (tar.gz). 포함내용: 대량데이터, DBA로그, DR 토폴로지, RPO/RTO, 마스킹/권한 감사, 시스템 업그레이드 로그 등." \
               || echo "::warning::gh release create 실패 (권한 부족 또는 태그 중복 가능)"
           fi
-
           set -e
 
       #######################################################################
@@ -1157,7 +1129,6 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           GOV_LOG="${DATA_ROOT}/governance/governance_approval.log"
           {
             echo "=== GOVERNANCE / APPROVAL LOG ==="
@@ -1173,23 +1144,20 @@ jobs:
             echo "DR_POLICY=DR snapshot retention ${DR_RETENTION_DAYS} day(s) under ${DR_DIR_NAME}/"
             echo "DR_TOPOLOGY_DOC=${DR_TOPOLOGY_DIR}/dr_topology.txt"
           } > "$GOV_LOG"
-
           echo_note "거버넌스/승인/온콜 정보 기록 완료 -> $GOV_LOG"
           head -n 50 "$GOV_LOG" || true
 
       #######################################################################
-      # 9. HTML 요약 리포트 생성
+      # 9. HTML 요약 리포트 생성 (DBA 고급 항목 포함으로 보강)
       #######################################################################
       - name: 🖨 HTML 요약 리포트 생성
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           SNAP_TAG="$(snapshot_get SNAP_TAG)"
           SNAP_FILE="$(snapshot_get SNAP_FILE)"
           SNAP_DIR="${DATA_ROOT}/release"
           ISO_FILE="${SNAP_DIR}/${SNAP_TAG}.iso"
-
           : "${SNAP_TAG:=N/A}"
           : "${SNAP_FILE:=N/A}"
 
@@ -1199,21 +1167,23 @@ jobs:
           ACL_LOG="${DATA_ROOT}/logs/acl_audit.sql"
           HASH_LOG="${DATA_ROOT}/logs/snapshot_hash.txt"
           ISO_HASH_FILE="${DATA_ROOT}/logs/iso_hash.txt"
-
           PARTITION_LOG="${DATA_ROOT}/logs/partition_access.log"
           LOCK_LOG="${DATA_ROOT}/logs/lock_contention.log"
           PLAN_LOG="${DATA_ROOT}/logs/query_plan_sample.log"
           TUNE_LOG="${DATA_ROOT}/logs/tuning_recommendations.log"
           CAP_LOG="${DATA_ROOT}/logs/capacity_growth.log"
           STATS_LOG="${DATA_ROOT}/logs/stats_maintenance.log"
-
           CLASS_LOG="${DATA_ROOT}/governance/table_classification.log"
           DRPLAY="${DATA_ROOT}/governance/recovery_playbook.txt"
           DR_TOPO_FILE="${DATA_ROOT}/${DR_TOPOLOGY_DIR}/dr_topology.txt"
           ROTATE_LOG="${DATA_ROOT}/logs/dr_rotation.log"
 
-          REPORT_HTML="${DATA_ROOT}/release/report_${GITHUB_RUN_ID}.html"
+          # 추가된 DBA 고급 로그
+          LRQ_LOG="${DATA_ROOT}/logs/dba_lrq_check.log"
+          SKEW_LOG="${DATA_ROOT}/logs/dba_skewness_check.log"
+          PLAN_DIFF_LOG="${DATA_ROOT}/logs/plan_diff.log"
 
+          REPORT_HTML="${DATA_ROOT}/release/report_${GITHUB_RUN_ID}.html"
           {
             echo "<html><body style='font-family:monospace;'>"
             echo "<h1>Teradata FinOps Batch Summary</h1>"
@@ -1241,6 +1211,15 @@ jobs:
             head -n 80 "$ACL_LOG" 2>/dev/null || echo "(no acl_audit.sql)"
 
             echo "</pre><h2>DBA Performance & Capacity</h2><pre>"
+            echo "--- Long-Running Query Check (LRQ) ---"
+            head -n 80 "$LRQ_LOG" 2>/dev/null || echo "(no dba_lrq_check.log)"
+            echo
+            echo "--- Skewness / Distribution Check ---"
+            head -n 80 "$SKEW_LOG" 2>/dev/null || echo "(no dba_skewness_check.log)"
+            echo
+            echo "--- Query Plan Diff ---"
+            head -n 80 "$PLAN_DIFF_LOG" 2>/dev/null || echo "(no plan_diff.log)"
+            echo
             echo "--- Partition Access ---"
             head -n 80 "$PARTITION_LOG" 2>/dev/null || echo "(no partition_access.log)"
             echo
@@ -1294,11 +1273,9 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           END_EPOCH=$(date +%s)
           START_EPOCH=$(cat "${DATA_ROOT}/logs/start_epoch.txt" 2>/dev/null || echo "$END_EPOCH")
           DURATION_SEC=$((END_EPOCH-START_EPOCH))
-
           {
             echo "SLA_END_TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
             echo "SLA_DURATION_SEC=$DURATION_SEC"
@@ -1306,7 +1283,6 @@ jobs:
             echo "BUSINESS_IMPACT=지연 시 리스크 스코어 보고 지연"
             echo "DR_RETENTION_DAYS=${DR_RETENTION_DAYS}"
           } >> "${DATA_ROOT}/logs/sla_timing.log"
-
           echo_note "SLA_DURATION_SEC=${DURATION_SEC}s 기록 완료"
 
       #######################################################################
@@ -1316,12 +1292,10 @@ jobs:
         run: |
           set -e
           source /tmp/echo_helpers.sh
-
           SNAP_TAG="$(snapshot_get SNAP_TAG)"
           SNAP_FILE="$(snapshot_get SNAP_FILE)"
           SNAP_DIR="${DATA_ROOT}/release"
           ISO_FILE="${SNAP_DIR}/${SNAP_TAG}.iso"
-
           : "${SNAP_TAG:=N/A}"
           : "${SNAP_FILE:=N/A}"
 
@@ -1347,6 +1321,11 @@ jobs:
           DR_TOPO_FILE="${DATA_ROOT}/${DR_TOPOLOGY_DIR}/dr_topology.txt"
           ROTATE_LOG="${DATA_ROOT}/logs/dr_rotation.log"
 
+          # 추가된 DBA 고급 로그
+          LRQ_LOG="${DATA_ROOT}/logs/dba_lrq_check.log"
+          SKEW_LOG="${DATA_ROOT}/logs/dba_skewness_check.log"
+          PLAN_DIFF_LOG="${DATA_ROOT}/logs/plan_diff.log"
+
           {
             echo "=== PIPELINE AUDIT SUMMARY ==="
             echo "TIMESTAMP=$(date +%Y-%m-%dT%H:%M:%S%z)"
@@ -1369,7 +1348,7 @@ jobs:
             cat "$STATUS_FILE" 2>/dev/null || echo "(no pipeline_status.log)"
             echo
             echo "--- QUALITY_LOG ---"
-            cat "$QUALITY_LOG" 2:/dev/null || cat "$QUALITY_LOG" 2>/dev/null || echo "(no quality_check.log)"
+            cat "$QUALITY_LOG" 2>/dev/null || echo "(no quality_check.log)"
             echo
             echo "--- SLA_TIMING ---"
             cat "$SLA_FILE" 2>/dev/null || echo "(no sla_timing.log)"
@@ -1390,6 +1369,14 @@ jobs:
             echo
             echo "--- GOVERNANCE / APPROVAL ---"
             head -n 60 "$GOV_LOG" 2>/dev/null || echo "(no governance_approval.log)"
+            echo
+            echo "--- DBA ADVANCED (LRQ / Skew / Plan Diff) ---"
+            echo ">>> dba_lrq_check.log"
+            head -n 60 "$LRQ_LOG" 2>/dev/null || echo "(no dba_lrq_check.log)"
+            echo ">>> dba_skewness_check.log"
+            head -n 60 "$SKEW_LOG" 2>/dev/null || echo "(no dba_skewness_check.log)"
+            echo ">>> plan_diff.log"
+            head -n 60 "$PLAN_DIFF_LOG" 2>/dev/null || echo "(no plan_diff.log)"
             echo
             echo "--- DBA PERFORMANCE / PARTITION / LOCK / PLAN / TUNING ---"
             echo ">>> partition_access.log"
@@ -1443,7 +1430,7 @@ jobs:
             ${{ env.DATA_ROOT }}/health/**
             ${{ env.DATA_ROOT }}/governance/**
             ${{ env.DATA_ROOT }}/history/**
-            ${{ env.LOG_DIR }}/**   # EchoOps 중심 로그도 같이 보관
+            ${{ env.LOG_DIR }}/**  # EchoOps 중심 로그도 같이 보관
           if-no-files-found: warn
           retention-days: 14
 
@@ -1459,6 +1446,7 @@ jobs:
           echo_note "- 대량 가상데이터 생성 / 품질검증 / 증감률 / 고위험 거래비율"
           echo_note "- 시스템 업그레이드 & pkg diff 기록"
           echo_note "- DBA 관점(파티션 프루닝, 락 경합, 쿼리 플랜, 튜닝, 통계수집, 용량 성장)"
+          echo_note "- DBA Advanced(LRQ, Skewness, Plan Diff) 추가 반영"
           echo_note "- 민감데이터 마스킹/권한 감사/거버넌스/온콜/RPO·RTO 문서화"
           echo_note "- tar.gz 스냅샷 + ISO 스냅샷 생성 (hash 포함)"
           echo_note "- DR 토폴로지/DR 보관/1일 로테이션/DR 복구 플레이북"
