@@ -69,7 +69,7 @@ jobs:
 
       - name: Install MCP CLI helpers
         run: |
-          npm install --global @modelcontextprotocol/cli@latest
+          npm install --global @modelcontextprotocol/inspector@latest
 
       - name: Prepare workspace directories
         run: |

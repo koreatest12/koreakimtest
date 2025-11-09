@@ -99,6 +99,7 @@
 - [K-Digital Training 우수 수기 사례집](https://www.hrdkorea.or.kr/)
 - [GitHub 포트폴리오 가이드](https://docs.github.com/)
 
+
 ## CLI 도구로 워크플로우 실행하기
 
 > 🛠️ `python -m src.cli.cli_main selfintro <command>` 형식으로 실행합니다.
@@ -116,5 +117,7 @@ python -m src.cli.cli_main selfintro run
 # 예시: 템플릿 생성
 python -m src.cli.cli_main selfintro generate-template --output my_intro.md
 ```
+
+=======
 
 > ℹ️ 본 워크플로우는 지원 기관의 제출 양식 및 요구사항에 따라 유연하게 조정할 수 있으며, 최신 채용 동향을 수시로 확인하는 것을 권장합니다.
