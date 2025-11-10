@@ -1,0 +1,114 @@
+name: "🏦 Teradata FinOps Batch — EchoOps + Audit + Snapshot + ISO + DR(1일보관) + DBA + SafeEcho"
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      echo_trace:
+        description: "모든 단계에서 echo(set -x) 활성화 여부"
+        type: choice
+        options: ["true", "false"]
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  finops_pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      #######################################################################
+      # 0. 코드 체크아웃
+      #######################################################################
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      #######################################################################
+      # 1. 전역 echo_trace 설정
+      #######################################################################
+      - name: 🔊 전역 echo_trace 토글
+        run: |
+          if [ "${{ github.event.inputs.echo_trace || 'false' }}" = "true" ]; then
+            echo "ECHO_TRACE_GLOBAL=true" >> "$GITHUB_ENV"
+            echo "::notice::Global echo_trace = ON"
+          else
+            echo "ECHO_TRACE_GLOBAL=false" >> "$GITHUB_ENV"
+            echo "::notice::Global echo_trace = OFF"
+          fi
+
+      #######################################################################
+      # 2. 부트스트랩 및 /tmp/echo_helpers.sh 생성
+      #######################################################################
+      - name: ⚙️ Bootstrap EchoOps Helper
+        run: |
+          set -e
+          mkdir -p /home/runner/td_data/{logs,tmp,release,history}
+          cat > /tmp/echo_helpers.sh <<'EOSH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          ts() { date +%Y-%m-%dT%H:%M:%S%z; }
+          echo_note() { echo "▶ $(ts) $*" | tee -a "/home/runner/td_data/logs/echo.log"; }
+
+          # 전역 echo_trace 토글 시 trace 활성화
+          if [ "${ECHO_TRACE_GLOBAL:-}" = "true" ]; then
+            export PS4='+ $(date "+%Y-%m-%dT%H:%M:%S%z") ${BASH_SOURCE##*/}:${LINENO}: '
+            set -x
+          fi
+
+          trap 'echo_note "⚠️ Error (exit code $?) in ${BASH_SOURCE##*/}:${LINENO}"' ERR
+          EOSH
+          chmod +x /tmp/echo_helpers.sh
+          echo "::notice::Helper script ready (/tmp/echo_helpers.sh)"
+
+      #######################################################################
+      # 3. 테스트 단계 - 전역 echo_trace 확인
+      #######################################################################
+      - name: 🧪 Echo Trace 확인 테스트
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "Echo Trace 테스트 시작"
+          echo "현재 PS4 설정 확인:"
+          echo "$PS4"
+          echo_note "Sample command 실행 중..."
+          sleep 1
+          echo_note "Echo Trace 테스트 종료"
+
+      #######################################################################
+      # 4. 예시 데이터 작업 시뮬레이션
+      #######################################################################
+      - name: 📦 가상 데이터 생성
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "샘플 데이터 생성 시작"
+          mkdir -p /home/runner/td_data/tmp
+          for i in $(seq 1 5); do
+            echo "ROW_${i},VALUE_$((RANDOM%1000))" >> /home/runner/td_data/tmp/sample.csv
+          done
+          echo_note "CSV 파일 생성 완료"
+          ls -lh /home/runner/td_data/tmp
+
+      #######################################################################
+      # 5. 품질검증 단계 예시
+      #######################################################################
+      - name: ✅ 품질 검증 로그 작성
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "품질검증 시작"
+          COUNT=$(wc -l < /home/runner/td_data/tmp/sample.csv)
+          echo_note "생성된 행 수: ${COUNT}"
+          if [ "$COUNT" -lt 5 ]; then
+            echo_note "❌ 데이터 부족"
+            exit 1
+          else
+            echo_note "✅ 데이터 품질 OK"
+          fi
+
+      #######################################################################
+      # 6. 종료 및 타임스탬프 기록
+      #######################################################################
+      - name: 🕒 종료 로그
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "FinOps Batch 워크플로우 종료"
