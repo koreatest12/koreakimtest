@@ -1,18 +1,270 @@
-name: Docker Image CI
+name: "🐧 Build Linux Images — EchoOps All-in-One"
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, master, '**/create-and-manage-linux-images**' ]
   pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write # GHCR push를 위해 필요
+
+env:
+  REGISTRY: ghcr.io
+  ECHO_PREFIX: "[EchoOps][build-images]"
 
 jobs:
-
   build:
-
     runs-on: ubuntu-latest
+    # self-hosted를 쓰고 싶다면 위를 [self-hosted, linux, docker] 등으로 변경하면 됩니다.
+
+    strategy:
+      max-parallel: 10
+      fail-fast: false
+      matrix:
+        include:
+          - name: ubuntu
+            context: ./docker/ubuntu
+            dockerfile: ./docker/ubuntu/Dockerfile
+          - name: ubi
+            context: ./docker/ubi
+            dockerfile: ./docker/ubi/Dockerfile
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag my-image-name:$(date +%s)
+      # 공통 컨텍스트 & 매트릭스 정보 Echo
+      - name: Echo workflow context
+        run: |
+          set -euo pipefail
+          echo "${ECHO_PREFIX} === Workflow start ==="
+          echo "${ECHO_PREFIX} Repository : ${GITHUB_REPOSITORY}"
+          echo "${ECHO_PREFIX} Ref        : ${GITHUB_REF}"
+          echo "${ECHO_PREFIX} Event      : ${GITHUB_EVENT_NAME}"
+          echo "${ECHO_PREFIX} Actor      : ${GITHUB_ACTOR}"
+          echo "${ECHO_PREFIX} Matrix.name: ${{ matrix.name }}"
+          echo "${ECHO_PREFIX} Context    : ${{ matrix.context }}"
+          echo "${ECHO_PREFIX} Dockerfile : ${{ matrix.dockerfile }}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Echo runner info
+        run: |
+          set -euo pipefail
+          echo "${ECHO_PREFIX} Runner OS : $(uname -a)"
+          echo "${ECHO_PREFIX} Working dir: $(pwd)"
+          echo "${ECHO_PREFIX} Disk usage (top 20):"
+          du -h . | sort -hr | head -n 20 || true
+
+      # QEMU + Buildx 세팅 (멀티아치 빌드 준비)
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: Echo QEMU setup
+        run: |
+          set -euo pipefail
+          echo "${ECHO_PREFIX} QEMU has been set up for multi-arch emulation."
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Echo Buildx info
+        run: |
+          set -euo pipefail
+          echo "${ECHO_PREFIX} Buildx builders:"
+          docker buildx ls || echo "${ECHO_PREFIX} buildx ls failed"
+
+      # Dockerfile Lint (예전 버전에는 없던 기능)
+      - name: Lint Dockerfile (hadolint, Echo)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ matrix.dockerfile }}
+        continue-on-error: true
+
+      - name: Echo Dockerfile lint status
+        run: |
+          set -euo pipefail
+          echo "${ECHO_PREFIX} Dockerfile lint step executed for ${{ matrix.dockerfile }}"
+          echo "${ECHO_PREFIX} (hadolint는 continue-on-error=true로 설정됨)"
+
+      # 이미지 메타데이터 & 태그 전략 (sha / latest / tag)
+      - name: Prepare image metadata (Echo)
+        id: meta
+        run: |
+          set -euo pipefail
+
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}"
+          SHA_TAG="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+
+          echo "${ECHO_PREFIX} === Image Metadata ==="
+          echo "${ECHO_PREFIX} Base image name : ${IMAGE_NAME}"
+          echo "${ECHO_PREFIX} SHA tag         : ${SHA_TAG}"
+          echo "${ECHO_PREFIX} Ref type/name   : ${GITHUB_REF_TYPE:-unknown}/${GITHUB_REF_NAME:-unknown}"
+
+          TAGS="${SHA_TAG}"
+
+          # main 브랜치에는 latest 태그 추가
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_NAME}" == "main" ]]; then
+            TAGS="${TAGS},${IMAGE_NAME}:latest"
+            echo "${ECHO_PREFIX} main 브랜치이므로 'latest' 태그 추가"
+          fi
+
+          # Git 태그 빌드인 경우 (예: v1.2.3) 해당 태그도 부여
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            TAGS="${TAGS},${IMAGE_NAME}:${GITHUB_REF_NAME}"
+            echo "${ECHO_PREFIX} Git tag 빌드이므로 '${GITHUB_REF_NAME}' 태그 추가"
+          fi
+
+          echo "image_name=${IMAGE_NAME}"       >> "$GITHUB_OUTPUT"
+          echo "image_sha_tag=${SHA_TAG}"      >> "$GITHUB_OUTPUT"
+          echo "image_tags=${TAGS}"            >> "$GITHUB_OUTPUT"
+
+          echo "${ECHO_PREFIX} 최종 태그 목록: ${TAGS}"
+
+      # GHCR 로그인 (예전 버전에는 없었지만 최신 기능에 포함)
+      - name: Log in to GHCR (Echo)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Echo push/load policy
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo "${ECHO_PREFIX} Event is pull_request → push=false, load=true"
+          else
+            echo "${ECHO_PREFIX} Event is ${GITHUB_EVENT_NAME} → push=true, load=true"
+          fi
+
+      # PR용: push 없이 로컬에만 로드해서 테스트 (단일 아키텍처)
+      - name: Build image for PR (Echo + cache)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64           # PR에서는 단일 아키텍처 + load
+          push: false
+          load: true                       # smoke test를 위해 로드
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ steps.meta.outputs.image_sha_tag }}
+
+      # PR이 아닌 경우: 멀티아치 빌드 + push (load는 선택)
+      - name: Build image for push (Echo + cache)
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64   # 멀티 아키텍처 빌드
+          push: true                           # main/태그 등에서는 push
+          load: false                          # 멀티아치 + load는 지원 X이므로 false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ${{ steps.meta.outputs.image_tags }}
+
+      - name: Echo image list after build
+        run: |
+          set -euo pipefail
+          echo "${ECHO_PREFIX} Docker images (filtered by owner/repo):"
+          docker images "${{ env.REGISTRY }}/${{ github.repository_owner }}/*" || true
+
+      # Smoke test: PR에서는 로컬 로드된 이미지를, push 빌드에서는 GHCR에서 pull해서 사용
+      - name: Smoke test image contents (Echo, PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
+          echo "${ECHO_PREFIX} [PR] Smoke testing image: ${IMAGE}"
+
+          docker run --rm "${IMAGE}" bash -lc "
+            echo '${ECHO_PREFIX} [container] 시작 - 기본 경로 점검';
+            echo '${ECHO_PREFIX} [container] /etc/app/permissions.conf 존재 여부 확인';
+            test -f /etc/app/permissions.conf;
+
+            echo '${ECHO_PREFIX} [container] /opt/app/data 디렉터리 확인';
+            test -d /opt/app/data;
+
+            echo '${ECHO_PREFIX} [container] /var/log/app 디렉터리 확인';
+            test -d /var/log/app;
+
+            echo '${ECHO_PREFIX} [container] uname:';
+            uname -a;
+          "
+
+          echo "${ECHO_PREFIX} [PR] Smoke test 통과: ${IMAGE}"
+
+      - name: Smoke test image contents (Echo, push)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
+          echo "${ECHO_PREFIX} [push] Smoke testing image (pull from GHCR): ${IMAGE}"
+
+          docker pull "${IMAGE}"
+          docker run --rm "${IMAGE}" bash -lc "
+            echo '${ECHO_PREFIX} [container] 시작 - 기본 경로 점검';
+            echo '${ECHO_PREFIX} [container] /etc/app/permissions.conf 존재 여부 확인';
+            test -f /etc/app/permissions.conf;
+
+            echo '${ECHO_PREFIX} [container] /opt/app/data 디렉터리 확인';
+            test -d /opt/app/data;
+
+            echo '${ECHO_PREFIX} [container] /var/log/app 디렉터리 확인';
+            test -d /var/log/app;
+
+            echo '${ECHO_PREFIX} [container] uname:';
+            uname -a;
+          "
+
+          echo "${ECHO_PREFIX} [push] Smoke test 통과: ${IMAGE}"
+
+      # Trivy 보안 스캔 (예전 버전에는 없고, 최신 기능)
+      - name: Scan image with Trivy (Echo)
+        uses: aquasecurity/trivy-action@v0.28.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image_sha_tag }}
+          format: table
+          ignore-unfixed: true
+        continue-on-error: true
+
+      - name: Echo Trivy scan status
+        run: |
+          set -euo pipefail
+          echo "${ECHO_PREFIX} Trivy scan step executed for ${{ steps.meta.outputs.image_sha_tag }}"
+          echo "${ECHO_PREFIX} (continue-on-error=true → 취약점이 있어도 워크플로우는 실패시키지 않음)"
+
+      # 예전 버전의 "docker save + upload artifact" 기능 + Echo + retention-days
+      - name: Save image as artifact (Echo)
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
+          TAR_NAME="${{ matrix.name }}.tar.gz"
+
+          echo "${ECHO_PREFIX} 이미지를 tar.gz로 저장 시작: ${IMAGE} -> ${TAR_NAME}"
+          docker pull "${IMAGE}" || true  # PR의 경우 이미 로컬에 있을 수 있음
+          docker save "${IMAGE}" | gzip > "${TAR_NAME}"
+          echo "${ECHO_PREFIX} tar.gz 생성 완료: ${TAR_NAME}"
+          ls -lh "${TAR_NAME}"
+
+      - name: Upload artifact (Echo)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-image-${{ github.run_number }}
+          path: ${{ matrix.name }}.tar.gz
+          retention-days: 7
+
+      - name: Echo workflow summary
+        run: |
+          set -euo pipefail
+          echo "${ECHO_PREFIX} === Workflow summary for ${{ matrix.name }} ==="
+          echo "${ECHO_PREFIX} Image name : ${{ steps.meta.outputs.image_name }}"
+          echo "${ECHO_PREFIX} SHA tag    : ${{ steps.meta.outputs.image_sha_tag }}"
+          echo "${ECHO_PREFIX} Tags       : ${{ steps.meta.outputs.image_tags }}"
+          echo "${ECHO_PREFIX} Artifact   : ${{ matrix.name }}.tar.gz (retention 7 days)"
+          echo "${ECHO_PREFIX} === Workflow end ==="
