@@ -4,12 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       workflow:
-        description: "Workflow file name or ID to inspect"
-        required: true
+        description: "Workflow file name or ID (empty or 'all' = scan all workflows in repo)"
+        required: false
+        default: "all"
         type: string
       max_run_minutes:
-        description: "Maximum allowed run time in minutes before cancellation"
+        description: "Maximum allowed run time in minutes before cancellation (empty = 60)"
         default: "60"
+        required: false
         type: string
       status_filter:
         description: "Comma-separated list of statuses to target (queued,in_progress)"
@@ -39,19 +41,26 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const maxRunMinutes = Number(core.getInput('max_run_minutes'));
+            const rawMax = core.getInput('max_run_minutes') || '';
+            const trimmedMax = rawMax.trim();
+
+            // 빈값이면 기본 60분 사용
+            const effectiveMax = trimmedMax === '' ? '60' : trimmedMax;
+            const maxRunMinutes = Number(effectiveMax);
+
             if (!Number.isFinite(maxRunMinutes) || maxRunMinutes <= 0) {
-              core.setFailed(`max_run_minutes must be a positive number, received: ${core.getInput('max_run_minutes')}`);
+              core.setFailed(`max_run_minutes must be a positive number, received: ${rawMax}`);
               return;
             }
+
+            core.setOutput('max_run_minutes', String(maxRunMinutes));
+
             const runId = core.getInput('run_id');
-            const workflow = core.getInput('workflow');
-            if (!workflow) {
-              core.setFailed('workflow input is required');
-              return;
-            }
-            core.setOutput('max_run_minutes', maxRunMinutes);
-            if (runId) {
+            const rawWorkflow = core.getInput('workflow') || '';
+            const workflow = rawWorkflow.trim();
+
+            // 단일 run_id 대상 모드
+            if (runId && runId.trim() !== '') {
               const numericRunId = Number(runId.trim());
               if (!Number.isInteger(numericRunId) || numericRunId <= 0) {
                 core.setFailed(`run_id must be a positive integer, received: ${runId}`);
@@ -59,19 +68,32 @@ jobs:
               }
               core.setOutput('target_mode', 'single');
               core.setOutput('target_run_id', String(numericRunId));
-            } else {
-              core.setOutput('target_mode', 'scan');
+              return;
             }
 
-      - name: Force cancel stuck workflows
-        if: steps.validate.outputs.target_mode == 'scan'
+            // workflow 값이 있고 'all'이 아닌 경우: 특정 워크플로우만 스캔
+            if (workflow && workflow.toLowerCase() !== 'all') {
+              core.setOutput('target_mode', 'scan_workflow');
+              core.setOutput('workflow_id', workflow);
+              return;
+            }
+
+            // 그 외(빈값, 'all'): 레포 전체 워크플로우 스캔
+            core.setOutput('target_mode', 'scan_repo');
+
+      - name: Force cancel stuck workflows (specific workflow)
+        if: steps.validate.outputs.target_mode == 'scan_workflow'
         uses: actions/github-script@v7
+        env:
+          MAX_RUN_MINUTES: ${{ steps.validate.outputs.max_run_minutes }}
+          WORKFLOW_ID: ${{ steps.validate.outputs.workflow_id }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const workflow = core.getInput('workflow');
+            const workflow = process.env.WORKFLOW_ID;
             const dryRun = core.getBooleanInput('dry_run');
-            const maxRunMinutes = Number(core.getInput('max_run_minutes'));
+            const maxRunMinutes = Number(process.env.MAX_RUN_MINUTES);
+
             const statusFilter = core.getInput('status_filter')
               .split(',')
               .map((s) => s.trim())
@@ -86,8 +108,8 @@ jobs:
             const now = Date.now();
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-
             const fetchedRuns = [];
+
             for (const status of statusFilter) {
               core.info(`Fetching runs for workflow "${workflow}" with status "${status}"...`);
               const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
@@ -116,16 +138,86 @@ jobs:
               return;
             }
 
-            core.info(`Identified ${targets.length} workflow run(s) exceeding ${maxRunMinutes} minutes.`);
+            core.info(`Identified ${targets.length} workflow run(s) exceeding ${maxRunMinutes} minutes for workflow "${workflow}".`);
+
             for (const run of targets) {
               const ageMinutes = ((now - new Date(run.created_at).getTime()) / 60000).toFixed(1);
               core.info(`Run ${run.id} (${run.name}) has been running for ~${ageMinutes} minutes [status=${run.status}].`);
-
               if (dryRun) {
                 core.info(`[Dry Run] Would cancel https://github.com/${owner}/${repo}/actions/runs/${run.id}`);
                 continue;
               }
+              await github.rest.actions.cancelWorkflowRun({
+                owner,
+                repo,
+                run_id: run.id,
+              });
+              core.info(`Cancelled https://github.com/${owner}/${repo}/actions/runs/${run.id}`);
+            }
 
+      - name: Force cancel stuck workflows (ALL workflows in repo)
+        if: steps.validate.outputs.target_mode == 'scan_repo'
+        uses: actions/github-script@v7
+        env:
+          MAX_RUN_MINUTES: ${{ steps.validate.outputs.max_run_minutes }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const dryRun = core.getBooleanInput('dry_run');
+            const maxRunMinutes = Number(process.env.MAX_RUN_MINUTES);
+
+            const statusFilter = core.getInput('status_filter')
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+
+            if (statusFilter.length === 0) {
+              core.setFailed('status_filter must include at least one status');
+              return;
+            }
+
+            const thresholdMillis = maxRunMinutes * 60 * 1000;
+            const now = Date.now();
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const fetchedRuns = [];
+
+            for (const status of statusFilter) {
+              core.info(`Fetching runs for ALL workflows in ${owner}/${repo} with status "${status}"...`);
+              const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+                owner,
+                repo,
+                per_page: 100,
+                status,
+              });
+              fetchedRuns.push(...runs);
+            }
+
+            if (fetchedRuns.length === 0) {
+              core.info('No workflow runs matched the given filters across the repository.');
+              return;
+            }
+
+            const targets = fetchedRuns.filter((run) => {
+              const createdAt = new Date(run.created_at).getTime();
+              const age = now - createdAt;
+              return age >= thresholdMillis;
+            });
+
+            if (targets.length === 0) {
+              core.info('No workflow runs exceeded the maximum runtime threshold across the repository.');
+              return;
+            }
+
+            core.info(`Identified ${targets.length} workflow run(s) exceeding ${maxRunMinutes} minutes across ALL workflows.`);
+
+            for (const run of targets) {
+              const ageMinutes = ((now - new Date(run.created_at).getTime()) / 60000).toFixed(1);
+              core.info(`Run ${run.id} (${run.name}) [workflow: ${run.name}] has been running for ~${ageMinutes} minutes [status=${run.status}].`);
+              if (dryRun) {
+                core.info(`[Dry Run] Would cancel https://github.com/${owner}/${repo}/actions/runs/${run.id}`);
+                continue;
+              }
               await github.rest.actions.cancelWorkflowRun({
                 owner,
                 repo,
@@ -155,4 +247,5 @@ jobs:
               repo,
               run_id: Number(runId),
             });
+
             core.info(`Cancelled https://github.com/${owner}/${repo}/actions/runs/${runId}`);
