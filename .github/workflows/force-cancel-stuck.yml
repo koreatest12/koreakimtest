@@ -5,12 +5,12 @@ on:
     inputs:
       workflow:
         description: "Workflow file name or ID (empty or 'all' = scan all workflows in repo)"
-        required: false
+        required: true
         default: "all"
         type: string
       max_run_minutes:
         description: "Maximum allowed run time in minutes before cancellation (empty = 60)"
-        required: false
+        required: true
         default: "60"
         type: string
       status_filter:
@@ -19,12 +19,12 @@ on:
         type: string
       run_id:
         description: "Optional specific run ID to cancel (if set, only this run is processed)"
-        required: false
+        required: true
         type: string
       dry_run:
         description: "If true, only report runs that would be cancelled"
         type: boolean
-        required: false
+        required: true
         default: true
 
 permissions:
