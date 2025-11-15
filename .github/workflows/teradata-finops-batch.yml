@@ -50,6 +50,11 @@ on:
         type: choice
         options: ["true", "false"]
         default: "false"
+      debug_mode:
+        description: "디버그 모드 (lite + echo_trace 강제 ON)"
+        type: choice
+        options: ["true", "false"]
+        default: "false"
 
   # 매일 15:30 UTC == 한국시간(KST) 새벽 00:30 자동 야간배치
   schedule:
@@ -96,16 +101,22 @@ jobs:
         uses: actions/checkout@v4
 
       #######################################################################
-      # 1. 전역 echo_trace 설정 (ECHO_TRACE_GLOBAL)
+      # 1. 전역 echo_trace/Debug 모드 설정
       #######################################################################
-      - name: 🔊 전역 echo_trace 토글
+      - name: 🔊 전역 echo_trace & Debug 모드 토글
         run: |
-          if [ "${{ github.event.inputs.echo_trace || 'false' }}" = "true" ]; then
+          # debug_mode=true 이면 echo_trace 강제 ON
+          if [ "${{ github.event.inputs.debug_mode || 'false' }}" = "true" ]; then
             echo "ECHO_TRACE_GLOBAL=true" >> "$GITHUB_ENV"
-            echo "::notice::Global echo_trace = ON"
+            echo "::notice::Debug mode ON → Global echo_trace = ON"
           else
-            echo "ECHO_TRACE_GLOBAL=false" >> "$GITHUB_ENV"
-            echo "::notice::Global echo_trace = OFF"
+            if [ "${{ github.event.inputs.echo_trace || 'false' }}" = "true" ]; then
+              echo "ECHO_TRACE_GLOBAL=true" >> "$GITHUB_ENV"
+              echo "::notice::Global echo_trace = ON"
+            else
+              echo "ECHO_TRACE_GLOBAL=false" >> "$GITHUB_ENV"
+              echo "::notice::Global echo_trace = OFF"
+            fi
           fi
 
       #######################################################################
@@ -171,7 +182,36 @@ jobs:
           EOSH
 
           chmod +x /tmp/echo_helpers.sh
-          echo "::notice::Helper script ready (/tmp/echo_helpers.sh)"
+          source /tmp/echo_helpers.sh
+          echo_note "EchoOps Helper 준비 완료 (/tmp/echo_helpers.sh)"
+
+      #######################################################################
+      # 2.5 사전 필수 조건 점검 (Health Check: Secrets/Inputs)
+      #######################################################################
+      - name: 🔎 사전 필수 조건 점검 (Secrets/Inputs)
+        run: |
+          set -e
+          source /tmp/echo_helpers.sh
+
+          MISSING=0
+
+          # dr_backup=true 인데 DR_BACKUP_KEY 없으면 오류
+          if [ "${{ github.event.inputs.dr_backup || 'false' }}" = "true" ] && [ -z "${{ secrets.DR_BACKUP_KEY }}" ]; then
+            echo_note "❌ dr_backup=true 인데 DR_BACKUP_KEY secret 이 없습니다."
+            MISSING=1
+          fi
+
+          # Slack Webhook 없는 경우는 필수는 아니므로 경고만
+          if [ -z "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            echo_note "⚠️ SLACK_WEBHOOK_URL secret 없음 → Slack 알림 단계는 자동으로 실패/스킵될 수 있습니다."
+          fi
+
+          if [ "$MISSING" -ne 0 ]; then
+            echo_note "필수 조건 미충족 → 워크플로우 중단"
+            exit 1
+          fi
+
+          echo_note "사전 필수 조건 점검 통과"
 
       #######################################################################
       # 3. 워크플로우 시작 로깅 + SLA 타이머 시작
@@ -185,6 +225,7 @@ jobs:
           echo_note "dispatch.mode=${{ github.event.inputs.mode || 'N/A' }}"
           echo_note "dispatch.dr_backup=${{ github.event.inputs.dr_backup || 'N/A' }}"
           echo_note "dispatch.echo_trace=${{ github.event.inputs.echo_trace || 'false' }}"
+          echo_note "dispatch.debug_mode=${{ github.event.inputs.debug_mode || 'false' }}"
           mkdir -p "${DATA_ROOT}/logs"
           date +%s > "${DATA_ROOT}/logs/start_epoch.txt"
           { echo "SLA_START_TS=$(date +%Y-%m-%dT%H:%M:%S%z)"; } > "${DATA_ROOT}/logs/sla_timing.log"
@@ -243,9 +284,10 @@ jobs:
           ls -R "${DATA_ROOT}/${DR_TOPOLOGY_DIR}" || true
 
       #######################################################################
-      # 5. 러너 시스템 업그레이드 (실패해도 계속) + 패키지 목록 diff
+      # 5. 러너 시스템 업그레이드 (mode=full 이고 debug_mode=false 일 때만)
       #######################################################################
       - name: 🔄 러너 패키지 업그레이드 (continue-on-error)
+        if: ${{ github.event.inputs.mode == 'full' && github.event.inputs.debug_mode != 'true' }}
         continue-on-error: true
         run: |
           set +e
@@ -884,6 +926,27 @@ jobs:
           echo_note "DBA 유지보수/DR/RPO-RTO/용량/분류 로그 생성 완료"
 
       #######################################################################
+      # 18.5 FinOps: 용량 추세 CSV 업데이트
+      #######################################################################
+      - name: 💾 용량 추세 CSV 업데이트
+        run: |
+          set -e
+          source /tmp/echo_helpers.sh
+          CAP_LOG="${DATA_ROOT}/logs/capacity_growth.log"
+          CSV_FILE="${DATA_ROOT}/logs/capacity_growth.csv"
+
+          TS=$(date +%Y-%m-%dT%H:%M:%S%z)
+          STG_MB_CURR=$(grep 'STG_MB_CURR=' "$CAP_LOG" | cut -d= -f2)
+          FINAL_MB_CURR=$(grep 'FINAL_MB_CURR=' "$CAP_LOG" | cut -d= -f2)
+
+          if [ ! -f "$CSV_FILE" ]; then
+            echo "TS,STG_MB,FINAL_MB" > "$CSV_FILE"
+          fi
+
+          echo "${TS},${STG_MB_CURR},${FINAL_MB_CURR}" >> "$CSV_FILE"
+          echo_note "용량 추세 CSV 갱신 -> $CSV_FILE"
+
+      #######################################################################
       # 19. 민감 데이터 마스킹 정책 감사
       #######################################################################
       - name: 🛡 민감 데이터 마스킹 정책 감사 로그
@@ -966,9 +1029,10 @@ jobs:
           head -n 5 "${DATA_ROOT}/logs/snapshot_hash.txt" || true
 
       #######################################################################
-      # 22. ISO 스냅샷 이미지 생성 (continue-on-error)
+      # 22. ISO 스냅샷 이미지 생성 (mode=full & debug_mode=false 일 때만)
       #######################################################################
       - name: 🧊 ISO 스냅샷 이미지 생성
+        if: ${{ github.event.inputs.mode == 'full' && github.event.inputs.debug_mode != 'true' }}
         continue-on-error: true
         run: |
           set +e
@@ -1030,9 +1094,10 @@ jobs:
           fi
 
       #######################################################################
-      # 23. DR(재해복구) 백업 및 1일 보관 로테이션
+      # 23. DR(재해복구) 백업 및 1일 보관 로테이션 (mode=full & debug_mode=false & dr_backup=true)
       #######################################################################
       - name: 🌐 DR(재해복구) 백업 및 1일 보관 로테이션
+        if: ${{ github.event.inputs.mode == 'full' && github.event.inputs.debug_mode != 'true' }}
         continue-on-error: true
         env:
           DUMMY_KEY: ${{ secrets.DR_BACKUP_KEY }}
@@ -1125,9 +1190,10 @@ jobs:
           head -n 80 "$ROTATE_LOG" || true
 
       #######################################################################
-      # 24. GitHub Release 업로드 시도 (옵션)
+      # 24. GitHub Release 업로드 시도 (mode=full & debug_mode=false)
       #######################################################################
       - name: 🚀 GitHub Release(스냅샷) 업로드 시도
+        if: ${{ github.event.inputs.mode == 'full' && github.event.inputs.debug_mode != 'true' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1319,6 +1385,55 @@ jobs:
           echo_note "SLA_DURATION_SEC=${DURATION_SEC}s 기록 완료"
 
       #######################################################################
+      # 27.5 Delta Summary (이전 실행과 비교 요약)
+      #######################################################################
+      - name: 📈 Delta Summary 요약 로그 생성
+        run: |
+          set -e
+          source /tmp/echo_helpers.sh
+          DELTA_LOG="${DATA_ROOT}/logs/run_delta_summary.log"
+          QUALITY_LOG="${DATA_ROOT}/quality/quality_check.log"
+          LAST_HIST="${DATA_ROOT}/history/last_run_stats.txt"
+          CAP_LOG="${DATA_ROOT}/logs/capacity_growth.log"
+          LAST_CAP="${DATA_ROOT}/history/last_capacity.txt"
+          PLAN_DIFF_LOG="${DATA_ROOT}/logs/plan_diff.log"
+          SCHEMA_DIFF_LOG="${DATA_ROOT}/logs/schema_diff.log"
+
+          CURR_ACTUAL=$(grep '^ACTUAL_ROWCOUNT=' "$QUALITY_LOG" 2>/dev/null | head -n1 | cut -d= -f2)
+          PREV_ACTUAL=$(grep '^ACTUAL_ROWCOUNT=' "$LAST_HIST" 2>/dev/null | head -n1 | cut -d= -f2)
+
+          CURR_FINAL_MB=$(grep 'FINAL_MB_CURR=' "$CAP_LOG" 2>/dev/null | head -n1 | cut -d= -f2)
+          PREV_FINAL_MB=$(grep '^FINAL_MB=' "$LAST_CAP" 2>/dev/null | head -n1 | cut -d= -f2)
+
+          PLAN_CHANGED="NO"
+          if grep -qv "first run or no previous plan" "$PLAN_DIFF_LOG" 2>/dev/null; then
+            if [ -s "$PLAN_DIFF_LOG" ]; then
+              PLAN_CHANGED="YES"
+            fi
+          fi
+
+          SCHEMA_CHANGED="NO"
+          if grep -qv "first run or no prev schema" "$SCHEMA_DIFF_LOG" 2>/dev/null; then
+            if [ -s "$SCHEMA_DIFF_LOG" ]; then
+              SCHEMA_CHANGED="YES"
+            fi
+          fi
+
+          {
+            echo "=== RUN DELTA SUMMARY ==="
+            echo "TS=$(date +%Y-%m-%dT%H:%M:%S%z)"
+            echo "CURR_ACTUAL_ROWCOUNT=${CURR_ACTUAL:-N/A}"
+            echo "PREV_ACTUAL_ROWCOUNT=${PREV_ACTUAL:-N/A}"
+            echo "CURR_FINAL_MB=${CURR_FINAL_MB:-N/A}"
+            echo "PREV_FINAL_MB=${PREV_FINAL_MB:-N/A}"
+            echo "PLAN_CHANGED=${PLAN_CHANGED}"
+            echo "SCHEMA_CHANGED=${SCHEMA_CHANGED}"
+          } > "$DELTA_LOG"
+
+          echo_note "Delta Summary 로그 생성 완료 -> $DELTA_LOG"
+          cat "$DELTA_LOG" || true
+
+      #######################################################################
       # 28. 감사 요약 로그 (audit_run_summary.log)
       #######################################################################
       - name: 🧾 감사 요약 로그 생성 (audit_run_summary.log)
@@ -1356,6 +1471,7 @@ jobs:
           LRQ_LOG="${DATA_ROOT}/logs/dba_lrq_check.log"
           SKEW_LOG="${DATA_ROOT}/logs/dba_skewness_check.log"
           PLAN_DIFF_LOG="${DATA_ROOT}/logs/plan_diff.log"
+          DELTA_LOG="${DATA_ROOT}/logs/run_delta_summary.log"
 
           {
             echo "=== PIPELINE AUDIT SUMMARY ==="
@@ -1436,6 +1552,9 @@ jobs:
             echo
             echo "--- SNAPSHOT ISO HASH ---"
             cat "$ISO_HASH_FILE" 2>/dev/null || echo "(no iso_hash.txt)"
+            echo
+            echo "--- RUN DELTA SUMMARY ---"
+            cat "$DELTA_LOG" 2>/dev/null || echo "(no run_delta_summary.log)"
           } > "$AUDIT_FILE"
 
           echo_note "감사 요약 로그 생성 완료 -> $AUDIT_FILE"
@@ -1466,7 +1585,87 @@ jobs:
           retention-days: 14
 
       #######################################################################
-      # 30. 실패 시 Slack 알림
+      # 29.5 DBA 전용 Artifact 업로드
+      #######################################################################
+      - name: 📦 DBA 로그 전용 Artifact 업로드
+        uses: actions/upload-artifact@v4
+        with:
+          name: teradata-dba-logs-${{ github.run_id }}
+          path: |
+            ${{ env.DATA_ROOT }}/logs/dba_*.log
+            ${{ env.DATA_ROOT }}/logs/partition_access.log
+            ${{ env.DATA_ROOT }}/logs/lock_contention.log
+            ${{ env.DATA_ROOT }}/logs/query_plan_sample.log
+            ${{ env.DATA_ROOT }}/logs/tuning_recommendations.log
+            ${{ env.DATA_ROOT }}/logs/stats_maintenance.log
+            ${{ env.DATA_ROOT }}/logs/dba_skewness_check.log
+            ${{ env.DATA_ROOT }}/logs/dba_lrq_check.log
+            ${{ env.DATA_ROOT }}/logs/plan_diff.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      #######################################################################
+      # 30. QC/SLA 위반 시 GitHub Issue 자동 생성
+      #######################################################################
+      - name: 🐞 QC/SLA 위반 시 GitHub Issue 자동 생성
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          source /tmp/echo_helpers.sh
+
+          QUALITY_LOG="${DATA_ROOT}/quality/quality_check.log"
+          SLA_LOG="${DATA_ROOT}/logs/sla_timing.log"
+
+          QC_FLAG="OK"
+          SLA_FLAG="OK"
+
+          if grep -q "ROW_COUNT_OK=false" "$QUALITY_LOG" 2>/dev/null; then
+            QC_FLAG="FAIL"
+          fi
+
+          if grep -q "SLA_DURATION_SEC=" "$SLA_LOG" 2>/dev/null; then
+            DURATION=$(grep 'SLA_DURATION_SEC=' "$SLA_LOG" | tail -n1 | cut -d= -f2)
+            if [ "$DURATION" -gt 900 ]; then
+              SLA_FLAG="FAIL"
+            fi
+          fi
+
+          if [ "$QC_FLAG" = "OK" ] && [ "$SLA_FLAG" = "OK" ]; then
+            echo_note "QC/SLA 모두 정상 → Issue 생성 스킵"
+            exit 0
+          fi
+
+          TITLE="Teradata FinOps Batch: QC/SLA 이슈 (Run $GITHUB_RUN_ID)"
+          BODY_FILE="${DATA_ROOT}/tmp/issue_body.txt"
+          mkdir -p "$(dirname "$BODY_FILE")"
+
+          {
+            echo "런 ID: $GITHUB_RUN_ID"
+            echo "커밋: $GITHUB_SHA"
+            echo "브랜치: $GITHUB_REF_NAME"
+            echo
+            echo "QC 상태: $QC_FLAG"
+            echo "SLA 상태: $SLA_FLAG"
+            echo
+            echo "=== QUALITY ==="
+            cat "$QUALITY_LOG" 2>/dev/null || echo "(no quality_check.log)"
+            echo
+            echo "=== SLA TIMING ==="
+            cat "$SLA_LOG" 2>/dev/null || echo "(no sla_timing.log)"
+          } > "$BODY_FILE"
+
+          echo_note "QC/SLA 이슈 감지 → GitHub Issue 생성 시도"
+          gh issue create \
+            --title "$TITLE" \
+            --body-file "$BODY_FILE" \
+            --label "finops" \
+            --label "batch-issue" \
+            || echo "::warning::Issue 생성 실패 (권한 부족 등)"
+
+      #######################################################################
+      # 31. 실패 시 Slack 알림
       #######################################################################
       - name: 🚨 실패 알림 (Slack)
         if: failure()
@@ -1489,7 +1688,30 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
       #######################################################################
-      # 31. 파이프라인 종료 (항상 성공)
+      # 32. 성공 시 Slack 요약 알림
+      #######################################################################
+      - name: 📊 성공 요약 알림 (Slack)
+        if: success()
+        uses: slackapi/slack-github-action@v1.26.0
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        with:
+          payload: |
+            {
+              "text": "✅ Teradata FinOps Batch 성공",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Teradata FinOps Batch 성공*\n*Run ID:* ${{ github.run_id }}\n*Branch:* `${{ github.ref_name }}`\n*Commit:* `${{ github.sha }}`"
+                  }
+                }
+              ]
+            }
+
+      #######################################################################
+      # 33. 파이프라인 종료 (항상 성공)
       #######################################################################
       - name: ✅ 파이프라인 완료 (항상 성공)
         if: always()
@@ -1498,12 +1720,12 @@ jobs:
           echo_note "Teradata FinOps Batch 파이프라인 전체 단계 수행 완료"
           echo_note "- EchoOps 로깅 (/tmp/echo_helpers.sh 기반)"
           echo_note "- 대량 가상데이터 생성 / 품질검증 / 증감률 / 고위험 거래비율"
-          echo_note "- 시스템 업그레이드 & pkg diff 기록"
+          echo_note "- 시스템 업그레이드 & pkg diff 기록 (mode=full & debug_mode=false)"
           echo_note "- DBA 관점(파티션 프루닝, 락 경합, 쿼리 플랜, 튜닝, 통계수집, 용량 성장)"
           echo_note "- DBA Advanced(LRQ, Skewness, Plan Diff) 포함"
           echo_note "- 민감데이터 마스킹/권한 감사/거버넌스/온콜/RPO·RTO 문서화"
-          echo_note "- tar.gz 스냅샷 + ISO 스냅샷 생성 (hash 포함)"
+          echo_note "- tar.gz 스냅샷 + (옵션) ISO 스냅샷 생성 (hash 포함)"
           echo_note "- DR 토폴로지/DR 보관/1일 로테이션/DR 복구 플레이북"
-          echo_note "- GitHub Release 업로드(옵션)"
-          echo_note "- HTML 리포트 / audit_run_summary.log / artifact 업로드 완료"
-          echo "✅ 모든 산출물은 artifact teradata-run-${GITHUB_RUN_ID} 로 업로드되었습니다."
+          echo_note "- GitHub Release 업로드(옵션, mode=full & debug_mode=false)"
+          echo_note "- HTML 리포트 / run_delta_summary / audit_run_summary / artifact 업로드 완료"
+          echo "✅ 모든 산출물은 artifact teradata-run-${GITHUB_RUN_ID} 및 teradata-dba-logs-${GITHUB_RUN_ID} 로 업로드되었습니다."
