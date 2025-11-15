@@ -170,12 +170,12 @@ jobs:
           echo "✅ Maven smoke test: project generated and packaged successfully."
 
       # ✅ springboot-learning-example 전체 모듈 빌드 (Web / WebFlux / JPA / MyBatis / ES / Dubbo 등)
-      # 테스트 환경(외부 DB, Redis, ES, Dubbo Registry 등) 의존성 때문에 기본적으로 테스트는 skip 처리
+      # 외부 인프라 의존성 때문에 테스트는 기본 skip
       - name: Build springboot-learning-example (all modules, skip tests)
         run: |
           set -euo pipefail
           echo "Building jeffli1993/springboot-learning-example with Maven ${MAVEN_HOME}"
-          echo "Modules include: core Spring Boot, WebFlux, JPA, MongoDB, Redis, MyBatis, Elasticsearch, HBase, Dubbo, etc."
+          echo "Modules include: core Spring Boot, WebFlux, Data JPA, MyBatis, Elasticsearch, HBase, Redis, Dubbo, etc."
           mvn -q -B -DskipTests clean package
           echo "✅ Spring Boot learning examples build finished (skipTests)."
 
@@ -192,13 +192,32 @@ jobs:
           tar -czf "${EXTRACTED_TAR}" -C "${EXTRACT_DIR}" .
           echo "✅ Packaged extracted directory."
 
+      # ✅ .github/workflows 디렉토리에도 Maven 아티팩트 추가 복사/적재
+      - name: Copy Maven artifacts into .github/workflows directory
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.maven.outputs.version }}"
+          WF_DIR=".github/workflows/maven-${VERSION}"
+
+          echo "Copying Maven artifacts to ${WF_DIR}"
+
+          mkdir -p "${WF_DIR}"
+
+          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${WF_DIR}/"
+          cp "dump/apache-maven-${VERSION}-extracted.tar.gz" "${WF_DIR}/"
+
+          echo "✅ Copied Maven artifacts into ${WF_DIR}"
+
       # ✅ 디렉토리 목록 확인 (로그용)
-      - name: List dump & extracted directory contents
+      - name: List dump, extracted and .github/workflows contents
         run: |
           echo "=== dump ==="
           ls -lh dump || true
           echo "=== extracted ==="
           ls -lh extracted || true
+          echo "=== .github/workflows ==="
+          ls -lh .github/workflows || true
 
       # ✅ Maven 관련 아티팩트 워크플로우 아티팩트로 업로드
       - name: Upload Maven artifacts as workflow artifacts
