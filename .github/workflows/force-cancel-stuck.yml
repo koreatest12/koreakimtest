@@ -5,12 +5,12 @@ on:
     inputs:
       workflow:
         description: "Workflow file name or ID (empty or 'all' = scan all workflows in repo)"
-        required: true
+        required: false
         default: "all"
         type: string
       max_run_minutes:
         description: "Maximum allowed run time in minutes before cancellation (empty = 60)"
-        required: true
+        required: false
         default: "60"
         type: string
       status_filter:
@@ -18,13 +18,13 @@ on:
         default: "queued,in_progress"
         type: string
       run_id:
-        description: "Optional specific run ID to cancel (if set, only this run is processed)"
-        required: true
+        description: "Optional specific run ID to cancel (if valid positive integer, this run is cancelled first)"
+        required: false
         type: string
       dry_run:
         description: "If true, only report runs that would be cancelled"
         type: boolean
-        required: true
+        required: false
         default: true
 
 permissions:
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # workflow_dispatch 입력 → 전부 env로 고정 연결
+    # workflow_dispatch 입력 → env로 고정 연결
     env:
       WORKFLOW_INPUT: ${{ github.event.inputs.workflow }}
       MAX_RUN_MINUTES_INPUT: ${{ github.event.inputs.max_run_minutes }}
@@ -45,7 +45,7 @@ jobs:
       DRY_RUN_INPUT: ${{ github.event.inputs.dry_run }}
 
     steps:
-      - name: Validate inputs & decide mode
+      - name: Validate inputs & prepare flags
         id: validate
         uses: actions/github-script@v7
         with:
@@ -62,9 +62,9 @@ jobs:
             }
             core.setOutput('max_run_minutes', String(maxRunMinutes));
 
-            // ----- run_id / workflow 처리 -----
-            const runIdRaw = (process.env.RUN_ID_INPUT || '').trim();
+            // ----- workflow / run_id 처리 -----
             const workflowRaw = (process.env.WORKFLOW_INPUT || '').trim();
+            const runIdRaw = (process.env.RUN_ID_INPUT || '').trim();
 
             // ----- dry_run 문자열 파싱 (YAML boolean 에러 방지) -----
             const dryRunRaw = (process.env.DRY_RUN_INPUT ?? 'true').toString().trim();
@@ -77,35 +77,69 @@ jobs:
               dryRunNorm === 'on';
             core.setOutput('dry_run', dryRun ? 'true' : 'false');
 
-            // ----- 모드 결정 -----
-            // 1) run_id가 있으면: 단일 Run 강제 취소 모드
+            // ----- 단일 run 취소 플래그 처리 -----
+            let hasSingle = false;
             if (runIdRaw !== '') {
-              const numericRunId = Number(runIdRaw);
-              if (!Number.isInteger(numericRunId) || numericRunId <= 0) {
-                core.setFailed(`run_id must be a positive integer, received: ${runIdRaw}`);
-                return;
+              if (/^[0-9]+$/.test(runIdRaw)) {
+                const numericRunId = Number(runIdRaw);
+                if (Number.isInteger(numericRunId) && numericRunId > 0) {
+                  hasSingle = true;
+                  core.setOutput('target_run_id', String(numericRunId));
+                  core.info(`Single-run cancel enabled (run_id=${numericRunId})`);
+                } else {
+                  core.info(`run_id "${runIdRaw}" is not a positive integer. Ignoring for single-run cancel.`);
+                }
+              } else {
+                core.info(`run_id "${runIdRaw}" is not numeric (e.g., "all"). Ignoring for single-run cancel.`);
               }
-              core.info(`Mode: single run cancel (run_id=${numericRunId})`);
-              core.setOutput('mode', 'single');
-              core.setOutput('target_run_id', String(numericRunId));
-              return;
             }
+            core.setOutput('has_single', hasSingle ? 'true' : 'false');
 
-            // 2) 그 외: 스캔 모드
+            // ----- 스캔 스코프 결정 -----
             let scanScope = 'repo'; // 기본: 레포 전체
             if (workflowRaw && workflowRaw.toLowerCase() !== 'all') {
               scanScope = 'workflow';
               core.setOutput('workflow_id', workflowRaw);
-              core.info(`Mode: scan only workflow "${workflowRaw}"`);
+              core.info(`Scan scope: only workflow "${workflowRaw}"`);
             } else {
-              core.info('Mode: scan ALL workflows in repository');
+              core.info('Scan scope: ALL workflows in repository');
             }
-
-            core.setOutput('mode', 'scan');
             core.setOutput('scan_scope', scanScope);
 
-      - name: Scan & force cancel stuck workflows
-        if: steps.validate.outputs.mode == 'scan'
+      - name: Force cancel specific run (if valid run_id)
+        if: steps.validate.outputs.has_single == 'true'
+        uses: actions/github-script@v7
+        env:
+          DRY_RUN_FLAG: ${{ steps.validate.outputs.dry_run }}
+          TARGET_RUN_ID: ${{ steps.validate.outputs.target_run_id }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const dryRun = (process.env.DRY_RUN_FLAG || 'true').toLowerCase() === 'true';
+            const runId = process.env.TARGET_RUN_ID;
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const url = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
+
+            core.info(`=== Single-run cancel section ===`);
+            core.info(`Target run_id: ${runId}`);
+            core.info(`Dry run: ${dryRun}`);
+
+            if (dryRun) {
+              core.info(`[Dry Run] Would cancel ${url}`);
+              return;
+            }
+
+            await github.rest.actions.cancelWorkflowRun({
+              owner,
+              repo,
+              run_id: Number(runId),
+            });
+
+            core.info(`Cancelled ${url}`);
+
+      - name: Scan & force cancel stuck workflows (repo/workflow)
         uses: actions/github-script@v7
         env:
           EFFECTIVE_MAX_RUN_MINUTES: ${{ steps.validate.outputs.max_run_minutes }}
@@ -138,6 +172,7 @@ jobs:
             const repo = context.repo.repo;
             const fetchedRuns = [];
 
+            core.info(`=== Scan & cancel section ===`);
             core.info(`Scan scope: ${scanScope === 'workflow' ? `workflow "${workflowId}"` : `ALL workflows in ${owner}/${repo}`}`);
             core.info(`Max run minutes: ${maxRunMinutes}`);
             core.info(`Dry run: ${dryRun}`);
@@ -214,32 +249,3 @@ jobs:
 
               core.info(`Cancelled ${url}`);
             }
-
-      - name: Force cancel specific run
-        if: steps.validate.outputs.mode == 'single'
-        uses: actions/github-script@v7
-        env:
-          DRY_RUN_FLAG: ${{ steps.validate.outputs.dry_run }}
-          TARGET_RUN_ID: ${{ steps.validate.outputs.target_run_id }}
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const dryRun = (process.env.DRY_RUN_FLAG || 'true').toLowerCase() === 'true';
-            const runId = process.env.TARGET_RUN_ID;
-
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const url = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
-
-            if (dryRun) {
-              core.info(`[Dry Run] Would cancel ${url}`);
-              return;
-            }
-
-            await github.rest.actions.cancelWorkflowRun({
-              owner,
-              repo,
-              run_id: Number(runId),
-            });
-
-            core.info(`Cancelled ${url}`);
