@@ -1,0 +1,158 @@
+name: "Force Cancel Stuck Workflow Runs"
+
+on:
+  workflow_dispatch:
+    inputs:
+      workflow:
+        description: "Workflow file name or ID to inspect"
+        required: true
+        type: string
+      max_run_minutes:
+        description: "Maximum allowed run time in minutes before cancellation"
+        default: "60"
+        type: string
+      status_filter:
+        description: "Comma-separated list of statuses to target (queued,in_progress)"
+        default: "queued,in_progress"
+        type: string
+      run_id:
+        description: "Optional specific run ID to cancel"
+        required: false
+        type: string
+      dry_run:
+        description: "If true, only report runs that would be cancelled"
+        default: "true"
+        type: boolean
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  force-cancel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Validate inputs
+        uses: actions/github-script@v7
+        id: validate
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const maxRunMinutes = Number(core.getInput('max_run_minutes'));
+            if (!Number.isFinite(maxRunMinutes) || maxRunMinutes <= 0) {
+              core.setFailed(`max_run_minutes must be a positive number, received: ${core.getInput('max_run_minutes')}`);
+              return;
+            }
+            const runId = core.getInput('run_id');
+            const workflow = core.getInput('workflow');
+            if (!workflow) {
+              core.setFailed('workflow input is required');
+              return;
+            }
+            core.setOutput('max_run_minutes', maxRunMinutes);
+            if (runId) {
+              const numericRunId = Number(runId.trim());
+              if (!Number.isInteger(numericRunId) || numericRunId <= 0) {
+                core.setFailed(`run_id must be a positive integer, received: ${runId}`);
+                return;
+              }
+              core.setOutput('target_mode', 'single');
+              core.setOutput('target_run_id', String(numericRunId));
+            } else {
+              core.setOutput('target_mode', 'scan');
+            }
+
+      - name: Force cancel stuck workflows
+        if: steps.validate.outputs.target_mode == 'scan'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const workflow = core.getInput('workflow');
+            const dryRun = core.getBooleanInput('dry_run');
+            const maxRunMinutes = Number(core.getInput('max_run_minutes'));
+            const statusFilter = core.getInput('status_filter')
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+
+            if (statusFilter.length === 0) {
+              core.setFailed('status_filter must include at least one status');
+              return;
+            }
+
+            const thresholdMillis = maxRunMinutes * 60 * 1000;
+            const now = Date.now();
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const fetchedRuns = [];
+            for (const status of statusFilter) {
+              core.info(`Fetching runs for workflow "${workflow}" with status "${status}"...`);
+              const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+                owner,
+                repo,
+                workflow_id: workflow,
+                per_page: 100,
+                status,
+              });
+              fetchedRuns.push(...runs);
+            }
+
+            if (fetchedRuns.length === 0) {
+              core.info('No workflow runs matched the given filters.');
+              return;
+            }
+
+            const targets = fetchedRuns.filter((run) => {
+              const createdAt = new Date(run.created_at).getTime();
+              const age = now - createdAt;
+              return age >= thresholdMillis;
+            });
+
+            if (targets.length === 0) {
+              core.info('No workflow runs exceeded the maximum runtime threshold.');
+              return;
+            }
+
+            core.info(`Identified ${targets.length} workflow run(s) exceeding ${maxRunMinutes} minutes.`);
+            for (const run of targets) {
+              const ageMinutes = ((now - new Date(run.created_at).getTime()) / 60000).toFixed(1);
+              core.info(`Run ${run.id} (${run.name}) has been running for ~${ageMinutes} minutes [status=${run.status}].`);
+
+              if (dryRun) {
+                core.info(`[Dry Run] Would cancel https://github.com/${owner}/${repo}/actions/runs/${run.id}`);
+                continue;
+              }
+
+              await github.rest.actions.cancelWorkflowRun({
+                owner,
+                repo,
+                run_id: run.id,
+              });
+              core.info(`Cancelled https://github.com/${owner}/${repo}/actions/runs/${run.id}`);
+            }
+
+      - name: Force cancel specific run
+        if: steps.validate.outputs.target_mode == 'single'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const dryRun = core.getBooleanInput('dry_run');
+            const runId = core.getInput('run_id').trim();
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            if (dryRun) {
+              core.info(`[Dry Run] Would cancel https://github.com/${owner}/${repo}/actions/runs/${runId}`);
+              return;
+            }
+
+            await github.rest.actions.cancelWorkflowRun({
+              owner,
+              repo,
+              run_id: Number(runId),
+            });
+            core.info(`Cancelled https://github.com/${owner}/${repo}/actions/runs/${runId}`);
