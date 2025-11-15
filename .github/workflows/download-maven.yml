@@ -1,0 +1,35 @@
+name: Download Apache Maven
+
+on:
+  workflow_dispatch:
+    inputs:
+      maven-version:
+        description: "Apache Maven version to download"
+        required: true
+        default: "3.9.6"
+
+jobs:
+  fetch-maven:
+    runs-on: ubuntu-latest
+    env:
+      MAVEN_BASE_URL: https://dlcdn.apache.org/maven/maven-3
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine Maven download URL
+        id: maven
+        run: |
+          VERSION="${{ github.event.inputs.maven-version }}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "url=$MAVEN_BASE_URL/${VERSION}/binaries/apache-maven-${VERSION}-bin.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Create dump directory
+        run: mkdir -p dump
+
+      - name: Download Apache Maven archive
+        run: |
+          curl -fL "${{ steps.maven.outputs.url }}" -o "dump/apache-maven-${{ steps.maven.outputs.version }}-bin.tar.gz"
+
+      - name: List dump directory contents
+        run: ls -lh dump
