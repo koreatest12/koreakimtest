@@ -18,7 +18,7 @@ on:
         default: "queued,in_progress"
         type: string
       run_id:
-        description: "Optional specific run ID to cancel (overrides workflow/all scan)"
+        description: "Optional specific run ID to cancel (if set, only this run is processed)"
         required: false
         type: string
       dry_run:
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # ✔ workflow_dispatch 입력을 전부 job-level env로 고정 매핑
+    # workflow_dispatch 입력 → 전부 env로 고정 연결
     env:
       WORKFLOW_INPUT: ${{ github.event.inputs.workflow }}
       MAX_RUN_MINUTES_INPUT: ${{ github.event.inputs.max_run_minutes }}
@@ -51,7 +51,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            // ---- 공통 입력 처리 ----
+            // ----- max_run_minutes 처리 -----
             const rawMax = (process.env.MAX_RUN_MINUTES_INPUT || '').trim();
             const effectiveMax = rawMax === '' ? '60' : rawMax;
             const maxRunMinutes = Number(effectiveMax);
@@ -62,10 +62,11 @@ jobs:
             }
             core.setOutput('max_run_minutes', String(maxRunMinutes));
 
+            // ----- run_id / workflow 처리 -----
             const runIdRaw = (process.env.RUN_ID_INPUT || '').trim();
             const workflowRaw = (process.env.WORKFLOW_INPUT || '').trim();
 
-            // dry_run은 문자열로 직접 파싱 (core.getBooleanInput 쓰지 않음)
+            // ----- dry_run 문자열 파싱 (YAML boolean 에러 방지) -----
             const dryRunRaw = (process.env.DRY_RUN_INPUT ?? 'true').toString().trim();
             const dryRunNorm = dryRunRaw.toLowerCase();
             const dryRun =
@@ -76,9 +77,9 @@ jobs:
               dryRunNorm === 'on';
             core.setOutput('dry_run', dryRun ? 'true' : 'false');
 
-            // ---- 모드 결정 ----
+            // ----- 모드 결정 -----
+            // 1) run_id가 있으면: 단일 Run 강제 취소 모드
             if (runIdRaw !== '') {
-              // 단일 Run 강제 취소 모드
               const numericRunId = Number(runIdRaw);
               if (!Number.isInteger(numericRunId) || numericRunId <= 0) {
                 core.setFailed(`run_id must be a positive integer, received: ${runIdRaw}`);
@@ -90,8 +91,8 @@ jobs:
               return;
             }
 
-            // scan 모드: workflow 값이 있고 'all' 이 아니면 특정 워크플로우만 스캔
-            let scanScope = 'repo';
+            // 2) 그 외: 스캔 모드
+            let scanScope = 'repo'; // 기본: 레포 전체
             if (workflowRaw && workflowRaw.toLowerCase() !== 'all') {
               scanScope = 'workflow';
               core.setOutput('workflow_id', workflowRaw);
@@ -137,7 +138,7 @@ jobs:
             const repo = context.repo.repo;
             const fetchedRuns = [];
 
-            core.info(`Scan scope: ${scanScope}`);
+            core.info(`Scan scope: ${scanScope === 'workflow' ? `workflow "${workflowId}"` : `ALL workflows in ${owner}/${repo}`}`);
             core.info(`Max run minutes: ${maxRunMinutes}`);
             core.info(`Dry run: ${dryRun}`);
             core.info(`Status filter: ${statusFilter.join(', ')}`);
