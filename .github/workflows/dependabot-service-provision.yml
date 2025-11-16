@@ -76,6 +76,29 @@ jobs:
           ls -al
           echo "============================================"
 
+      - name: 🧱 Build custom Scala runtime base image
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Build Scala runtime base image"
+          echo "============================================"
+
+          if [ ! -d docker/scala-runtime ]; then
+            echo "::error::docker/scala-runtime not found"
+            log "ERROR: docker/scala-runtime not found"
+            exit 1
+          fi
+
+          docker build --tag dependabot/scala-runtime:latest docker/scala-runtime
+          log "✓ Built image dependabot/scala-runtime:latest"
+          echo "============================================"
+
       - name: 🏗 Prepare service directories and assets (ALL services)
         run: |
           set -euo pipefail
@@ -102,7 +125,7 @@ jobs:
           images[ruby]='ruby:3.3'
           images[php]='php:8.3-cli'
           images[dotnet]='mcr.microsoft.com/dotnet/sdk:8.0'
-          images[scala]='hseeberger/scala-sbt:latest'
+          images[scala]='dependabot/scala-runtime:latest'
           images[rust]='rust:1.81'
           images[perl]='perl:5'
           images[elixir]='elixir:1.16'
