@@ -44,7 +44,6 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Workflow started"
           log "  - Event       : ${{ github.event_name }}"
@@ -67,7 +66,6 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Step: Verify checkout"
           echo "--------------------------------------------"
@@ -84,10 +82,16 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Step: Build Scala runtime base image"
           echo "============================================"
+
+          # DRY-RUN 모드에서는 베이스 이미지 빌드도 스킵
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            log "${ECHO_PREFIX} DRY-RUN 모드: Scala runtime base image 빌드를 스킵합니다."
+            echo "============================================"
+            exit 0
+          fi
 
           if [ ! -d docker/scala-runtime ]; then
             echo "::error::docker/scala-runtime not found"
@@ -107,7 +111,6 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Step: Prepare service directories and assets"
           echo "============================================"
@@ -181,14 +184,15 @@ jobs:
 
           mkdir -p infrastructure
           > infrastructure/.services
+
           for service in "${!images[@]}"; do
             echo "${service}" >> infrastructure/.services
           done
+
           log "Service list written to infrastructure/.services"
 
           while read -r service; do
             [ -z "${service}" ] && continue
-
             echo "--------------------------------------------"
             log "${ECHO_PREFIX} Generating assets for ${service}"
             echo "--------------------------------------------"
@@ -287,7 +291,6 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Step: Build container images"
           echo "============================================"
@@ -331,7 +334,6 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Step: Smoke test containers"
           echo "============================================"
@@ -377,7 +379,6 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Step: Summarize generated structure"
           echo "============================================"
@@ -412,7 +413,6 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Step: Prepare to upload service artifacts"
           echo "============================================"
@@ -447,7 +447,6 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Step: Cleanup provisioned networks"
           echo "============================================"
@@ -481,7 +480,6 @@ jobs:
             echo "$@"
             echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-
           echo "============================================"
           log "${ECHO_PREFIX} Workflow finished"
           log "  - Conclusion : ${{ job.status }}"
