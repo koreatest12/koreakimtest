@@ -176,7 +176,7 @@ jobs:
           # ---- 7) Security / Scanning / 품질 ----
           images[trivy]='aquasec/trivy:latest'
           images[grype]='anchore/grype:latest'
-          images[clair]='quay.io/coreos/clair:latest'
+          images[clair]='quay.io/projectquay/clair:4.8.0'
           images[sonarqube]='sonarqube:latest'
           images[zap]='owasp/zap2docker-stable'
 
