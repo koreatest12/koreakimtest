@@ -124,7 +124,7 @@ jobs:
           images[redis]='redis:7-alpine'
           images[mongodb]='mongo:7'
           images[rabbitmq]='rabbitmq:3-management'
-          images[kafka]='bitnami/kafka:latest'
+          images[kafka]='eclipse-temurin:17-jdk'  # Kafka 서비스용 플레이스홀더(Java 기반)
           images[activemq]='rmohr/activemq:latest'
 
           # ---- 4) Web / Proxy / App 서버 ----
