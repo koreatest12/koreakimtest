@@ -6,19 +6,12 @@ LABEL org.opencontainers.image.description="Custom Scala/SBT runtime built from 
 LABEL maintainer="Dependabot Provisioning Workflow"
 
 ENV SCALA_VERSION=2.13.14 \
-
     SBT_VERSION=1.10.2
 
 ENV SCALA_HOME=/opt/scala \
     SBT_HOME=/opt/sbt
 
 ENV PATH="${SCALA_HOME}/bin:${SBT_HOME}/bin:${PATH}"
-
-    SBT_VERSION=1.10.2 \
-    SCALA_HOME=/opt/scala \
-    SBT_HOME=/opt/sbt \
-    PATH="${SCALA_HOME}/bin:${SBT_HOME}/bin:${PATH}"
-
 
 # Install curl and download Scala/SBT archives directly from the upstream distribution
 RUN apt-get update && apt-get install -y --no-install-recommends \
