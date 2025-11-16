@@ -156,7 +156,6 @@ jobs:
 
           log "Configured image map (ALL services): ${!images[@]}"
 
-          # 서비스 목록을 한 군데 관리하기 위해 파일로 저장
           mkdir -p infrastructure
           > infrastructure/.services
           for service in "${!images[@]}"; do
@@ -164,7 +163,6 @@ jobs:
           done
           log "Service list written to infrastructure/.services"
 
-          # 각 서비스별 디렉터리/파일 생성
           while read -r service; do
             [ -z "${service}" ] && continue
 
@@ -186,11 +184,11 @@ jobs:
               echo "LABEL org.opencontainers.image.title=\"${title} service\""
               echo "LABEL org.opencontainers.image.description=\"Container for ${title} workloads managed by Dependabot workflows\""
               echo ""
-              echo "RUN mkdir -p /opt/service && \\"
-              echo "    echo \"Provisioning ${title} runtime\" > /opt/service/INSTALLATION.log"
+              echo "RUN mkdir -p /tmp/service && \\"
+              echo "    echo \"Provisioning ${title} runtime\" > /tmp/service/INSTALLATION.log"
               echo ""
-              echo "COPY config /opt/service/config"
-              echo "WORKDIR /opt/service"
+              echo "COPY config /tmp/service/config"
+              echo "WORKDIR /tmp/service"
               echo ""
               echo "CMD [\"/bin/sh\", \"-c\", \"echo '${title} container ready'; sleep 5\"]"
             } > "${service_dir}/Dockerfile"
@@ -201,7 +199,7 @@ jobs:
               echo "#!/usr/bin/env bash"
               echo "set -euo pipefail"
               echo "# Simulated server installation script for ${title} service"
-              echo "log_dir=\"/opt/service\""
+              echo "log_dir=\"/tmp/service\""
               echo "mkdir -p \"\${log_dir}\""
               echo "echo \"[${title}] Starting server installation\" > \"\${log_dir}/server-install.log\""
               echo "echo \"[${title}] Installing core packages\" >> \"\${log_dir}/server-install.log\""
@@ -438,7 +436,6 @@ jobs:
           if [ -f infrastructure/.services ]; then
             mapfile -t services < infrastructure/.services
           else
-            # fallback: 최소 기본 서비스만 정리
             services=(python java linux ubuntu docker teradata nodejs)
           fi
 
