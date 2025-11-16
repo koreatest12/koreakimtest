@@ -1,0 +1,40 @@
+name: Scala Runtime Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      scala_version:
+        description: "Scala version to download"
+        required: false
+        default: "2.13.14"
+      sbt_version:
+        description: "SBT version to download"
+        required: false
+        default: "1.10.2"
+  schedule:
+    - cron: '0 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Scala/SBT archives with curl
+        env:
+          SCALA_VERSION: ${{ github.event.inputs.scala_version || '2.13.14' }}
+          SBT_VERSION: ${{ github.event.inputs.sbt_version || '1.10.2' }}
+        run: |
+          set -euo pipefail
+          ./scripts/download-scala-runtime-assets.sh
+
+      - name: Upload runtime archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: scala-runtime-${{ github.event.inputs.scala_version || '2.13.14' }}-${{ github.event.inputs.sbt_version || '1.10.2' }}
+          path: artifacts/scala-runtime
+          if-no-files-found: error
