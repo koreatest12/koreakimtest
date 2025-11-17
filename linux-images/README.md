@@ -9,7 +9,9 @@
 - `artifacts/iso`, `artifacts/disks` : CI 실행 결과물(ISO, QCOW2, manifest 등)을 저장합니다.
 - `logs/` : 다운로드/검증 기록을 남기는 위치입니다.
 - `config/directories.txt` : 대량 디렉터리 생성을 위한 입력 목록입니다.
+
 - `workspaces/` : OS별로 `directories.txt`를 펼쳐 만든 대량 디렉터리 트리가 생성되는 위치입니다.
+
 
 실제 빌드 명령은 `scripts/linux_image_workflow.sh`와 GitHub Actions 워크플로우
 `.github/workflows/linux-image-factory.yml`에서 호출됩니다.

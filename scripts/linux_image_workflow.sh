@@ -6,6 +6,7 @@ WORK_DIR="$REPO_ROOT/linux-images"
 ARTIFACT_ROOT="$WORK_DIR/artifacts"
 LOG_DIR="$WORK_DIR/logs"
 CONFIG_DIR="$WORK_DIR/config"
+
 DIRECTORY_BLUEPRINT_FILE="$CONFIG_DIR/directories.txt"
 WORKSPACE_ROOT="$WORK_DIR/workspaces"
 
@@ -20,6 +21,16 @@ if [[ ! -f "$DIRECTORY_BLUEPRINT_FILE" ]]; then
 apps/prod/api
 apps/prod/web
 monitoring/prod/prometheus
+=======
+DIRECTORIES_FILE="$CONFIG_DIR/directories.txt"
+
+mkdir -p "$ARTIFACT_ROOT/iso" "$ARTIFACT_ROOT/disks" "$LOG_DIR"
+
+if [[ ! -f "$DIRECTORIES_FILE" ]]; then
+  echo "[linux-image-workflow] config/directories.txt 파일이 없어 기본 파일을 생성합니다." >&2
+  cat <<'DIRS' > "$DIRECTORIES_FILE"
+apps/prod/api
+
 DIRS
 fi
 
@@ -29,7 +40,9 @@ RUN_ID="${GITHUB_RUN_ID:-local}"
 
 SANITIZED_TS="${TIMESTAMP//[:TZ-]/}"
 DOWNLOAD_LOG="$LOG_DIR/download-${SANITIZED_TS}.md"
+
 BULK_DIR_LOG="$LOG_DIR/directories-${SANITIZED_TS}.md"
+
 cat > "$DOWNLOAD_LOG" <<EOF_INNER
 # Download and Verification Report
 - generated_at: $TIMESTAMP
@@ -39,6 +52,7 @@ cat > "$DOWNLOAD_LOG" <<EOF_INNER
 - rhel_iso: pending automation
 - kali_iso: pending automation
 EOF_INNER
+
 
 mapfile -t DIRECTORY_BLUEPRINTS < <(grep -v '^[[:space:]]*#' "$DIRECTORY_BLUEPRINT_FILE" | sed '/^\s*$/d')
 if [[ ${#DIRECTORY_BLUEPRINTS[@]} -eq 0 ]]; then
@@ -56,6 +70,7 @@ cat > "$BULK_DIR_LOG" <<EOF_DIR_LOG
 EOF_DIR_LOG
 
 declare -A DIRECTORY_COUNTS=()
+
 
 for os in ubuntu rhel kali; do
   ISO_PATH="$ARTIFACT_ROOT/iso/${os}-server.iso"
@@ -81,6 +96,7 @@ for os in ubuntu rhel kali; do
     echo
   } >> "$BULK_DIR_LOG"
   DIRECTORY_COUNTS[$os]=$COUNT
+
 done > "$ARTIFACT_ROOT/checksums.txt"
 
 MANIFEST="$ARTIFACT_ROOT/manifest.json"
@@ -105,6 +121,7 @@ cat > "$MANIFEST" <<EOF_MANIFEST
       "iso": "artifacts/iso/kali-server.iso.gz",
       "disk": "artifacts/disks/kali-server.qcow2.gz"
     }
+
   ],
   "bulk_directories": {
     "config_source": "config/directories.txt",
@@ -115,6 +132,9 @@ cat > "$MANIFEST" <<EOF_MANIFEST
       "kali": ${DIRECTORY_COUNTS[kali]:-0}
     }
   }
+=======
+  ]
+
 }
 EOF_MANIFEST
 
@@ -123,5 +143,8 @@ cat <<EOF_SUMMARY
 - manifest: $MANIFEST
 - checksums: $ARTIFACT_ROOT/checksums.txt
 - download log: $DOWNLOAD_LOG
+
 - directory log: $BULK_DIR_LOG
+=======
+
 EOF_SUMMARY
