@@ -7,5 +7,5 @@ PyMySQL==1.1.1
 duckdb==1.1.2
 duckdb-engine==0.13.2
 python-dotenv==1.0.1
-tenacity==8.5.0
+tenacity==9.1.2
 tqdm==4.66.5
