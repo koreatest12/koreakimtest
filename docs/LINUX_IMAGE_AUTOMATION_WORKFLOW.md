@@ -90,7 +90,11 @@ linux-images/
 3. 설치가 완료되면 `molecule` 또는 `testinfra` 테스트로 포트, 서비스 상태, 파일 권한을 검증하고 결과를 CI 아티팩트로 보관합니다.
 
 ## 8. CI/CD 상시 실행 템플릿
+
+- GitHub Actions 구현 (`.github/workflows/linux-image-factory.yml`):
+
 - GitHub Actions 예시 (`.github/workflows/linux-images.yml`):
+
   ```yaml
   name: Linux Image Factory
   on:
@@ -98,6 +102,25 @@ linux-images/
     schedule:
       - cron: '0 2 * * 1'
   jobs:
+
+    scaffold-images:
+      runs-on: ubuntu-latest
+      steps:
+        - uses: actions/checkout@v4
+        - name: Run Linux image workflow scaffold
+          run: bash scripts/linux_image_workflow.sh
+        - name: Upload artifacts
+          uses: actions/upload-artifact@v4
+          with:
+            name: linux-image-workflow-${{ github.run_id }}
+            path: |
+              linux-images/artifacts
+              linux-images/logs
+  ```
+- 실패 시 Slack/Webhook 알림을 발송하고, ISO/디스크 해시는 `attestations/` 디렉터리에 기록합니다.
+- 스크립트 구현은 `scripts/linux_image_workflow.sh`에 있으며, CI에서 동일한 스크립트를 호출해 구조를 검증하고 메타데이터
+  아티팩트를 생성합니다.
+
     build:
       runs-on: self-hosted
       steps:
@@ -113,6 +136,7 @@ linux-images/
           run: ci/scripts/upload.sh artifacts
   ```
 - 실패 시 Slack/Webhook 알림을 발송하고, ISO/디스크 해시는 `attestations/` 디렉터리에 기록합니다.
+
 
 ## 9. 운영 및 권한 관리
 1. CI Runner의 `vault` 혹은 `pass` 스토어에서 레드햇 서브스크립션, 내부 미러 자격 증명을 주입합니다.
