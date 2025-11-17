@@ -1,0 +1,7 @@
+# environment/service directory seeds
+apps/prod/api
+apps/stage/api
+apps/dev/api
+monitoring/prod/prometheus
+monitoring/stage/prometheus
+secops/prod/honeypots
