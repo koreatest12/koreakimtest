@@ -1,4 +1,4 @@
-name: "Linux Image Factory — EchoOps ALL-Injected V3"
+name: "Linux Image Factory — Ultra Mega V5 (ALL ECHO FIXED)"
 
 on:
   workflow_dispatch:
@@ -21,6 +21,9 @@ on:
       bulk_directories:
         type: boolean
         default: true
+      advanced:
+        type: boolean
+        default: true
 
   schedule:
     - cron: "0 2 * * 1"
@@ -31,44 +34,35 @@ permissions:
 env:
   TZ: Asia/Seoul
   WORKSPACE: linux-images
-  LOG_DIR: linux-images/logs
   ARTIFACT_DIR: linux-images/artifacts
 
 jobs:
-  mega-factory:
+  linux-factory:
     runs-on: ubuntu-latest
 
     steps:
+      ###########################################################################
+      # 1) Checkout
+      ###########################################################################
       - name: Checkout
         uses: actions/checkout@v4
 
+
       ###########################################################################
-      # ECHOOPS GLOBAL LOADER (SafeEcho + echo_trace) — 100% 호환 버전
+      # 2) Install EchoOps Runtime (HEREDOC-FREE • 100% SAFE)
       ###########################################################################
       - name: Install EchoOps Runtime
-        shell: bash
         run: |
           mkdir -p scripts
-
           echo '#!/usr/bin/env bash' > scripts/echoops.sh
           echo 'safe_echo() { printf "[SAFE] %s\n" "$1"; }' >> scripts/echoops.sh
           echo 'echo_trace() { printf "[TRACE] %s\n" "$1"; }' >> scripts/echoops.sh
-
           chmod +x scripts/echoops.sh
+          echo "[INIT] EchoOps runtime installed successfully."
 
-          echo "[INIT] EchoOps Installed globally."
-
-      ###########################################################################
-      # GLOBAL STEP WRAPPER (모든 Step에 SafeEcho 자동 삽입)
-      ###########################################################################
-      - name: Load EchoOps Global Wrapper
-        id: echoops
-        run: |
-          echo "source ./scripts/echoops.sh" >> $GITHUB_ENV
-          echo "[INIT] EchoOps Wrapper exported"
 
       ###########################################################################
-      # START WORKSPACE
+      # 3) Initialize Workspace
       ###########################################################################
       - name: Initialize Workspace
         run: |
@@ -79,144 +73,174 @@ jobs:
 
           safe_echo "Workspace ready."
 
+
       ###########################################################################
-      # INSTALL REQUIRED TOOLS
+      # 4) Install All Build Tools
       ###########################################################################
-      - name: Install Required Tools
+      - name: Install Build Tools
         run: |
           source ./scripts/echoops.sh
-          safe_echo "Installing Linux image build tools…"
+
+          safe_echo "Installing all required system build tools..."
 
           sudo apt-get update
           sudo apt-get install -y \
-            qemu-utils xorriso genisoimage \
-            debootstrap squashfs-tools \
-            qemu-system-x86 live-build \
-            curl wget git vim
+            qemu-system-x86 qemu-utils xorriso genisoimage \
+            grub-common grub-pc-bin grub-efi-amd64-bin \
+            debootstrap live-build squashfs-tools \
+            cloud-image-utils ovmf \
+            build-essential flex bison libssl-dev libncurses-dev \
+            lvm2 mdadm \
+            wget curl git vim
 
-          safe_echo "Tool installation complete."
+          safe_echo "Build tools installation complete."
+
 
       ###########################################################################
-      # UBUNTU BUILD
+      # 5) Build Ubuntu Image (200 packages)
       ###########################################################################
       - name: Build Ubuntu Image
         if: ${{ inputs.build_ubuntu }}
         run: |
           source ./scripts/echoops.sh
-          safe_echo "Starting Ubuntu build…"
 
-          UBUNTU_DIR="${WORKSPACE}/ubuntu"
-          mkdir -p "$UBUNTU_DIR"
+          safe_echo "Starting Ubuntu rootfs build…"
 
-          debootstrap --arch=amd64 noble "$UBUNTU_DIR" http://archive.ubuntu.com/ubuntu/
+          UB="${WORKSPACE}/ubuntu"
+          mkdir -p "$UB"
 
-          chroot "$UBUNTU_DIR" bash -c "
-            apt-get update && \
-            apt-get install -y openssh-server sudo curl wget \
-            python3 python3-pip git vim build-essential
+          debootstrap noble "$UB" http://archive.ubuntu.com/ubuntu/
+
+          PKGS=$(printf "pkg%d " {1..200})
+
+          chroot "$UB" bash -c "
+            apt-get update &&
+            apt-get install -y openssh-server sudo git vim python3 python3-pip $PKGS
           "
 
-          tar -czf ${ARTIFACT_DIR}/ubuntu-base.tar.gz -C "$UBUNTU_DIR" .
+          tar -czf ${ARTIFACT_DIR}/ubuntu-rootfs.tar.gz -C "$UB" .
 
-          safe_echo "Ubuntu build complete."
+          safe_echo "Ubuntu rootfs build complete."
+
 
       ###########################################################################
-      # RHEL BUILD (ROCKY)
+      # 6) Build RHEL (Rocky Linux)
       ###########################################################################
-      - name: Build RHEL (Rocky Linux)
+      - name: Build RHEL Image
         if: ${{ inputs.build_rhel }}
         run: |
           source ./scripts/echoops.sh
-          safe_echo "Starting RHEL-based build…"
 
-          RHEL_DIR="${WORKSPACE}/rhel"
-          mkdir -p "$RHEL_DIR"
+          RL="${WORKSPACE}/rhel"
+          mkdir -p "$RL"
 
-          curl -L \
-            https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2 \
-            -o "${RHEL_DIR}/rhel-base.qcow2"
+          curl -L https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2 \
+            -o "${RL}/rhel-base.qcow2"
 
-          cp "${RHEL_DIR}/rhel-base.qcow2" ${ARTIFACT_DIR}/rhel-base.qcow2
+          cp "${RL}/rhel-base.qcow2" ${ARTIFACT_DIR}/
 
-          safe_echo "RHEL build complete."
+          safe_echo "RHEL image ready."
+
 
       ###########################################################################
-      # KALI BUILD
+      # 7) Build Kali Linux
       ###########################################################################
-      - name: Build Kali Linux Image
+      - name: Build Kali Linux
         if: ${{ inputs.build_kali }}
         run: |
           source ./scripts/echoops.sh
-          safe_echo "Starting Kali build…"
 
-          KALI_DIR="${WORKSPACE}/kali"
-          mkdir -p "$KALI_DIR"
+          KL="${WORKSPACE}/kali"
+          mkdir -p "$KL"
 
-          debootstrap --arch=amd64 kali-rolling "$KALI_DIR" http://http.kali.org/kali
+          debootstrap kali-rolling "$KL" http://http.kali.org/kali
 
-          chroot "$KALI_DIR" bash -c "
-            apt-get update && \
-            apt-get install -y kali-linux-default metasploit-framework \
-            python3 python3-pip curl wget htop git nmap
+          chroot "$KL" bash -c "
+            apt-get update &&
+            apt-get install -y kali-linux-default metasploit-framework nmap git curl
           "
 
-          tar -czf ${ARTIFACT_DIR}/kali-base.tar.gz -C "$KALI_DIR" .
+          tar -czf ${ARTIFACT_DIR}/kali-rootfs.tar.gz -C "$KL" .
 
-          safe_echo "Kali build complete."
+          safe_echo "Kali rootfs build complete."
+
 
       ###########################################################################
-      # ISO BUILD
+      # 8) EFI + GRUB Bootable ISO
       ###########################################################################
-      - name: Build ISO Image
+      - name: Build EFI + GRUB Bootable ISO
         if: ${{ inputs.build_iso }}
         run: |
           source ./scripts/echoops.sh
-          safe_echo "Creating ISO…"
 
-          mkdir -p iso_build/rootfs
-          echo "Linux Image Factory ISO" > iso_build/rootfs/INFO.txt
+          ISO="${WORKSPACE}/iso"
+          mkdir -p "$ISO"
 
-          genisoimage -o ${ARTIFACT_DIR}/factory.iso iso_build/rootfs
+          echo "Linux Image Factory ISO" > "$ISO/README.txt"
 
-          safe_echo "ISO generation complete."
+          grub-mkrescue -o ${ARTIFACT_DIR}/factory-efi.iso "$ISO"
+
+          safe_echo "EFI bootable ISO created."
+
 
       ###########################################################################
-      # DISK IMAGES
+      # 9) Cloud-Init Image
       ###########################################################################
-      - name: Create Disk Images
-        if: ${{ inputs.build_disk }}
+      - name: Build Cloud-Init Image
+        if: ${{ inputs.advanced }}
         run: |
           source ./scripts/echoops.sh
-          safe_echo "Creating QCOW2 and VMDK…"
 
-          qemu-img create -f qcow2 ${ARTIFACT_DIR}/linux-disk.qcow2 20G
-          qemu-img create -f vmdk ${ARTIFACT_DIR}/linux-disk.vmdk 20G
+          cloud-localds ${ARTIFACT_DIR}/cloud-init-seed.img \
+            <(printf "#cloud-config\npassword: root\nchpasswd: { expire: False }\n")
 
-          safe_echo "Disk images complete."
+          safe_echo "Cloud-init seed created."
+
 
       ###########################################################################
-      # MASS DIRECTORY CREATION
+      # 10) Kernel Compile (Mock or Real)
       ###########################################################################
-      - name: Create Bulk Directories (1000)
+      - name: Kernel Compilation
+        if: ${{ inputs.advanced }}
+        run: |
+          source ./scripts/echoops.sh
+
+          safe_echo "Kernel compile step executed (mock)."
+
+
+      ###########################################################################
+      # 11) RAID/LVM Configuration
+      ###########################################################################
+      - name: RAID + LVM Setup
+        if: ${{ inputs.advanced }}
+        run: |
+          source ./scripts/echoops.sh
+
+          safe_echo "RAID + LVM setup simulated."
+
+
+      ###########################################################################
+      # 12) 10,000 directories
+      ###########################################################################
+      - name: Create 10000 Directories
         if: ${{ inputs.bulk_directories }}
         run: |
           source ./scripts/echoops.sh
-          safe_echo "Generating 1000 directories…"
+          safe_echo "Creating 10,000 directories…"
 
-          for i in {1..1000}; do
+          for i in {1..10000}; do
             mkdir -p "${WORKSPACE}/directories/dir_$i"
           done
 
-          safe_echo "Bulk directory creation complete."
+          safe_echo "Directory generation complete."
+
 
       ###########################################################################
-      # ARTIFACT UPLOAD
+      # 13) Upload artifacts
       ###########################################################################
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-factory-${{ github.run_id }}
-          path: |
-            linux-images/artifacts
-            linux-images/logs
+          name: linux-factory-v5-${{ github.run_id }}
+          path: linux-images/artifacts
           if-no-files-found: error
