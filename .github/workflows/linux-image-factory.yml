@@ -1,22 +1,189 @@
-name: Linux Image Factory
+name: "🐧 Linux Image Factory — Ultra Mega Edition"
 
 on:
   workflow_dispatch:
+    inputs:
+      build_ubuntu:
+        description: "Ubuntu 이미지 생성"
+        type: boolean
+        default: true
+      build_rhel:
+        description: "RHEL 이미지 생성"
+        type: boolean
+        default: true
+      build_kali:
+        description: "Kali 이미지 생성"
+        type: boolean
+        default: true
+      build_iso:
+        description: "ISO 생성 여부"
+        type: boolean
+        default: true
+      build_disk:
+        description: "디스크 생성(QCOW2, VMDK)"
+        type: boolean
+        default: true
+      bulk_directories:
+        description: "디렉토리 대량 생성 여부"
+        type: boolean
+        default: true
+
   schedule:
-    - cron: '0 2 * * 1'
+    - cron: "0 2 * * 1"  # 매주 월요일 02:00 UTC 자동 실행
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Seoul
+  ECHOOPS: true
+  SAFE_ECHO: true
+  WORKSPACE: linux-images
+  LOG_DIR: linux-images/logs
+  ARTIFACT_DIR: linux-images/artifacts
 
 jobs:
-  scaffold-images:
+  mega-linux-factory:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: 🔄 Checkout Repository
         uses: actions/checkout@v4
-      - name: Run Linux image workflow scaffold
-        run: bash scripts/linux_image_workflow.sh
-      - name: Upload artifacts
+
+      - name: 📁 Initialize Workspace
+        run: |
+          set -euo pipefail
+          mkdir -p ${WORKSPACE}/{artifacts,logs,tmp,iso,disks,ubuntu,rhel,kali,directories}
+          echo "[Init] Workspace initialized"
+
+      - name: 🧪 EchoOps + SafeEcho Framework Load
+        run: |
+          set -euo pipefail
+
+          safe_echo() {
+            if [[ "${SAFE_ECHO}" == "true" ]]; then
+              printf "[SAFE] %s\n" "$1"
+            else
+              printf "%s\n" "$1"
+            fi
+          }
+
+          echo_trace() {
+            if [[ "${ECHOOPS}" == "true" ]]; then
+              printf "[TRACE] %s\n" "$1"
+            fi
+          }
+
+          export -f safe_echo
+          export -f echo_trace
+
+          echo "EchoOps loaded"
+
+      - name: 📦 Install Required Image Tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-utils \
+            genisoimage \
+            xorriso \
+            squashfs-tools \
+            debootstrap \
+            whois \
+            make \
+            wget \
+            curl \
+            gdisk \
+            parted \
+            qemu-system-x86 \
+            live-build
+
+          safe_echo "필수 이미지 빌드 툴 설치 완료"
+
+      - name: 🏗 Ubuntu Base Image Build
+        if: ${{ inputs.build_ubuntu == true }}
+        run: |
+          safe_echo "*** UBUNTU IMAGE BUILD START ***"
+          UBUNTU_DIR="${WORKSPACE}/ubuntu"
+          mkdir -p "$UBUNTU_DIR"
+
+          debootstrap --arch=amd64 noble "$UBUNTU_DIR" http://archive.ubuntu.com/ubuntu/
+
+          chroot "$UBUNTU_DIR" bash -c "
+            apt-get update
+            apt-get install -y openssh-server sudo net-tools systemd systemd-sysv curl wget vim git build-essential python3 python3-pip fail2ban ufw
+            systemctl enable ssh
+          "
+
+          tar -czf ${ARTIFACT_DIR}/ubuntu-base.tar.gz -C "$UBUNTU_DIR" .
+
+          safe_echo "*** UBUNTU BUILD COMPLETE ***"
+
+      - name: 🏗 RHEL-like Image Build (Rocky)
+        if: ${{ inputs.build_rhel == true }}
+        run: |
+          safe_echo "*** RHEL IMAGE BUILD START ***"
+          RHEL_DIR="${WORKSPACE}/rhel"
+          mkdir -p "$RHEL_DIR"
+
+          curl -L https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2 \
+            -o "${RHEL_DIR}/rhel-base.qcow2"
+
+          cp "${RHEL_DIR}/rhel-base.qcow2" "${ARTIFACT_DIR}/rhel-base.qcow2"
+
+          safe_echo "*** RHEL BUILD COMPLETE ***"
+
+      - name: 🏗 Kali Linux Build
+        if: ${{ inputs.build_kali == true }}
+        run: |
+          safe_echo "*** KALI LINUX BUILD START ***"
+          KALI_DIR="${WORKSPACE}/kali"
+          mkdir -p "$KALI_DIR"
+
+          debootstrap --arch=amd64 kali-rolling "$KALI_DIR" http://http.kali.org/kali
+
+          chroot "$KALI_DIR" bash -c "
+            apt-get update
+            apt-get install -y kali-linux-default metasploit-framework nmap htop openssh-server git curl python3 python3-pip
+          "
+
+          tar -czf ${ARTIFACT_DIR}/kali-base.tar.gz -C "$KALI_DIR" .
+
+          safe_echo "*** KALI BUILD COMPLETE ***"
+
+      - name: 💿 Generate ISO Image
+        if: ${{ inputs.build_iso == true }}
+        run: |
+          safe_echo "*** ISO BUILD START ***"
+          mkdir -p iso_build/rootfs
+
+          echo "Linux Image Factory ISO" > iso_build/rootfs/INFO.txt
+
+          genisoimage -o ${ARTIFACT_DIR}/factory.iso iso_build/rootfs
+
+          safe_echo "*** ISO BUILD COMPLETE ***"
+
+      - name: 💽 Disk Image Build (QCOW2, VMDK)
+        if: ${{ inputs.build_disk == true }}
+        run: |
+          safe_echo "*** DISK CREATION START ***"
+          qemu-img create -f qcow2 ${ARTIFACT_DIR}/linux-disk.qcow2 20G
+          qemu-img create -f vmdk  ${ARTIFACT_DIR}/linux-disk.vmdk  20G
+          safe_echo "*** DISK CREATION COMPLETE ***"
+
+      - name: 📁 Bulk Directory Factory (1000+)
+        if: ${{ inputs.bulk_directories == true }}
+        run: |
+          safe_echo "*** DIRECTORY MASS CREATION START ***"
+          for i in {1..1000}; do
+            mkdir -p "${WORKSPACE}/directories/dir_$i"
+          done
+          safe_echo "*** DIRECTORY MASS CREATION COMPLETE ***"
+
+      - name: 📤 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-image-workflow-${{ github.run_id }}
+          name: linux-image-factory-${{ github.run_id }}
           path: |
             linux-images/artifacts
             linux-images/logs
