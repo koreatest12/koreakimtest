@@ -1,0 +1,23 @@
+name: Linux Image Factory
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 1'
+
+jobs:
+  scaffold-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run Linux image workflow scaffold
+        run: bash scripts/linux_image_workflow.sh
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-image-workflow-${{ github.run_id }}
+          path: |
+            linux-images/artifacts
+            linux-images/logs
+          if-no-files-found: error
