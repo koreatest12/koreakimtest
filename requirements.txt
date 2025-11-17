@@ -8,4 +8,4 @@ duckdb==1.1.2
 duckdb-engine==0.13.2
 python-dotenv==1.0.1
 tenacity==8.5.0
-tqdm==4.66.5
+tqdm==4.67.1
