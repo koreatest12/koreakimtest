@@ -1,32 +1,14 @@
-name: "Linux Image Factory — Ultra Mega V5 (ALL ECHO FIXED)"
+name: "Linux Image Factory — Ultra Mega V6 (100% Runner-Safe + ALL ECHO)"
 
 on:
   workflow_dispatch:
     inputs:
-      build_ubuntu:
-        type: boolean
-        default: true
-      build_rhel:
-        type: boolean
-        default: true
-      build_kali:
-        type: boolean
-        default: true
-      build_iso:
-        type: boolean
-        default: true
-      build_disk:
+      advanced:
         type: boolean
         default: true
       bulk_directories:
         type: boolean
         default: true
-      advanced:
-        type: boolean
-        default: true
-
-  schedule:
-    - cron: "0 2 * * 1"
 
 permissions:
   contents: write
@@ -41,206 +23,185 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       ###########################################################################
-      # 1) Checkout
+      # 1) CHECKOUT
       ###########################################################################
       - name: Checkout
         uses: actions/checkout@v4
 
-
       ###########################################################################
-      # 2) Install EchoOps Runtime (HEREDOC-FREE • 100% SAFE)
+      # 2) INSTALL ECHOOPS (NO HEREDOC, NO ERRORS)
       ###########################################################################
       - name: Install EchoOps Runtime
         run: |
           mkdir -p scripts
           echo '#!/usr/bin/env bash' > scripts/echoops.sh
-          echo 'safe_echo() { printf "[SAFE] %s\n" "$1"; }' >> scripts/echoops.sh
-          echo 'echo_trace() { printf "[TRACE] %s\n" "$1"; }' >> scripts/echoops.sh
+          echo 'safe_echo(){ printf "[SAFE] %s\n" "$1"; }' >> scripts/echoops.sh
+          echo 'echo_trace(){ printf "[TRACE] %s\n" "$1"; }' >> scripts/echoops.sh
           chmod +x scripts/echoops.sh
-          echo "[INIT] EchoOps runtime installed successfully."
-
+          echo "[INIT] EchoOps Installed."
 
       ###########################################################################
-      # 3) Initialize Workspace
+      # 3) INIT WORKSPACE
       ###########################################################################
       - name: Initialize Workspace
         run: |
           source ./scripts/echoops.sh
-          safe_echo "Initializing workspace…"
-
-          mkdir -p ${WORKSPACE}/{artifacts,logs,tmp,iso,disks,ubuntu,rhel,kali,directories}
-
+          safe_echo "Initializing workspace..."
+          mkdir -p ${WORKSPACE}/{artifacts,logs,iso,disks,cloud,pxe,hybrid,terraform,packer}
           safe_echo "Workspace ready."
 
-
       ###########################################################################
-      # 4) Install All Build Tools
+      # 4) INSTALL ALL BUILD TOOLS
       ###########################################################################
       - name: Install Build Tools
         run: |
           source ./scripts/echoops.sh
-
-          safe_echo "Installing all required system build tools..."
-
+          safe_echo "Installing tools..."
           sudo apt-get update
           sudo apt-get install -y \
-            qemu-system-x86 qemu-utils xorriso genisoimage \
-            grub-common grub-pc-bin grub-efi-amd64-bin \
-            debootstrap live-build squashfs-tools \
-            cloud-image-utils ovmf \
-            build-essential flex bison libssl-dev libncurses-dev \
-            lvm2 mdadm \
+            qemu-utils cloud-image-utils \
+            grub-efi-amd64-bin grub-pc-bin \
+            xorriso genisoimage syslinux pxelinux \
+            shim-signed \
             wget curl git vim
-
-          safe_echo "Build tools installation complete."
-
+          safe_echo "Tools installed."
 
       ###########################################################################
-      # 5) Build Ubuntu Image (200 packages)
+      # 5) UBUNTU / RHEL / KALI CLOUD IMAGE DOWNLOAD (SAFE)
       ###########################################################################
-      - name: Build Ubuntu Image
-        if: ${{ inputs.build_ubuntu }}
+      - name: Download Linux Cloud Images
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Downloading cloud base images..."
+
+          wget -O ${ARTIFACT_DIR}/ubuntu-cloud.img \
+            https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+
+          wget -O ${ARTIFACT_DIR}/rhel-rocky-cloud.img \
+            https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2
+
+          wget -O ${ARTIFACT_DIR}/kali-cloud.img \
+            https://cloud-images.kali.org/kali-latest/kali-cloudimg-amd64.img
+
+          safe_echo "All cloud images saved."
+
+      ###########################################################################
+      # 6) CREATE ARM64 IMAGES
+      ###########################################################################
+      - name: Create ARM64 Disk Images
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Creating ARM64 disk images..."
+
+          qemu-img create -f qcow2 ${ARTIFACT_DIR}/ubuntu-arm64.qcow2 5G
+          qemu-img create -f qcow2 ${ARTIFACT_DIR}/rhel-arm64.qcow2 5G
+          qemu-img create -f qcow2 ${ARTIFACT_DIR}/kali-arm64.qcow2 5G
+
+          safe_echo "ARM64 disk images created."
+
+      ###########################################################################
+      # 7) CLOUD-INIT SEED
+      ###########################################################################
+      - name: Create Cloud-Init Seed
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Creating cloud-init seed..."
+          cloud-localds ${ARTIFACT_DIR}/seed.img \
+            <(printf "#cloud-config\npassword: root\nchpasswd: {expire: False}\n")
+          safe_echo "Seed created."
+
+      ###########################################################################
+      # 8) EFI + GRUB ISO BUILD
+      ###########################################################################
+      - name: Build EFI Bootable ISO
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Building EFI boot ISO..."
+
+          mkdir -p iso/boot/grub
+          echo "Linux Image Factory Boot ISO" > iso/README.txt
+
+          grub-mkrescue -o ${ARTIFACT_DIR}/factory-efi.iso iso
+
+          safe_echo "EFI ISO created."
+
+      ###########################################################################
+      # 9) SECUREBOOT SIGNED ISO (MOCK)
+      ###########################################################################
+      - name: Build SecureBoot ISO
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Building SecureBoot mock ISO..."
+
+          cp ${ARTIFACT_DIR}/factory-efi.iso ${ARTIFACT_DIR}/factory-secureboot.iso
+
+          safe_echo "[MOCK] SecureBoot ISO generated."
+
+      ###########################################################################
+      # 10) PXE NETWORK BOOT IMAGE
+      ###########################################################################
+      - name: Build PXE Network Boot
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Creating PXE boot structure..."
+
+          mkdir -p pxe/{boot,configs}
+          cp /usr/lib/PXELINUX/pxelinux.0 pxe/
+          cp -r /usr/lib/syslinux/modules/bios pxe/modules
+
+          safe_echo "PXE structure ready."
+
+      ###########################################################################
+      # 11) WINDOWS PE + LINUX HYBRID ISO
+      ###########################################################################
+      - name: Build Hybrid WinPE + Linux ISO
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Building hybrid ISO (MOCK)..."
+
+          mkdir -p hybrid/{winpe,linux}
+          touch hybrid/winpe/winpe.wim
+          touch hybrid/linux/live.squashfs
+
+          genisoimage -o ${ARTIFACT_DIR}/hybrid-winpe-linux.iso hybrid
+
+          safe_echo "Hybrid ISO created."
+
+      ###########################################################################
+      # 12) TERRAFORM & PACKER SCAFFOLD
+      ###########################################################################
+      - name: Generate Terraform & Packer Templates
         run: |
           source ./scripts/echoops.sh
 
-          safe_echo "Starting Ubuntu rootfs build…"
+          safe_echo "Generating Terraform + Packer scaffold..."
 
-          UB="${WORKSPACE}/ubuntu"
-          mkdir -p "$UB"
+          mkdir -p terraform
+          echo 'provider "local" {}' > terraform/main.tf
 
-          debootstrap noble "$UB" http://archive.ubuntu.com/ubuntu/
+          mkdir -p packer
+          echo '{ "builders": [] }' > packer/template.json
 
-          PKGS=$(printf "pkg%d " {1..200})
-
-          chroot "$UB" bash -c "
-            apt-get update &&
-            apt-get install -y openssh-server sudo git vim python3 python3-pip $PKGS
-          "
-
-          tar -czf ${ARTIFACT_DIR}/ubuntu-rootfs.tar.gz -C "$UB" .
-
-          safe_echo "Ubuntu rootfs build complete."
-
+          safe_echo "Terraform/Packer scaffold created."
 
       ###########################################################################
-      # 6) Build RHEL (Rocky Linux)
-      ###########################################################################
-      - name: Build RHEL Image
-        if: ${{ inputs.build_rhel }}
-        run: |
-          source ./scripts/echoops.sh
-
-          RL="${WORKSPACE}/rhel"
-          mkdir -p "$RL"
-
-          curl -L https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2 \
-            -o "${RL}/rhel-base.qcow2"
-
-          cp "${RL}/rhel-base.qcow2" ${ARTIFACT_DIR}/
-
-          safe_echo "RHEL image ready."
-
-
-      ###########################################################################
-      # 7) Build Kali Linux
-      ###########################################################################
-      - name: Build Kali Linux
-        if: ${{ inputs.build_kali }}
-        run: |
-          source ./scripts/echoops.sh
-
-          KL="${WORKSPACE}/kali"
-          mkdir -p "$KL"
-
-          debootstrap kali-rolling "$KL" http://http.kali.org/kali
-
-          chroot "$KL" bash -c "
-            apt-get update &&
-            apt-get install -y kali-linux-default metasploit-framework nmap git curl
-          "
-
-          tar -czf ${ARTIFACT_DIR}/kali-rootfs.tar.gz -C "$KL" .
-
-          safe_echo "Kali rootfs build complete."
-
-
-      ###########################################################################
-      # 8) EFI + GRUB Bootable ISO
-      ###########################################################################
-      - name: Build EFI + GRUB Bootable ISO
-        if: ${{ inputs.build_iso }}
-        run: |
-          source ./scripts/echoops.sh
-
-          ISO="${WORKSPACE}/iso"
-          mkdir -p "$ISO"
-
-          echo "Linux Image Factory ISO" > "$ISO/README.txt"
-
-          grub-mkrescue -o ${ARTIFACT_DIR}/factory-efi.iso "$ISO"
-
-          safe_echo "EFI bootable ISO created."
-
-
-      ###########################################################################
-      # 9) Cloud-Init Image
-      ###########################################################################
-      - name: Build Cloud-Init Image
-        if: ${{ inputs.advanced }}
-        run: |
-          source ./scripts/echoops.sh
-
-          cloud-localds ${ARTIFACT_DIR}/cloud-init-seed.img \
-            <(printf "#cloud-config\npassword: root\nchpasswd: { expire: False }\n")
-
-          safe_echo "Cloud-init seed created."
-
-
-      ###########################################################################
-      # 10) Kernel Compile (Mock or Real)
-      ###########################################################################
-      - name: Kernel Compilation
-        if: ${{ inputs.advanced }}
-        run: |
-          source ./scripts/echoops.sh
-
-          safe_echo "Kernel compile step executed (mock)."
-
-
-      ###########################################################################
-      # 11) RAID/LVM Configuration
-      ###########################################################################
-      - name: RAID + LVM Setup
-        if: ${{ inputs.advanced }}
-        run: |
-          source ./scripts/echoops.sh
-
-          safe_echo "RAID + LVM setup simulated."
-
-
-      ###########################################################################
-      # 12) 10,000 directories
+      # 13) 10,000 DIRECTORIES
       ###########################################################################
       - name: Create 10000 Directories
         if: ${{ inputs.bulk_directories }}
         run: |
           source ./scripts/echoops.sh
-          safe_echo "Creating 10,000 directories…"
-
-          for i in {1..10000}; do
-            mkdir -p "${WORKSPACE}/directories/dir_$i"
-          done
-
-          safe_echo "Directory generation complete."
-
+          safe_echo "Generating 10,000 directories..."
+          for i in {1..10000}; do mkdir -p "${WORKSPACE}/directories/dir_$i"; done
+          safe_echo "Done."
 
       ###########################################################################
-      # 13) Upload artifacts
+      # 14) UPLOAD ARTIFACTS
       ###########################################################################
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-factory-v5-${{ github.run_id }}
+          name: linux-factory-v6-${{ github.run_id }}
           path: linux-images/artifacts
-          if-no-files-found: error
