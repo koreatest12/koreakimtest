@@ -222,6 +222,28 @@ updates:
       - "koreatest12"
     versioning-strategy: increase
 
+  - package-ecosystem: "pip"
+    directory: "/banking_pipeline"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "pip(banking-pipeline)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "python"
+      - "banking"
+      - "security"
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
+    versioning-strategy: increase
+
   # Maven (Java) Projects
   - package-ecosystem: "maven"
     directory: "/"
@@ -343,6 +365,27 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+      - "security"
+    reviewers:
+      - "koreatest12"
+    assignees:
+      - "koreatest12"
+
+  - package-ecosystem: "docker"
+    directory: "/docker/scala-runtime"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "docker(scala-runtime)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "scala"
       - "security"
     reviewers:
       - "koreatest12"
