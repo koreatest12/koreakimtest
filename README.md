@@ -1,64 +1,131 @@
-name: "📄 Generate & Commit README.md"
+# 🚀 Korea Test Repository
 
-on:
-  push:
-    branches: [ "main" ]
-  # 수동 실행을 허용하여 필요할 때마다 README를 재생성할 수 있습니다.
-  workflow_dispatch:
+## Project Overview
 
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    permissions:
-      # 파일 커밋 및 푸시를 위해 contents: write 권한이 필요합니다.
-      contents: write
-      
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        # 🚨 중요: 자동 커밋을 위해 full history를 가져옵니다.
-        with:
-          fetch-depth: 0 
+This repository is a comprehensive monorepo for Anthropic API cost tracking, Model Context Protocol (MCP) server development, and various infrastructure automation tools.
 
-      - name: Generate Dynamic README Content
-        id: readme_content
-        run: |
-          # 🚨 NOTE: 여기서 README.md 파일 내용을 정의합니다.
-          # 동적인 정보를 추가할 수 있습니다 (예: 현재 날짜, 리포지토리 이름).
-          README_CONTENT="""
-          # 🚀 ${{ github.repository }}
+## 🛡️ Security & Automation
 
-          ## 프로젝트 개요
-          이 프로젝트는 GitHub Actions 워크플로우에 의해 자동으로 관리되고 분석됩니다.
-          
-          ## 🛡️ 보안 분석 (CodeQL)
-          이 저장소는 **CodeQL Advanced SecureScan** 워크플로우를 통해 보안 취약점을 상시 스캔합니다.
-          
-          ## ⏰ 최종 업데이트
-          **날짜:** $(date '+%Y-%m-%d %H:%M:%S KST')
-          **커밋 SHA:** ${{ github.sha }}
-          
-          ---
-          
-          ## Dependabot 설정
-          종속성 업데이트는 Dependabot에 의해 관리됩니다.
-          """
-          # 워크플로우 출력을 사용하여 콘텐츠를 다음 단계에 전달
-          echo "content<<EOF" >> $GITHUB_OUTPUT
-          echo "$README_CONTENT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+### Dependency Security Check Workflow ⭐ NEW
 
-      - name: Overwrite README.md
-        shell: bash
-        # 이전 단계에서 생성한 콘텐츠로 README.md 파일 덮어쓰기
-        run: echo "${{ steps.readme_content.outputs.content }}" > README.md
+The repository now includes a comprehensive dependency security check workflow with advanced features:
 
-      - name: Commit and Push Changes
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          # 변경된 파일(README.md)만 커밋합니다.
-          commit_message: "docs(readme): Update dynamic content via GitHub Actions"
-          # 만약 변경 사항이 없으면 실패하지 않고 건너뜁니다.
-          skip_dirty_check: false
-          # 이 워크플로우 실행을 유발한 커밋을 무시하고 새로운 커밋을 생성합니다.
-          commit_options: '--no-verify --allow-empty'
+- **Automated Security Audits**: Node.js and Python dependency vulnerability scanning
+- **Infrastructure Provisioning**: Full stack setup for Node.js, Python, and Java services
+- **Branch Management**: Auto-create feature branches for security updates
+- **Service Deployment**: Docker-based service deployment with health checks
+- **Resource Management**: System resource monitoring and allocation planning
+
+**Quick Start**: See [docs/DEPENDENCY_CHECK_QUICK_START.md](docs/DEPENDENCY_CHECK_QUICK_START.md)
+
+**Full Documentation**: See [docs/DEPENDENCY_CHECK_WORKFLOW.md](docs/DEPENDENCY_CHECK_WORKFLOW.md)
+
+### Other Security Features
+
+- **CodeQL Analysis**: Advanced security scanning for code vulnerabilities
+- **Dependabot**: Automated dependency updates
+- **Security Policies**: See [SECURITY.md](SECURITY.md)
+
+## 📦 Key Projects
+
+### 1. Anthropic Cost Tracker
+Track and estimate Anthropic API costs with dual-language implementation (Node.js and Python).
+
+**Locations**:
+- Node.js: `anthropic-cost-tracker/nodejs/`
+- Python: `anthropic-cost-tracker/python/`
+
+### 2. MCP Servers
+Multiple Model Context Protocol servers for Claude integration:
+
+- **Python Utilities** (`mcp-python-server/`): Comprehensive utilities including file operations, system info, JSON tools
+- **JavaScript Hello** (`mcp-hello-js/`): Basic MCP server example
+- **Python Hello** (`mcp-hello-py/`): Example Python MCP server
+- **Apache Server** (`mcp-apache-server/`): Apache-related MCP tools
+- **Java Server** (`mcp-hello-java/`): Java MCP implementation
+- **Filesystem** (`mcp-fs/`): Filesystem access via MCP
+
+### 3. Infrastructure & DevOps
+
+- **Docker Images**: Custom container images in `linux-images/`, `docker/`
+- **Deployment Scripts**: Automated deployment in `deploy/`
+- **CI/CD Workflows**: 25+ GitHub Actions workflows for various automation tasks
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- Node.js 20+
+- Python 3.11+
+- Java 17+
+- Docker & Docker Compose
+- Git
+
+### Quick Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/koreatest12/koreakimtest.git
+cd koreakimtest
+
+# Install Node.js dependencies (for Node projects)
+cd anthropic-cost-tracker/nodejs
+npm install
+
+# Setup Python environment (for Python projects)
+cd ../python
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+## 📚 Documentation
+
+- [Dependency Security Check Workflow](docs/DEPENDENCY_CHECK_WORKFLOW.md)
+- [Quick Start Guide](docs/DEPENDENCY_CHECK_QUICK_START.md)
+- [Claude.md](CLAUDE.md) - Repository instructions for Claude Code
+- [Security Policy](SECURITY.md)
+- [Security Setup](SECURITY_SETUP.md)
+
+## 🔧 Available Workflows
+
+The repository includes 25+ GitHub Actions workflows for various tasks:
+
+| Workflow | Purpose |
+|----------|---------|
+| `dependency-check.yml` | **Comprehensive security & infrastructure management** |
+| `codeql.yml` | Security code analysis |
+| `docker-build-and-deploy.yml` | Docker image building and deployment |
+| `infra-provision.yml` | Infrastructure provisioning |
+| `main.yml` | Main CI/CD pipeline |
+| `security-audit.yml` | Security auditing |
+| And 20+ more... | Various automation tasks |
+
+## 🤝 Contributing
+
+1. Check security scan results before submitting PRs
+2. Follow existing code style and patterns
+3. Update documentation for new features
+4. Run local tests before pushing
+
+## 📊 Project Status
+
+- **Security Scanning**: ✅ Automated weekly scans
+- **Dependency Updates**: ✅ Dependabot enabled
+- **Infrastructure**: ✅ Automated provisioning available
+- **Documentation**: ✅ Comprehensive guides available
+
+## 📝 License
+
+See [LICENSE](LICENSE) file for details.
+
+## 📧 Support
+
+- **Issues**: Create issue with appropriate label
+- **Security**: Follow [SECURITY.md](SECURITY.md) for security issues
+- **Workflows**: See individual workflow documentation
+
+---
+
+**Last Updated**: 2025-11-18
+**Maintained by**: GitHub Actions & Contributors
