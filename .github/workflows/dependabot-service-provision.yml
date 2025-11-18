@@ -180,6 +180,17 @@ jobs:
           images[sonarqube]='sonarqube:latest'
           images[zap]='owasp/zap2docker-stable'
 
+          # ---- 8) Additional Ecosystem Services ----
+          images[banking_pipeline]='python:3.11-slim'
+          images[mcp_hello_js]='node:20-alpine'
+          images[mcp_fs]='node:20-alpine'
+          images[mcp_hello_py]='python:3.11-slim'
+          images[mcp_python_server]='python:3.11-slim'
+          images[mcp_apache_server]='python:3.11-slim'
+          images[mcp_hello_java]='eclipse-temurin:17-jdk'
+          images[cost_tracker_nodejs]='node:20-alpine'
+          images[cost_tracker_python]='python:3.11-slim'
+
           log "Configured image map (ALL services): ${!images[@]}"
 
           mkdir -p infrastructure

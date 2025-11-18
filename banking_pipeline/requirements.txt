@@ -1,0 +1,5 @@
+# Banking Pipeline Dependencies
+# Dependencies for banking data pipeline operations
+
+sqlalchemy>=2.0.0
+faker>=18.0.0
