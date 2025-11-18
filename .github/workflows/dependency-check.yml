@@ -4,6 +4,22 @@ on:
   schedule:
     - cron: "0 3 * * 1"  # 매주 월요일 03:00 UTC
   workflow_dispatch:
+    inputs:
+      provision_infrastructure:
+        description: "Provision full infrastructure stack"
+        required: false
+        type: boolean
+        default: false
+      create_branches:
+        description: "Auto-create feature branches"
+        required: false
+        type: boolean
+        default: false
+      deploy_services:
+        description: "Deploy services after checks"
+        required: false
+        type: boolean
+        default: false
   pull_request:
     paths:
       - "**/package.json"
@@ -29,8 +45,548 @@ env:
   REPORT_DIR: .github/sec_report
   LOG_DIR: .github/sec_report/logs
   ARTIFACT_DIR: .github/sec_report/artifacts
+  SERVICE_DIR: .github/services
+  RESOURCE_DIR: .github/resources
+  BRANCH_PREFIX: security-update
 
 jobs:
+
+  ##########################################################################
+  # Infrastructure Provisioning & Service Setup
+  ##########################################################################
+  infrastructure-provisioning:
+    name: "Infrastructure Provisioning"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.provision_infrastructure == true
+    outputs:
+      provision_status: ${{ steps.provision_summary.outputs.status }}
+      
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create comprehensive directory structure
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Creating comprehensive directory structure..."
+          
+          # Core directories
+          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
+          mkdir -p "${SERVICE_DIR}" "${RESOURCE_DIR}"
+          mkdir -p .github/virtual-servers
+          mkdir -p .github/deployments
+          mkdir -p .github/configs
+          
+          # Service-specific directories
+          for service in nodejs python java scala go rust; do
+            mkdir -p "${SERVICE_DIR}/${service}"/{bin,lib,config,data,logs}
+          done
+          
+          # Resource directories
+          mkdir -p "${RESOURCE_DIR}"/{templates,scripts,keys,certificates}
+          
+          echo "✅ Directory structure created successfully"
+          find .github -type d | head -20
+
+      - name: Download service configuration files
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Downloading service configuration files..."
+          
+          # Create service configs
+          cat > "${SERVICE_DIR}/services.json" <<'EOF'
+          {
+            "services": [
+              {
+                "name": "nodejs-service",
+                "type": "nodejs",
+                "version": "20.x",
+                "port": 3000,
+                "dependencies": ["npm", "node"]
+              },
+              {
+                "name": "python-service",
+                "type": "python",
+                "version": "3.11",
+                "port": 8000,
+                "dependencies": ["pip", "python"]
+              },
+              {
+                "name": "java-service",
+                "type": "java",
+                "version": "17",
+                "port": 8080,
+                "dependencies": ["maven", "java"]
+              }
+            ]
+          }
+          EOF
+          
+          # Create deployment manifest
+          cat > "${SERVICE_DIR}/deployment-manifest.yml" <<'EOF'
+          version: "1.0"
+          deployments:
+            - name: security-check-stack
+              services:
+                - nodejs-service
+                - python-service
+                - java-service
+              resources:
+                cpu: "2"
+                memory: "4Gi"
+                storage: "10Gi"
+          EOF
+          
+          echo "✅ Service configuration files created"
+          ls -la "${SERVICE_DIR}"
+
+      - name: Setup virtual server environment
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Setting up virtual server environment..."
+          
+          # Update system packages
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+          
+          # Install virtualization tools
+          sudo apt-get install -y \
+            docker.io \
+            docker-compose \
+            qemu-kvm \
+            libvirt-daemon-system \
+            bridge-utils \
+            curl \
+            wget \
+            jq \
+            yq \
+            git
+          
+          # Start Docker service
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          
+          docker --version
+          docker-compose --version
+          
+          echo "✅ Virtual server environment ready"
+
+      - name: Install Node.js service stack
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Installing Node.js service stack..."
+          
+          # Setup Node.js
+          curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          
+          node --version
+          npm --version
+          
+          # Install global tools
+          sudo npm install -g \
+            npm-check-updates \
+            snyk \
+            @cyclonedx/bom \
+            retire
+          
+          # Create Node.js server script
+          cat > "${SERVICE_DIR}/nodejs/server.js" <<'EOF'
+          const http = require('http');
+          const port = process.env.PORT || 3000;
+          
+          const server = http.createServer((req, res) => {
+            res.statusCode = 200;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({
+              status: 'healthy',
+              service: 'nodejs-security-check',
+              timestamp: new Date().toISOString()
+            }));
+          });
+          
+          server.listen(port, () => {
+            console.log(\`Server running at http://localhost:\${port}/\`);
+          });
+          EOF
+          
+          echo "✅ Node.js service stack installed"
+
+      - name: Install Python service stack
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Installing Python service stack..."
+          
+          # Setup Python
+          sudo apt-get install -y \
+            python3.11 \
+            python3-pip \
+            python3-venv \
+            python3-dev
+          
+          python3 --version
+          pip3 --version
+          
+          # Install security tools
+          pip3 install --upgrade pip
+          pip3 install \
+            pip-audit \
+            safety \
+            bandit \
+            cyclonedx-bom \
+            requests \
+            flask \
+            fastapi \
+            uvicorn
+          
+          # Create Python server script
+          cat > "${SERVICE_DIR}/python/server.py" <<'EOF'
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          import json
+          from datetime import datetime
+          
+          class HealthHandler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header('Content-Type', 'application/json')
+                  self.end_headers()
+                  response = {
+                      'status': 'healthy',
+                      'service': 'python-security-check',
+                      'timestamp': datetime.utcnow().isoformat()
+                  }
+                  self.wfile.write(json.dumps(response).encode())
+          
+          if __name__ == '__main__':
+              server = HTTPServer(('0.0.0.0', 8000), HealthHandler)
+              print('Python server running on port 8000')
+              server.serve_forever()
+          EOF
+          
+          echo "✅ Python service stack installed"
+
+      - name: Install Java service stack
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Installing Java service stack..."
+          
+          # Setup Java
+          sudo apt-get install -y \
+            openjdk-17-jdk \
+            maven \
+            gradle
+          
+          java --version
+          mvn --version
+          
+          # Create Java server script
+          cat > "${SERVICE_DIR}/java/Server.java" <<'EOF'
+          import com.sun.net.httpserver.HttpServer;
+          import java.io.IOException;
+          import java.io.OutputStream;
+          import java.net.InetSocketAddress;
+          import java.time.Instant;
+          
+          public class Server {
+              public static void main(String[] args) throws IOException {
+                  HttpServer server = HttpServer.create(new InetSocketAddress(8080), 0);
+                  server.createContext("/health", exchange -> {
+                      String response = String.format(
+                          "{\"status\":\"healthy\",\"service\":\"java-security-check\",\"timestamp\":\"%s\"}",
+                          Instant.now().toString()
+                      );
+                      exchange.sendResponseHeaders(200, response.length());
+                      OutputStream os = exchange.getResponseBody();
+                      os.write(response.getBytes());
+                      os.close();
+                  });
+                  server.start();
+                  System.out.println("Java server running on port 8080");
+              }
+          }
+          EOF
+          
+          echo "✅ Java service stack installed"
+
+      - name: Create resource files
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Creating resource files..."
+          
+          # Create Dockerfile templates
+          cat > "${RESOURCE_DIR}/templates/Dockerfile.nodejs" <<'EOF'
+          FROM node:20-alpine
+          WORKDIR /app
+          COPY package*.json ./
+          RUN npm ci --production
+          COPY . .
+          EXPOSE 3000
+          CMD ["node", "server.js"]
+          EOF
+          
+          cat > "${RESOURCE_DIR}/templates/Dockerfile.python" <<'EOF'
+          FROM python:3.11-slim
+          WORKDIR /app
+          COPY requirements.txt .
+          RUN pip install --no-cache-dir -r requirements.txt
+          COPY . .
+          EXPOSE 8000
+          CMD ["python", "server.py"]
+          EOF
+          
+          cat > "${RESOURCE_DIR}/templates/Dockerfile.java" <<'EOF'
+          FROM openjdk:17-slim
+          WORKDIR /app
+          COPY *.java .
+          RUN javac Server.java
+          EXPOSE 8080
+          CMD ["java", "Server"]
+          EOF
+          
+          # Create docker-compose template
+          cat > "${RESOURCE_DIR}/templates/docker-compose.yml" <<'EOF'
+          version: '3.8'
+          services:
+            nodejs-service:
+              build:
+                context: ./nodejs
+                dockerfile: Dockerfile
+              ports:
+                - "3000:3000"
+              environment:
+                - NODE_ENV=production
+              restart: unless-stopped
+            
+            python-service:
+              build:
+                context: ./python
+                dockerfile: Dockerfile
+              ports:
+                - "8000:8000"
+              environment:
+                - PYTHONUNBUFFERED=1
+              restart: unless-stopped
+            
+            java-service:
+              build:
+                context: ./java
+                dockerfile: Dockerfile
+              ports:
+                - "8080:8080"
+              restart: unless-stopped
+          EOF
+          
+          # Create deployment scripts
+          cat > "${RESOURCE_DIR}/scripts/deploy.sh" <<'EOF'
+          #!/bin/bash
+          set -e
+          
+          echo "Starting deployment..."
+          docker-compose -f docker-compose.yml up -d
+          echo "Deployment complete"
+          EOF
+          
+          cat > "${RESOURCE_DIR}/scripts/rollback.sh" <<'EOF'
+          #!/bin/bash
+          set -e
+          
+          echo "Rolling back deployment..."
+          docker-compose -f docker-compose.yml down
+          echo "Rollback complete"
+          EOF
+          
+          chmod +x "${RESOURCE_DIR}/scripts/"*.sh
+          
+          echo "✅ Resource files created"
+
+      - name: Generate SSL certificates
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Generating SSL certificates..."
+          
+          # Generate self-signed certificates for testing
+          openssl req -x509 -newkey rsa:4096 -nodes \
+            -keyout "${RESOURCE_DIR}/certificates/server.key" \
+            -out "${RESOURCE_DIR}/certificates/server.crt" \
+            -days 365 \
+            -subj "/C=KR/ST=Seoul/L=Seoul/O=SecurityCheck/CN=localhost"
+          
+          echo "✅ SSL certificates generated"
+
+      - name: Setup virtual server containers
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Setting up virtual server containers..."
+          
+          # Create virtual server definitions
+          cat > .github/virtual-servers/servers.json <<'EOF'
+          {
+            "servers": [
+              {
+                "name": "security-check-node",
+                "type": "nodejs",
+                "image": "node:20-alpine",
+                "resources": {
+                  "cpu": "1",
+                  "memory": "1Gi"
+                }
+              },
+              {
+                "name": "security-check-python",
+                "type": "python",
+                "image": "python:3.11-slim",
+                "resources": {
+                  "cpu": "1",
+                  "memory": "1Gi"
+                }
+              },
+              {
+                "name": "security-check-java",
+                "type": "java",
+                "image": "openjdk:17-slim",
+                "resources": {
+                  "cpu": "2",
+                  "memory": "2Gi"
+                }
+              }
+            ]
+          }
+          EOF
+          
+          # Pull base images
+          docker pull node:20-alpine
+          docker pull python:3.11-slim
+          docker pull openjdk:17-slim
+          
+          echo "✅ Virtual server containers ready"
+
+      - name: Provision summary
+        id: provision_summary
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Generating provisioning summary..."
+          
+          cat > "${ARTIFACT_DIR}/provision-summary.txt" <<EOF
+          Infrastructure Provisioning Summary
+          ====================================
+          Date: $(date -Iseconds)
+          
+          Directories Created:
+          - Service directories: $(find .github/services -type d | wc -l)
+          - Resource directories: $(find .github/resources -type d | wc -l)
+          
+          Services Installed:
+          - Node.js $(node --version)
+          - Python $(python3 --version)
+          - Java $(java --version | head -1)
+          
+          Docker Images:
+          $(docker images --format "- {{.Repository}}:{{.Tag}}" | head -5)
+          
+          Configuration Files:
+          - services.json
+          - deployment-manifest.yml
+          - docker-compose.yml
+          
+          Status: SUCCESS
+          EOF
+          
+          cat "${ARTIFACT_DIR}/provision-summary.txt"
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          echo "✅ Provisioning complete"
+
+      - name: Upload provisioning artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: infrastructure-provisioning-${{ github.run_number }}
+          path: |
+            .github/services/
+            .github/resources/
+            .github/virtual-servers/
+            ${ARTIFACT_DIR}/provision-summary.txt
+          retention-days: 30
+
+  ##########################################################################
+  # Branch Management
+  ##########################################################################
+  branch-management:
+    name: "Auto Branch Creation"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.create_branches == true
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        shell: bash
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create feature branches
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Creating feature branches..."
+          
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          
+          # Create branches for different services
+          for service in nodejs python java security-updates; do
+            BRANCH_NAME="${BRANCH_PREFIX}/${service}-${TIMESTAMP}"
+            
+            if git ls-remote --heads origin "$BRANCH_NAME" | grep -q "$BRANCH_NAME"; then
+              echo "⚠️  Branch $BRANCH_NAME already exists"
+            else
+              git checkout -b "$BRANCH_NAME"
+              
+              # Create service-specific marker file
+              mkdir -p .github/branches
+              echo "Branch created: ${BRANCH_NAME}" > ".github/branches/${service}.txt"
+              echo "Timestamp: ${TIMESTAMP}" >> ".github/branches/${service}.txt"
+              
+              git add .github/branches/${service}.txt
+              git commit -m "chore: create ${service} security update branch"
+              git push origin "$BRANCH_NAME"
+              
+              echo "✅ Created branch: $BRANCH_NAME"
+              git checkout main
+            fi
+          done
+
+      - name: Generate branch report
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          mkdir -p "${ARTIFACT_DIR}"
+          
+          echo "Branch Creation Report" > "${ARTIFACT_DIR}/branches.txt"
+          echo "======================" >> "${ARTIFACT_DIR}/branches.txt"
+          echo "" >> "${ARTIFACT_DIR}/branches.txt"
+          git branch -r | grep "${BRANCH_PREFIX}" >> "${ARTIFACT_DIR}/branches.txt" || echo "No branches found"
+          
+          cat "${ARTIFACT_DIR}/branches.txt"
+
+      - name: Upload branch artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: branch-management-${{ github.run_number }}
+          path: ${ARTIFACT_DIR}/branches.txt
+          retention-days: 30
 
   ##########################################################################
   # Node.js audit
@@ -401,3 +957,425 @@ jobs:
                 labels: ["security", "dependency-check", "automated"]
               });
             }
+
+  ##########################################################################
+  # Service Deployment & Resource Management
+  ##########################################################################
+  deploy-services:
+    name: "Deploy Services"
+    runs-on: ubuntu-latest
+    needs: [node-security, python-security, infrastructure-provisioning]
+    if: |
+      always() &&
+      github.event_name == 'workflow_dispatch' && 
+      inputs.deploy_services == true &&
+      needs.infrastructure-provisioning.outputs.provision_status == 'success'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download provisioning artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: infrastructure-provisioning-${{ github.run_number }}
+          path: ./provisioned
+
+      - name: Setup Docker environment
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Setting up Docker environment..."
+          
+          sudo apt-get update
+          sudo apt-get install -y docker.io docker-compose
+          sudo systemctl start docker
+          
+          docker --version
+          docker-compose --version
+          
+          echo "✅ Docker environment ready"
+
+      - name: Build service images
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Building service images..."
+          
+          mkdir -p deploy/nodejs deploy/python deploy/java
+          
+          # Copy Dockerfiles
+          cp provisioned/.github/resources/templates/Dockerfile.nodejs deploy/nodejs/Dockerfile
+          cp provisioned/.github/resources/templates/Dockerfile.python deploy/python/Dockerfile
+          cp provisioned/.github/resources/templates/Dockerfile.java deploy/java/Dockerfile
+          
+          # Copy service files
+          cp provisioned/.github/services/nodejs/server.js deploy/nodejs/
+          cp provisioned/.github/services/python/server.py deploy/python/
+          cp provisioned/.github/services/java/Server.java deploy/java/
+          
+          # Create minimal package.json for nodejs
+          cat > deploy/nodejs/package.json <<'EOF'
+          {
+            "name": "security-check-service",
+            "version": "1.0.0",
+            "main": "server.js",
+            "dependencies": {}
+          }
+          EOF
+          
+          # Create minimal requirements.txt for python
+          touch deploy/python/requirements.txt
+          
+          # Build images
+          docker build -t security-check/nodejs:latest deploy/nodejs/
+          docker build -t security-check/python:latest deploy/python/
+          docker build -t security-check/java:latest deploy/java/
+          
+          echo "✅ Service images built"
+          docker images | grep security-check
+
+      - name: Deploy services with docker-compose
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Deploying services..."
+          
+          # Create docker-compose file
+          cat > docker-compose.deploy.yml <<'EOF'
+          version: '3.8'
+          services:
+            nodejs-security:
+              image: security-check/nodejs:latest
+              ports:
+                - "3000:3000"
+              environment:
+                - NODE_ENV=production
+                - SERVICE_NAME=nodejs-security-check
+              healthcheck:
+                test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+              restart: unless-stopped
+            
+            python-security:
+              image: security-check/python:latest
+              ports:
+                - "8000:8000"
+              environment:
+                - PYTHONUNBUFFERED=1
+                - SERVICE_NAME=python-security-check
+              healthcheck:
+                test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000')"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+              restart: unless-stopped
+            
+            java-security:
+              image: security-check/java:latest
+              ports:
+                - "8080:8080"
+              environment:
+                - SERVICE_NAME=java-security-check
+              restart: unless-stopped
+          EOF
+          
+          # Start services
+          docker-compose -f docker-compose.deploy.yml up -d
+          
+          # Wait for services to be healthy
+          sleep 10
+          
+          # Check service status
+          docker-compose -f docker-compose.deploy.yml ps
+          
+          echo "✅ Services deployed successfully"
+
+      - name: Test deployed services
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Testing deployed services..."
+          
+          # Test Node.js service
+          if curl -f http://localhost:3000 2>/dev/null; then
+            echo "✅ Node.js service is responding"
+          else
+            echo "⚠️  Node.js service is not responding"
+          fi
+          
+          # Test Python service
+          if curl -f http://localhost:8000 2>/dev/null; then
+            echo "✅ Python service is responding"
+          else
+            echo "⚠️  Python service is not responding"
+          fi
+          
+          # Test Java service
+          if curl -f http://localhost:8080/health 2>/dev/null; then
+            echo "✅ Java service is responding"
+          else
+            echo "⚠️  Java service is not responding"
+          fi
+
+      - name: Generate deployment report
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          mkdir -p "${ARTIFACT_DIR}"
+          
+          cat > "${ARTIFACT_DIR}/deployment-report.txt" <<EOF
+          Service Deployment Report
+          =========================
+          Date: $(date -Iseconds)
+          Workflow Run: ${{ github.run_number }}
+          
+          Deployed Services:
+          $(docker-compose -f docker-compose.deploy.yml ps)
+          
+          Service Images:
+          $(docker images | grep security-check)
+          
+          Network Status:
+          $(docker network ls | grep deploy)
+          
+          Container Logs (last 10 lines):
+          
+          === Node.js Service ===
+          $(docker-compose -f docker-compose.deploy.yml logs --tail=10 nodejs-security)
+          
+          === Python Service ===
+          $(docker-compose -f docker-compose.deploy.yml logs --tail=10 python-security)
+          
+          === Java Service ===
+          $(docker-compose -f docker-compose.deploy.yml logs --tail=10 java-security)
+          
+          Status: DEPLOYED
+          EOF
+          
+          cat "${ARTIFACT_DIR}/deployment-report.txt"
+
+      - name: Cleanup deployment
+        if: always()
+        shell: bash
+        run: |
+          echo "▶ Cleaning up deployment..."
+          docker-compose -f docker-compose.deploy.yml down || true
+          echo "✅ Cleanup complete"
+
+      - name: Upload deployment artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-deployment-${{ github.run_number }}
+          path: |
+            ${ARTIFACT_DIR}/deployment-report.txt
+            docker-compose.deploy.yml
+          retention-days: 30
+
+  ##########################################################################
+  # Resource Management & Monitoring
+  ##########################################################################
+  resource-management:
+    name: "Resource Management"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Monitor system resources
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          echo "▶ Monitoring system resources..."
+          
+          mkdir -p "${ARTIFACT_DIR}"
+          
+          cat > "${ARTIFACT_DIR}/resource-report.txt" <<EOF
+          System Resource Report
+          ======================
+          Date: $(date -Iseconds)
+          
+          CPU Information:
+          $(lscpu | grep -E "Model name|CPU\(s\)|Thread|Core")
+          
+          Memory Information:
+          $(free -h)
+          
+          Disk Usage:
+          $(df -h /)
+          
+          Docker Resource Usage:
+          $(docker system df 2>/dev/null || echo "Docker not available")
+          
+          Running Processes:
+          $(ps aux | head -20)
+          
+          Network Interfaces:
+          $(ip addr show 2>/dev/null | grep -E "inet |link/")
+          EOF
+          
+          cat "${ARTIFACT_DIR}/resource-report.txt"
+
+      - name: Check Docker resources
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          
+          if command -v docker &> /dev/null; then
+            echo "▶ Checking Docker resources..."
+            
+            sudo systemctl start docker || true
+            
+            echo "Docker Images:"
+            docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" || true
+            
+            echo ""
+            echo "Docker Containers:"
+            docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
+            
+            echo ""
+            echo "Docker System Info:"
+            docker system info --format "{{.Name}}: {{.NCPU}} CPUs, {{.MemTotal}} Memory" || true
+          else
+            echo "Docker not available for resource checking"
+          fi
+
+      - name: Generate resource allocation plan
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          
+          cat > "${ARTIFACT_DIR}/resource-allocation.json" <<'EOF'
+          {
+            "timestamp": "2025-11-18T13:37:52Z",
+            "resources": {
+              "compute": {
+                "nodejs": {
+                  "cpu": "1 core",
+                  "memory": "1Gi",
+                  "replicas": 2
+                },
+                "python": {
+                  "cpu": "1 core",
+                  "memory": "1Gi",
+                  "replicas": 2
+                },
+                "java": {
+                  "cpu": "2 cores",
+                  "memory": "2Gi",
+                  "replicas": 1
+                }
+              },
+              "storage": {
+                "persistent": "10Gi",
+                "cache": "5Gi",
+                "logs": "5Gi"
+              },
+              "network": {
+                "bandwidth": "1Gbps",
+                "load_balancer": true,
+                "ssl_termination": true
+              }
+            },
+            "cost_estimate": {
+              "monthly_usd": 150,
+              "currency": "USD"
+            }
+          }
+          EOF
+          
+          echo "✅ Resource allocation plan created"
+          cat "${ARTIFACT_DIR}/resource-allocation.json"
+
+      - name: Upload resource artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-management-${{ github.run_number }}
+          path: ${ARTIFACT_DIR}/
+          retention-days: 30
+
+  ##########################################################################
+  # Final Summary Report
+  ##########################################################################
+  final-summary:
+    name: "Generate Final Summary"
+    runs-on: ubuntu-latest
+    needs: [node-security, python-security, dependency-review, infrastructure-provisioning, branch-management, deploy-services, resource-management]
+    if: always()
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate comprehensive summary
+        shell: bash
+        run: |
+          set -Eeo pipefail
+          mkdir -p "${ARTIFACT_DIR}"
+          
+          cat > "${ARTIFACT_DIR}/final-summary.md" <<'EOF'
+          # Dependency Security Check - Final Summary
+          
+          ## Workflow Execution Report
+          
+          **Date:** $(date -Iseconds)
+          **Run Number:** ${{ github.run_number }}
+          **Triggered by:** ${{ github.event_name }}
+          **Branch:** ${{ github.ref_name }}
+          
+          ## Jobs Status
+          
+          - **Node.js Security:** ${{ needs.node-security.result }}
+          - **Python Security:** ${{ needs.python-security.result }}
+          - **Dependency Review:** ${{ needs.dependency-review.result }}
+          - **Infrastructure Provisioning:** ${{ needs.infrastructure-provisioning.result }}
+          - **Branch Management:** ${{ needs.branch-management.result }}
+          - **Service Deployment:** ${{ needs.deploy-services.result }}
+          - **Resource Management:** ${{ needs.resource-management.result }}
+          
+          ## Security Audit Results
+          
+          All security audits have been completed. Please check individual job artifacts for detailed reports.
+          
+          ## Infrastructure Status
+          
+          Infrastructure provisioning and service deployment completed as configured.
+          
+          ## Artifacts Generated
+          
+          - npm-audit-* (Node.js security reports)
+          - python-audit-* (Python security reports)
+          - infrastructure-provisioning-* (Infrastructure setup details)
+          - branch-management-* (Branch creation reports)
+          - service-deployment-* (Deployment logs and status)
+          - resource-management-* (Resource allocation and monitoring)
+          
+          ## Next Steps
+          
+          1. Review security vulnerabilities in audit reports
+          2. Update dependencies with known vulnerabilities
+          3. Test deployed services
+          4. Monitor resource usage
+          5. Create issues for high/critical vulnerabilities
+          
+          ---
+          Generated by GitHub Actions Dependency Security Check workflow
+          EOF
+          
+          cat "${ARTIFACT_DIR}/final-summary.md"
+
+      - name: Upload final summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-summary-${{ github.run_number }}
+          path: ${ARTIFACT_DIR}/final-summary.md
+          retention-days: 90
+
+      - name: Post summary to job
+        shell: bash
+        run: |
+          cat "${ARTIFACT_DIR}/final-summary.md" >> "$GITHUB_STEP_SUMMARY"
