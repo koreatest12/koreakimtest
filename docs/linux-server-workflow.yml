@@ -1,0 +1,110 @@
+version: "1.0"
+metadata:
+  title: "RHEL/Ubuntu 서버 구축 및 정보 수집 워크플로우"
+  maintained_by: "infra-automation-team"
+  last_updated: "2024-05-21"
+  description: |
+    레드햇 엔터프라이즈 리눅스(RHEL)과 우분투 서버 환경을 동일한 절차로
+    구축하기 위한 자동화 지향 워크플로우 정의입니다. 요구사항 정리부터
+    운영/보안 업데이트, 정보 수집까지의 단계를 YAML로 표현하여 CI/CD나
+    IaC 파이프라인에서 재사용할 수 있습니다.
+requirements:
+  hardware:
+    options: ["bare-metal", "kvm", "vmware", "hyper-v", "cloud"]
+    notes: "운영 목적에 맞는 가상화/물리 플랫폼을 선택하고 용량 계획을 완료합니다."
+  network:
+    vlans: ["mgmt", "service", "backup"]
+    security_controls: ["firewall", "security-groups", "segmentation"]
+  automation_node:
+    os: "linux"
+    tools: ["ansible", "terraform", "packer"]
+workflow:
+  - phase: "요구사항 정의"
+    deliverables:
+      - "서비스 목적과 가용성/RPO/RTO 목표"
+      - "규제/보안 요구사항"
+      - "필수 패키지 및 정보 수집 범위"
+  - phase: "공식 이미지 확보"
+    inputs:
+      rhel: "https://access.redhat.com/downloads"
+      ubuntu: "https://ubuntu.com/download/server"
+    tasks:
+      - "필요한 버전의 ISO 또는 Cloud Image 체크섬 검증"
+      - "공유 아티팩트 저장소(S3, NFS)에 업로드"
+  - phase: "자동 설치 정의"
+    artifacts:
+      rhel: "kickstart/ks.cfg"
+      ubuntu: "autoinstall/user-data"
+    validations:
+      - "Ansible Lint 또는 yamllint로 구문 검사"
+  - phase: "이미지 빌드"
+    tooling:
+      packer_template: "packer/linux-base.pkr.hcl"
+      virt_install: "virt-install --name <NAME> --cdrom <ISO>"
+    steps:
+      - "Packer 빌드시 기본 패키지, 보안 업데이트 반영"
+      - "설치 완료 후 /srv, /data 표준 디렉토리 생성"
+      - "virt-sysprep/virt-sparsify로 골든 이미지 최적화"
+  - phase: "CI 파이프라인"
+    ci_systems: ["github-actions", "gitlab-ci", "jenkins"]
+    checks:
+      - "ansible-lint"
+      - "shellcheck"
+      - "openscap or lynis 보안 스캔"
+    outputs:
+      - "버전 태그가 부여된 qcow2/vmdk/ami"
+  - phase: "템플릿 배포"
+    repositories:
+      - "glance"
+      - "vcenter"
+      - "proxmox"
+      - "lxd"
+    metadata:
+      example_tag: "rhel-9.2-20240521"
+  - phase: "프로비저닝 자동화"
+    terraform:
+      state_backend: "s3"
+      modules: ["network", "compute", "security"]
+    ansible:
+      inventory: "inventory/production.ini"
+      roles:
+        - "common"
+        - "hardening"
+        - "info-collector"
+      post_tasks:
+        - "필수 디렉토리 /srv/{apps,logs,backup}, /data/{raw,archive} 생성"
+        - "정보 수집 에이전트(sosreport, landscape-client) 설치"
+  - phase: "모니터링/정보 수집"
+    telemetry:
+      metrics:
+        - "prometheus-node-exporter"
+        - "red-hat-insights"
+        - "canonical-landscape"
+      logs:
+        - "rsyslog -> central syslog"
+        - "filebeat/journalbeat -> elasticsearch"
+      audit:
+        - "auditd 규칙 적용 및 중앙 수집"
+  - phase: "운영/보안 업데이트"
+    rhel_commands:
+      - "subscription-manager register --username <ACCOUNT> --password <PASSWORD>"
+      - "subscription-manager attach --auto"
+      - "dnf update -y"
+    ubuntu_commands:
+      - "apt update"
+      - "apt full-upgrade -y"
+      - "ua attach <TOKEN>"
+    cadence: "월간 정기 패치 + 긴급 CVE 패치"
+  - phase: "개선 및 피드백"
+    actions:
+      - "모니터링 지표와 감사 로그 리뷰"
+      - "CI 결과 기반으로 Packer/Ansible 템플릿 보완"
+      - "요구사항 변경 사항을 backlog에 반영"
+outputs:
+  documentation:
+    - path: "docs/linux-server-workflow.md"
+      purpose: "상세 설명과 단계별 체크리스트"
+  automation_files:
+    - path: "ansible/playbooks/server-build.yml"
+    - path: "terraform/environments/prod/main.tf"
+    - path: "packer/linux-base.pkr.hcl"
