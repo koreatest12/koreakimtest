@@ -99,3 +99,49 @@
 6. 정기적으로 `dnf update`/`apt upgrade`와 이미지 재빌드를 수행하여 보안 패치를 반영합니다.
 
 이 워크플로우를 적용하면 레드햇과 우분투 서버 환경을 표준화하고, 공식 이미지 소스를 기반으로 신뢰할 수 있는 빌드/정보 수집 파이프라인을 운영할 수 있습니다.
+
+
+## 10. 단계별 통합 워크플로우 (Flow)
+
+```text
+[요구사항 정의]
+     │
+     ▼
+[공식 ISO/이미지 수집]
+     │  ├─ RHEL: access.redhat.com/downloads
+     │  └─ Ubuntu: ubuntu.com/download/server
+     ▼
+[자동 설치 파일 준비]
+     │  ├─ Kickstart (RHEL)
+     │  └─ Autoinstall/Cloud-Init (Ubuntu)
+     ▼
+[Packer/virt-install 빌드 단계]
+     │  ├─ OS 설치 및 기본 패키지 구성
+     │  └─ /srv, /data 디렉토리 생성
+     ▼
+[CI 파이프라인 테스트]
+     │  ├─ Ansible Lint / ShellCheck
+     │  └─ VM 부팅 검증, 보안 스캔(OpenSCAP, Lynis)
+     ▼
+[템플릿/이미지 저장소 배포]
+     │  ├─ Glance, vCenter, Proxmox, LXD
+     │  └─ 버전 태깅 (예: rhel-9.2-20240201)
+     ▼
+[프로비저닝 자동화]
+     │  ├─ Terraform으로 인프라 생성
+     │  └─ Ansible로 서비스/계정/에이전트 설정
+     ▼
+[정보 수집 및 모니터링]
+     │  ├─ sosreport/landscape-client 수집
+     │  └─ Prometheus, ELK/EFK, CMDB 업데이트
+     ▼
+[운영/보안 업데이트]
+     │  ├─ dnf update / apt full-upgrade
+     │  └─ 정기 이미지 재빌드 + 감사 로그 검토
+     ▼
+[개선 사항 피드백 반영]
+```
+
+위 Flow를 바탕으로, 요구사항이 들어오면 공식 이미지 확보 → 자동화 스크립트 준비 → CI 검증 → 템플릿 배포 → 서버 운영까지의 경로가 명확해집니다. 조직별 필요 사항(예: 특정 백업 소프트웨어, 보안 에이전트 등)은 각 단계의 `Ansible Role` 또는 `Terraform module`에 추가하면 됩니다.
+=======
+
