@@ -70,7 +70,104 @@ jobs:
           sleep 1
           echo_note "Echo Trace 테스트 종료"
       #######################################################################
-      # 4. 예시 데이터 작업 시뮬레이션
+      # 4. 시스템 업그레이드 및 패치
+      #######################################################################
+      - name: ⬆️ 시스템 업그레이드/보안 패치
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "시스템 패키지 업데이트 시작"
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades ca-certificates
+          echo_note "보안 패키지 및 업그레이드 완료"
+      #######################################################################
+      # 5. 기본 DB 서버 설치 및 초기화
+      #######################################################################
+      - name: 🛢️ PostgreSQL 서버 설치 및 부트스트랩
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "PostgreSQL 설치 시작"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
+          echo_note "PostgreSQL 서비스 시작"
+          sudo systemctl start postgresql
+          sudo systemctl status postgresql --no-pager
+          echo_note "기본 데이터베이스/계정 생성"
+          sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE DATABASE finops;
+          DO $$BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'finops') THEN
+              CREATE ROLE finops LOGIN PASSWORD 'finops';
+            END IF;
+          END$$;
+          GRANT ALL PRIVILEGES ON DATABASE finops TO finops;
+          SQL
+          echo_note "DB 연결 확인"
+          sudo -u postgres psql -d finops -c "SELECT version();"
+          echo_note "PostgreSQL 초기화 완료"
+      #######################################################################
+      # 6. DR 클러스터 구축 및 상태 확인
+      #######################################################################
+      - name: 🛰️ DR PostgreSQL 경량 스탠바이 구성
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "DR용 PostgreSQL 클러스터 생성 시작"
+          PG_MAJOR=$(psql -V | awk '{print $3}' | cut -d. -f1)
+          sudo pg_createcluster "$PG_MAJOR" dr --start -p 5433
+          sudo pg_lsclusters
+          echo_note "DR 클러스터 상태 확인"
+          sudo -u postgres psql -p 5433 -c "SELECT current_setting('port') AS port, current_setting('max_connections') AS max_conn;"
+          echo_note "DR 클러스터 기동 완료"
+      #######################################################################
+      # 7. ISO/DB용 리소스 및 대량 쿼리 생성
+      #######################################################################
+      - name: 🧱 리소스/쿼리 대량 생성 및 주입
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "ISO/DR용 리소스 생성"
+          mkdir -p /home/runner/td_data/{iso_payloads,queries,resources}
+          seq 1 50 | xargs -I{} sh -c 'echo "RESOURCE_{}" > /home/runner/td_data/resources/resource_{}.txt'
+          seq 1 20 | xargs -I{} sh -c 'echo "SELECT {} AS seq_id, now() AS generated_at;" > /home/runner/td_data/queries/query_{}.sql'
+          echo_note "데이터베이스에 샘플 데이터 주입"
+          sudo -u postgres psql -d finops -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE IF NOT EXISTS audit_snapshots (
+            id SERIAL PRIMARY KEY,
+            bucket VARCHAR(32) NOT NULL,
+            payload JSONB NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT now()
+          );
+          INSERT INTO audit_snapshots (bucket, payload)
+          SELECT 'iso-bucket', jsonb_build_object('row', g)::jsonb
+          FROM generate_series(1, 100) AS g;
+          SQL
+          echo_note "대량 쿼리 샘플 실행"
+          sudo -u postgres psql -d finops -f /home/runner/td_data/queries/query_1.sql
+          sudo -u postgres psql -d finops -c "SELECT count(*) FROM audit_snapshots;"
+          echo_note "ISO/DB 리소스 생성 완료"
+      #######################################################################
+      # 8. 추가 DB/SQL 프로그램 설치
+      #######################################################################
+      - name: 📦 추가 DB 유틸리티 설치 (SQLite/MySQL 클라이언트)
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "추가 DB 도구 설치 시작"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3 mysql-client unixodbc-bin
+          sqlite3 --version
+          mysql --version
+          echo_note "DB 유틸리티 설치 완료"
+      #######################################################################
+      # 9. 바이러스/보안 프로그램 설치
+      #######################################################################
+      - name: 🛡️ 바이러스/보안 패키지 설치
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "보안 스캐너 설치"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clamav clamav-daemon
+          sudo freshclam || echo "freshclam skipped (rate limit)"
+          sudo systemctl start clamav-freshclam || true
+          sudo systemctl status clamav-freshclam --no-pager
+          echo_note "보안 구성 완료"
+      #######################################################################
+      # 10. 예시 데이터 작업 시뮬레이션
       #######################################################################
       - name: 📦 가상 데이터 생성
         run: |
@@ -83,7 +180,7 @@ jobs:
           echo_note "CSV 파일 생성 완료"
           ls -lh /home/runner/td_data/tmp
       #######################################################################
-      # 5. 품질검증 단계 예시
+      # 11. 품질검증 단계 예시
       #######################################################################
       - name: ✅ 품질 검증 로그 작성
         run: |
@@ -98,7 +195,7 @@ jobs:
             echo_note "✅ 데이터 품질 OK"
           fi
       #######################################################################
-      # 6. 종료 및 타임스탬프 기록
+      # 12. 종료 및 타임스탬프 기록
       #######################################################################
       - name: 🕒 종료 로그
         run: |
