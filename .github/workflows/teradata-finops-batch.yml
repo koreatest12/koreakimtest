@@ -70,7 +70,32 @@ jobs:
           sleep 1
           echo_note "Echo Trace 테스트 종료"
       #######################################################################
-      # 4. 예시 데이터 작업 시뮬레이션
+      # 4. DB 서버 설치 및 초기화
+      #######################################################################
+      - name: 🛢️ PostgreSQL 서버 설치 및 부트스트랩
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "PostgreSQL 설치 시작"
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
+          echo_note "PostgreSQL 서비스 시작"
+          sudo systemctl start postgresql
+          sudo systemctl status postgresql --no-pager
+          echo_note "기본 데이터베이스/계정 생성"
+          sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE DATABASE finops;
+          DO $$BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'finops') THEN
+              CREATE ROLE finops LOGIN PASSWORD 'finops';
+            END IF;
+          END$$;
+          GRANT ALL PRIVILEGES ON DATABASE finops TO finops;
+          SQL
+          echo_note "DB 연결 확인"
+          sudo -u postgres psql -d finops -c "SELECT version();"
+          echo_note "PostgreSQL 초기화 완료"
+      #######################################################################
+      # 5. 예시 데이터 작업 시뮬레이션
       #######################################################################
       - name: 📦 가상 데이터 생성
         run: |
@@ -83,7 +108,7 @@ jobs:
           echo_note "CSV 파일 생성 완료"
           ls -lh /home/runner/td_data/tmp
       #######################################################################
-      # 5. 품질검증 단계 예시
+      # 6. 품질검증 단계 예시
       #######################################################################
       - name: ✅ 품질 검증 로그 작성
         run: |
@@ -98,7 +123,7 @@ jobs:
             echo_note "✅ 데이터 품질 OK"
           fi
       #######################################################################
-      # 6. 종료 및 타임스탬프 기록
+      # 7. 종료 및 타임스탬프 기록
       #######################################################################
       - name: 🕒 종료 로그
         run: |
