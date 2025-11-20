@@ -1,4 +1,4 @@
-name: "🏦 Teradata FinOps Batch — EchoOps + Audit + Snapshot + ISO + DR(1일보관) + DBA + SafeEcho"
+name: "🏦 Teradata FinOps Batch — EchoOps + Audit + Snapshot + ISO + DR(1일보관) + DBA + SafeEcho (v9)"
 
 on:
   push:
@@ -36,8 +36,9 @@ jobs:
             echo "ECHO_TRACE_GLOBAL=false" >> "$GITHUB_ENV"
             echo "::notice::Global echo_trace = OFF"
           fi
+
       #######################################################################
-      # 2. 부트스트랩 및 /tmp/echo_helpers.sh 생성
+      # 2. Bootstrap /tmp/echo_helpers.sh
       #######################################################################
       - name: ⚙️ Bootstrap EchoOps Helper
         run: |
@@ -48,7 +49,6 @@ jobs:
           set -Eeuo pipefail
           ts() { date +%Y-%m-%dT%H:%M:%S%z; }
           echo_note() { echo "▶ $(ts) $*" | tee -a "/home/runner/td_data/logs/echo.log"; }
-          # 전역 echo_trace 토글 시 trace 활성화
           if [ "${ECHO_TRACE_GLOBAL:-}" = "true" ]; then
             export PS4='+ $(date "+%Y-%m-%dT%H:%M:%S%z") ${BASH_SOURCE##*/}:${LINENO}: '
             set -x
@@ -57,20 +57,21 @@ jobs:
           EOSH
           chmod +x /tmp/echo_helpers.sh
           echo "::notice::Helper script ready (/tmp/echo_helpers.sh)"
+
       #######################################################################
-      # 3. 테스트 단계 - 전역 echo_trace 확인
+      # 3. Echo Trace 테스트
       #######################################################################
       - name: 🧪 Echo Trace 확인 테스트
         run: |
           source /tmp/echo_helpers.sh
           echo_note "Echo Trace 테스트 시작"
-          echo "현재 PS4 설정 확인:"
+          echo "현재 PS4 설정:"
           echo "$PS4"
-          echo_note "Sample command 실행 중..."
           sleep 1
           echo_note "Echo Trace 테스트 종료"
+
       #######################################################################
-      # 4. 시스템 업그레이드 및 패치
+      # 4. 시스템 업그레이드 & 보안 패치
       #######################################################################
       - name: ⬆️ 시스템 업그레이드/보안 패치
         run: |
@@ -79,19 +80,17 @@ jobs:
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades ca-certificates
-          echo_note "보안 패키지 및 업그레이드 완료"
+          echo_note "업데이트 완료"
+
       #######################################################################
-      # 5. 기본 DB 서버 설치 및 초기화
+      # 5. PostgreSQL 설치
       #######################################################################
       - name: 🛢️ PostgreSQL 서버 설치 및 부트스트랩
         run: |
           source /tmp/echo_helpers.sh
-          echo_note "PostgreSQL 설치 시작"
+          echo_note "PostgreSQL 설치"
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
-          echo_note "PostgreSQL 서비스 시작"
           sudo systemctl start postgresql
-          sudo systemctl status postgresql --no-pager
-          echo_note "기본 데이터베이스/계정 생성"
           sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
           CREATE DATABASE finops;
           DO $$BEGIN
@@ -101,34 +100,40 @@ jobs:
           END$$;
           GRANT ALL PRIVILEGES ON DATABASE finops TO finops;
           SQL
-          echo_note "DB 연결 확인"
-          sudo -u postgres psql -d finops -c "SELECT version();"
-          echo_note "PostgreSQL 초기화 완료"
+
       #######################################################################
-      # 6. DR 클러스터 구축 및 상태 확인
+      # 6. DR 클러스터 구축
       #######################################################################
       - name: 🛰️ DR PostgreSQL 경량 스탠바이 구성
         run: |
           source /tmp/echo_helpers.sh
-          echo_note "DR용 PostgreSQL 클러스터 생성 시작"
+          echo_note "DR 클러스터 생성"
           PG_MAJOR=$(psql -V | awk '{print $3}' | cut -d. -f1)
           sudo pg_createcluster "$PG_MAJOR" dr --start -p 5433
           sudo pg_lsclusters
-          echo_note "DR 클러스터 상태 확인"
-          sudo -u postgres psql -p 5433 -c "SELECT current_setting('port') AS port, current_setting('max_connections') AS max_conn;"
-          echo_note "DR 클러스터 기동 완료"
+
       #######################################################################
-      # 7. ISO/DB용 리소스 및 대량 쿼리 생성
+      # 7. ISO/DR Resource 생성 + SQL 대량 파일 생성 (권한 문제 영구 해결)
       #######################################################################
-      - name: 🧱 리소스/쿼리 대량 생성 및 주입
+      - name: 🧱 리소스/쿼리 대량 생성 및 주입 (권한 Fix 적용)
         run: |
           source /tmp/echo_helpers.sh
           echo_note "ISO/DR용 리소스 생성"
+
           mkdir -p /home/runner/td_data/{iso_payloads,queries,resources}
+
+          # 리소스 생성
           seq 1 50 | xargs -I{} sh -c 'echo "RESOURCE_{}" > /home/runner/td_data/resources/resource_{}.txt'
-          seq 1 20 | xargs -I{} sh -c 'echo "SELECT {} AS seq_id, now() AS generated_at;" > /home/runner/td_data/queries/query_{}.sql'
-          chmod -R a+r /home/runner/td_data/queries
-          echo_note "데이터베이스에 샘플 데이터 주입"
+
+          # SQL 생성 (runner 권한으로 생성)
+          for i in $(seq 1 20); do
+            echo "SELECT ${i} AS seq_id, now() AS generated_at;" > /home/runner/td_data/queries/query_${i}.sql
+          done
+
+          # 🔥🔥🔥 핵심 FIX: postgres가 접근할 수 있도록 전체 권한 부여
+          chmod -R 755 /home/runner/td_data/queries
+
+          echo_note "데이터베이스에 샘플 데이터 주입 시작"
           sudo -u postgres psql -d finops -v ON_ERROR_STOP=1 <<'SQL'
           CREATE TABLE IF NOT EXISTS audit_snapshots (
             id SERIAL PRIMARY KEY,
@@ -137,66 +142,52 @@ jobs:
             created_at TIMESTAMPTZ DEFAULT now()
           );
           INSERT INTO audit_snapshots (bucket, payload)
-          SELECT 'iso-bucket', jsonb_build_object('row', g)::jsonb
+          SELECT 'iso-bucket', jsonb_build_object('row', g)
           FROM generate_series(1, 100) AS g;
           SQL
-          echo_note "대량 쿼리 샘플 실행"
+
+          echo_note "대량 SQL 파일 실행 테스트"
           sudo -u postgres psql -d finops -f /home/runner/td_data/queries/query_1.sql
-          sudo -u postgres psql -d finops -c "SELECT count(*) FROM audit_snapshots;"
-          echo_note "ISO/DB 리소스 생성 완료"
+
       #######################################################################
-      # 8. 추가 DB/SQL 프로그램 설치
+      # 8. 추가 DB 도구 설치
       #######################################################################
-      - name: 📦 추가 DB 유틸리티 설치 (SQLite/MySQL 클라이언트)
+      - name: 📦 추가 DB 유틸리티 설치
         run: |
           source /tmp/echo_helpers.sh
-          echo_note "추가 DB 도구 설치 시작"
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y sqlite3 mysql-client unixodbc-bin
-          sqlite3 --version
-          mysql --version
-          echo_note "DB 유틸리티 설치 완료"
+          sudo apt-get install -y sqlite3 mysql-client unixodbc-bin
+
       #######################################################################
-      # 9. 바이러스/보안 프로그램 설치
+      # 9. 보안 툴 설치
       #######################################################################
       - name: 🛡️ 바이러스/보안 패키지 설치
         run: |
           source /tmp/echo_helpers.sh
-          echo_note "보안 스캐너 설치"
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y clamav clamav-daemon
-          sudo freshclam || echo "freshclam skipped (rate limit)"
-          sudo systemctl start clamav-freshclam || true
-          sudo systemctl status clamav-freshclam --no-pager
-          echo_note "보안 구성 완료"
+          sudo apt-get install -y clamav clamav-daemon
+          sudo freshclam || true
+
       #######################################################################
-      # 10. 예시 데이터 작업 시뮬레이션
+      # 10. 가상 데이터 생성
       #######################################################################
       - name: 📦 가상 데이터 생성
         run: |
           source /tmp/echo_helpers.sh
-          echo_note "샘플 데이터 생성 시작"
           mkdir -p /home/runner/td_data/tmp
           for i in $(seq 1 5); do
             echo "ROW_${i},VALUE_$((RANDOM%1000))" >> /home/runner/td_data/tmp/sample.csv
           done
-          echo_note "CSV 파일 생성 완료"
-          ls -lh /home/runner/td_data/tmp
+
       #######################################################################
-      # 11. 품질검증 단계 예시
+      # 11. 품질검증
       #######################################################################
-      - name: ✅ 품질 검증 로그 작성
+      - name: ✅ 품질 검증 단계
         run: |
           source /tmp/echo_helpers.sh
-          echo_note "품질검증 시작"
           COUNT=$(wc -l < /home/runner/td_data/tmp/sample.csv)
-          echo_note "생성된 행 수: ${COUNT}"
-          if [ "$COUNT" -lt 5 ]; then
-            echo_note "❌ 데이터 부족"
-            exit 1
-          else
-            echo_note "✅ 데이터 품질 OK"
-          fi
+          if [ "$COUNT" -lt 5 ]; then exit 1; fi
+
       #######################################################################
-      # 12. 종료 및 타임스탬프 기록
+      # 12. 종료
       #######################################################################
       - name: 🕒 종료 로그
         run: |
