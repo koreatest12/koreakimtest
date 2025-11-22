@@ -1,74 +1,44 @@
 name: "🏦 Manila Bank ULTRA Edition v10 — FULL SYSTEM"
-
 on:
   workflow_dispatch:
 
 jobs:
-  ###########################################################################
-  # 1) INIT & ECHO ENGINE
-  ###########################################################################
-  init:
-    uses: ./.github/workflows/modules/init.yml
 
-  ###########################################################################
-  # 2) SCHEMA (ALL TABLES)
-  ###########################################################################
+  init:
+    uses: ./.github/workflows/init.yml
+
   schema:
     needs: init
-    uses: ./.github/workflows/modules/schema.yml
+    uses: ./.github/workflows/schema.yml
 
-  ###########################################################################
-  # 3) TRADE ENGINE (수수료 / 취소 / 해외송금)
-  ###########################################################################
   trade_engine:
     needs: schema
-    uses: ./.github/workflows/modules/trade-engine.yml
+    uses: ./.github/workflows/trade-engine.yml
 
-  ###########################################################################
-  # 4) FRAUD + AI FRAUD ENGINE
-  ###########################################################################
   fraud:
     needs: trade_engine
-    uses: ./.github/workflows/modules/fraud-ai.yml
+    uses: ./.github/workflows/fraud-ai.yml
 
-  ###########################################################################
-  # 5) MULTI-DB CLUSTER 구축
-  ###########################################################################
   multi_db:
     needs: fraud
-    uses: ./.github/workflows/modules/multi-db.yml
+    uses: ./.github/workflows/multi-db.yml
 
-  ###########################################################################
-  # 6) DOCKER MULTI BRANCH CLUSTER (Manila / Seoul / Tokyo / Singapore)
-  ###########################################################################
   docker_cluster:
     needs: multi_db
-    uses: ./.github/workflows/modules/docker-cluster.yml
+    uses: ./.github/workflows/docker-cluster.yml
 
-  ###########################################################################
-  # 7) MIGRATION (580 → 570) + VIP 적용
-  ###########################################################################
   migration:
     needs: docker_cluster
-    uses: ./.github/workflows/modules/migration.yml
+    uses: ./.github/workflows/migration.yml
 
-  ###########################################################################
-  # 8) SNAPSHOT BEFORE/AFTER
-  ###########################################################################
   snapshot:
     needs: migration
-    uses: ./.github/workflows/modules/snapshot.yml
+    uses: ./.github/workflows/snapshot.yml
 
-  ###########################################################################
-  # 9) MARKDOWN REPORT GENERATION
-  ###########################################################################
   report:
     needs: snapshot
-    uses: ./.github/workflows/modules/report.yml
+    uses: ./.github/workflows/report.yml
 
-  ###########################################################################
-  # 10) FINAL SUMMARY (모든 기능 성공)
-  ###########################################################################
   finalize:
     needs: report
-    uses: ./.github/workflows/modules/finalize.yml
+    uses: ./.github/workflows/finalize.yml
