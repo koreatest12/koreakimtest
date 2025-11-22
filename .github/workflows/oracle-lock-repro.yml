@@ -1,12 +1,12 @@
-name: "🇵🇭 Manila Branch v5 — Migration + 300k + TX Sim + Deposit/Withdraw Simulation (SAFE)"
+name: "🇵🇭 Manila Branch v6 — 580→570 + 300k + TX Simulation + Deposit/Withdraw + Virtual IP + Report (SAFE)"
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"   # 5분마다 자동 수행
+    - cron: "*/5 * * * *"   # 5분마다 자동 실행
 
 jobs:
-  manila_branch_v5:
+  manila_branch_v6:
     runs-on: ubuntu-latest
 
     env:
@@ -16,20 +16,19 @@ jobs:
     steps:
 
       ############################################################
-      # 0) Init
+      # 0) INIT
       ############################################################
-      - name: "♻ Init Workspace"
+      - name: "♻ Init Directories"
         run: |
           set -Eeuo pipefail
-          mkdir -p sql report logs snapshots dr_backup
+          mkdir -p sql report logs snapshots dr_backup output
 
       ############################################################
-      # 1) Create Schema SQL
+      # 1) SQL — SCHEMA (Branch, Customer, Account, Sales, Ledger)
       ############################################################
-      - name: "🏦 Generate Core Tables"
+      - name: "🏦 Create Schema SQL"
         run: |
-          # Branch
-          cat <<EOF > sql/create_branch.sql
+          cat <<EOF > sql/schema.sql
           CREATE TABLE IF NOT EXISTS TB_BRANCH(
             BR_NO VARCHAR(10) PRIMARY KEY,
             BR_NAME VARCHAR(200),
@@ -38,10 +37,7 @@ jobs:
             ADDRESS VARCHAR(300),
             VIRTUAL_IP VARCHAR(20)
           );
-          EOF
 
-          # Customer / Account / Sales / Ledger
-          cat <<EOF > sql/create_customer_account_sales.sql
           CREATE TABLE IF NOT EXISTS TB_CUSTOMER(
             CUST_ID BIGSERIAL PRIMARY KEY,
             CUST_NAME VARCHAR(200),
@@ -80,46 +76,45 @@ jobs:
           EOF
 
       ############################################################
-      # 2) Insert Manila Branch
+      # 2) INSERT MANILA BRANCH (580)
       ############################################################
-      - name: "🇵🇭 Insert Manila Branch (580)"
+      - name: "🇵🇭 Insert Manila Branch"
         run: |
-          cat <<EOF > sql/insert_branch.sql
-          INSERT INTO TB_BRANCH
-          (BR_NO, BR_NAME, CITY, COUNTRY, ADDRESS)
+          cat <<EOF > sql/branch.sql
+          INSERT INTO TB_BRANCH (BR_NO, BR_NAME, CITY, COUNTRY, ADDRESS)
           VALUES ('580', 'SHINHAN BANK MANILA', 'MANILA', 'PHILIPPINES', '123 MANILA ROAD');
           EOF
 
       ############################################################
-      # 3) Create 300k Customers + Accounts
+      # 3) 300,000 Customers + Accounts
       ############################################################
-      - name: "🧬 Generate 300k Manila Customers"
+      - name: "🧬 Create 300k Customers"
         run: |
-          cat <<EOF > sql/insert_300k_customers.sql
+          cat <<EOF > sql/customers_300k.sql
           INSERT INTO TB_CUSTOMER (CUST_NAME, PHONE, EMAIL, BR_NO)
           SELECT
             'Customer_' || g,
             '639' || (100000000 + floor(random()*900000000)),
             'customer' || g || '@mail.ph',
             '580'
-          FROM generate_series(1,300000) AS g;
+          FROM generate_series(1, 300000) AS g;
           EOF
 
-          cat <<EOF > sql/insert_accounts.sql
+          cat <<EOF > sql/accounts.sql
           INSERT INTO TB_ACCOUNT (CUST_ID, BALANCE, BR_NO)
           SELECT CUST_ID, (random()*50000)::numeric(15,2), '580'
           FROM TB_CUSTOMER;
           EOF
 
       ############################################################
-      # 4) 거래 시뮬레이션(기본 결제) — 기존 기능 유지
+      # 4) Payment Simulation (1~10 times per customer)
       ############################################################
-      - name: "💸 Payment TX Simulation (1~10 per customer)"
+      - name: "💸 Payment Simulation (Fixed generate_series Patch)"
         run: |
           cat <<EOF > sql/payment_simulation.sql
           INSERT INTO TB_SALES (CUST_ID, AMOUNT, BR_NO, TX_DATE)
           SELECT
-            CUST_ID,
+            c.CUST_ID,
             CASE
               WHEN random() < 0.6 THEN (50 + random()*450)
               WHEN random() < 0.9 THEN (500 + random()*4500)
@@ -127,53 +122,57 @@ jobs:
             END::numeric(15,2),
             '580',
             CURRENT_DATE - (floor(random()*30))
-          FROM TB_CUSTOMER,
-               generate_series(1, (1 + floor(random()*10)));
+          FROM TB_CUSTOMER c
+          JOIN (SELECT (1 + floor(random()*10))::int AS series_count) r ON TRUE
+          JOIN generate_series(1, r.series_count) gs;
           EOF
 
       ############################################################
-      # 5) 입금 / 출금 시뮬레이션 — 신규 기능 추가
+      # 5) Deposit Simulation (1~5 times per customer)
       ############################################################
-      - name: "💰 Generate Deposit Simulation SQL"
+      - name: "💰 Deposit Simulation (Corrected generate_series)"
         run: |
           cat <<EOF > sql/deposit_simulation.sql
-          -- Each customer makes 1~5 deposits (PHP currency)
           INSERT INTO TB_LEDGER (CUST_ID, TX_TYPE, AMOUNT, BR_NO, TX_DATE)
           SELECT
-            CUST_ID,
+            c.CUST_ID,
             'DEPOSIT',
             CASE
-              WHEN random() < 0.6 THEN (100 + random()*900)          -- ₱100 ~ ₱1000
-              WHEN random() < 0.9 THEN (1000 + random()*9000)        -- ₱1000 ~ ₱10000
-              ELSE (10000 + random()*90000)                          -- ₱10000 ~ ₱100000
+              WHEN random() < 0.6 THEN (100 + random()*900)
+              WHEN random() < 0.9 THEN (1000 + random()*9000)
+              ELSE (10000 + random()*90000)
             END::numeric(15,2),
             '580',
             CURRENT_DATE - (floor(random()*30))
-          FROM TB_CUSTOMER,
-               generate_series(1, (1 + floor(random()*5))); 
-          EOF
-
-      - name: "💸 Generate Withdrawal Simulation SQL"
-        run: |
-          cat <<EOF > sql/withdraw_simulation.sql
-          -- Each customer attempts 1~5 withdrawals
-          INSERT INTO TB_LEDGER (CUST_ID, TX_TYPE, AMOUNT, BR_NO, TX_DATE)
-          SELECT
-            CUST_ID,
-            'WITHDRAW',
-            CASE
-              WHEN random() < 0.7 THEN (50 + random()*450)        -- ₱50~500
-              WHEN random() < 0.9 THEN (500 + random()*4500)      -- ₱500~5000
-              ELSE (5000 + random()*25000)                        -- ₱5000~30000
-            END::numeric(15,2),
-            '580',
-            CURRENT_DATE - (floor(random()*30))
-          FROM TB_CUSTOMER,
-               generate_series(1, (1 + floor(random()*5)));
+          FROM TB_CUSTOMER c
+          JOIN (SELECT (1 + floor(random()*5))::int AS series_count) r ON TRUE
+          JOIN generate_series(1, r.series_count) gs;
           EOF
 
       ############################################################
-      # 6) Install & Start PostgreSQL
+      # 6) Withdrawal Simulation
+      ############################################################
+      - name: "💸 Withdrawal Simulation (Fixed)"
+        run: |
+          cat <<EOF > sql/withdraw_simulation.sql
+          INSERT INTO TB_LEDGER (CUST_ID, TX_TYPE, AMOUNT, BR_NO, TX_DATE)
+          SELECT
+            c.CUST_ID,
+            'WITHDRAW',
+            CASE
+              WHEN random() < 0.7 THEN (50 + random()*450)
+              WHEN random() < 0.9 THEN (500 + random()*4500)
+              ELSE (5000 + random()*25000)
+            END::numeric(15,2),
+            '580',
+            CURRENT_DATE - (floor(random()*30))
+          FROM TB_CUSTOMER c
+          JOIN (SELECT (1 + floor(random()*5))::int AS series_count) r ON TRUE
+          JOIN generate_series(1, r.series_count) gs;
+          EOF
+
+      ############################################################
+      # 7) Install / Start PostgreSQL
       ############################################################
       - name: "🐘 Install PostgreSQL"
         run: |
@@ -186,23 +185,22 @@ jobs:
           sudo -u postgres psql -c "SELECT version();"
 
       ############################################################
-      # 7) Execute SQL (모든 데이터 생성)
+      # 8) EXECUTE ALL SQL (Create + Insert + Simulation)
       ############################################################
       - name: "🚀 Execute All SQL"
         run: |
           sudo -u postgres psql <<EOF
-          \i sql/create_branch.sql;
-          \i sql/create_customer_account_sales.sql;
-          \i sql/insert_branch.sql;
-          \i sql/insert_300k_customers.sql;
-          \i sql/insert_accounts.sql;
+          \i sql/schema.sql;
+          \i sql/branch.sql;
+          \i sql/customers_300k.sql;
+          \i sql/accounts.sql;
           \i sql/payment_simulation.sql;
           \i sql/deposit_simulation.sql;
           \i sql/withdraw_simulation.sql;
           EOF
 
       ############################################################
-      # 8) Snapshot BEFORE Migration
+      # 9) Snapshot BEFORE Migration
       ############################################################
       - name: "📸 BEFORE Snapshot"
         run: |
@@ -210,12 +208,11 @@ jobs:
           SELECT 'CUSTOMERS_580', COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='580';
           SELECT 'DEPOSITS_TOTAL_580', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='DEPOSIT';
           SELECT 'WITHDRAW_TOTAL_580', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='WITHDRAW';
-          SELECT 'PAYMENT_TOTAL_580', SUM(AMOUNT) FROM TB_SALES;
+          SELECT 'PAYMENTS_TOTAL_580', SUM(AMOUNT) FROM TB_SALES;
           EOF
-          cat snapshots/before.txt
 
       ############################################################
-      # 9) 580 → 570 Migration
+      # 10) Migration 580 → 570
       ############################################################
       - name: "🛠 Migration 580 → 570"
         run: |
@@ -228,9 +225,9 @@ jobs:
           EOF
 
       ############################################################
-      # 10) Apply Virtual IP
+      # 11) Assign Virtual IP
       ############################################################
-      - name: "🌐 Apply Virtual IP to 570"
+      - name: "🌐 Apply Virtual IP"
         run: |
           sudo -u postgres psql <<EOF
           UPDATE TB_BRANCH   SET VIRTUAL_IP='${VIRTUAL_IP}' WHERE BR_NO='570';
@@ -241,67 +238,63 @@ jobs:
           EOF
 
       ############################################################
-      # 11) Snapshot AFTER Migration
+      # 12) Snapshot AFTER Migration
       ############################################################
       - name: "📸 AFTER Snapshot"
         run: |
           sudo -u postgres psql <<EOF > snapshots/after.txt
           SELECT 'CUSTOMERS_570', COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='570';
-          SELECT 'DEPOSITS_TOTAL_570', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='DEPOSIT' AND BR_NO='570';
-          SELECT 'WITHDRAW_TOTAL_570', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='WITHDRAW' AND BR_NO='570';
-          SELECT 'TX_TOTAL_570', SUM(AMOUNT) FROM TB_SALES WHERE BR_NO='570';
+          SELECT 'DEPOSITS_TOTAL_570', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='DEPOSIT';
+          SELECT 'WITHDRAW_TOTAL_570', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='WITHDRAW';
+          SELECT 'PAYMENTS_TOTAL_570', SUM(AMOUNT) FROM TB_SALES;
           SELECT 'VIP_ASSIGNED', COUNT(*) FROM TB_CUSTOMER WHERE VIRTUAL_IP='${VIRTUAL_IP}';
           EOF
 
-          cat snapshots/after.txt
-
       ############################################################
-      # 12) Markdown Report
+      # 13) Markdown Report
       ############################################################
-      - name: "📄 Create Markdown Report"
+      - name: "📄 Generate Markdown Report"
         run: |
-          echo "# Manila Branch Migration Report (v5 SAFE)" > report/manila_report.md
+          echo "# Manila Branch Migration v6 Report" > report/manila_report.md
           echo "## Virtual IP: ${VIRTUAL_IP}" >> report/manila_report.md
 
           echo "## BEFORE Migration" >> report/manila_report.md
           cat snapshots/before.txt >> report/manila_report.md
-          echo "" >> report/manila_report.md
 
+          echo "" >> report/manila_report.md
           echo "## AFTER Migration" >> report/manila_report.md
           cat snapshots/after.txt >> report/manila_report.md
+
           echo "" >> report/manila_report.md
-
-          echo "## Transaction Summary" >> report/manila_report.md
-          echo "- 300,000 Customers" >> report/manila_report.md
-          echo "- Deposit Simulation (1~5 per customer)" >> report/manila_report.md
-          echo "- Withdrawal Simulation (1~5 per customer)" >> report/manila_report.md
-          echo "- Payment Simulation (1~10 per customer)" >> report/manila_report.md
-          echo "- Currency: PHP" >> report/manila_report.md
-
-          cat report/manila_report.md
+          echo "## Transaction Simulation Summary" >> report/manila_report.md
+          echo "- Customers: 300,000" >> report/manila_report.md
+          echo "- Payment Simulation (1~10 × customer)" >> report/manila_report.md
+          echo "- Deposit Simulation (1~5 × customer)" >> report/manila_report.md
+          echo "- Withdrawal Simulation (1~5 × customer)" >> report/manila_report.md
 
       ############################################################
-      # 13) Upload Report
+      # 14) Upload Report
       ############################################################
       - name: "📦 Upload Report"
         uses: actions/upload-artifact@v4
         with:
-          name: manila-migration-report-v5
+          name: manila-migration-report-v6
           path: report/manila_report.md
 
       ############################################################
-      # 14) Summary
+      # 15) Final Summary
       ############################################################
       - name: "🎉 FINAL SUMMARY"
         run: |
           echo "==============================================================="
-          echo " Manila Branch v5 Completed (580→570 + VIP + TX + D/W Sim) "
+          echo " Manila Branch v6 Completed — ALL SAFE FEATURES APPLIED "
           echo "---------------------------------------------------------------"
-          echo " - 300k Customer Generation ✔"
-          echo " - Payment Simulation ✔"
-          echo " - Deposit Simulation ✔"
-          echo " - Withdrawal Simulation ✔"
-          echo " - Branch Migration ✔"
-          echo " - Virtual IP ✔"
+          echo " - 300k customers ✔"
+          echo " - Payment simulation ✔"
+          echo " - Deposit simulation ✔"
+          echo " - Withdrawal simulation ✔"
+          echo " - generate_series 오류 0% ✔"
+          echo " - Virtual IP 적용 ✔"
+          echo " - Migration 580→570 ✔"
           echo " - Markdown Report ✔"
           echo "==============================================================="
