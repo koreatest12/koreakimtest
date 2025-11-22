@@ -1,4 +1,4 @@
-name: "🧪 Oracle Tablespace Lock Reproduction — v4 (Permission Fix + Stable)"
+name: "🧪 Oracle Tablespace Lock Reproduction — v5 (Logfile Fix + Stable)"
 
 on:
   workflow_dispatch:
@@ -14,63 +14,67 @@ jobs:
       - name: "📂 Step 1 — Prepare Workdir"
         run: |
           set -Eeuo pipefail
-          echo "$EP Preparing working directory..."
+          echo "$EP Preparing workdir..."
           mkdir -p work
-          cd work
           echo "$EP Workdir ready."
 
-      - name: "💾 Step 2 — Create 100MB Disk and Mount"
+      - name: "💾 Step 2 — Create 100MB Disk"
         run: |
           set -Eeuo pipefail
           echo "$EP Creating 100MB disk..."
           dd if=/dev/zero of=fake.img bs=1M count=100
-
-          echo "$EP Formatting disk..."
           sudo mkfs.ext4 fake.img
 
-          echo "$EP Mounting disk..."
+          echo "$EP Mounting..."
           sudo mkdir -p /mnt/fakedisk
           sudo mount -o loop fake.img /mnt/fakedisk
 
-          echo "$EP Setting permissions for postgres..."
+          echo "$EP Creating pgdata with postgres permission..."
           sudo mkdir -p /mnt/fakedisk/pgdata
           sudo chown -R postgres:postgres /mnt/fakedisk/pgdata
-
-          echo "$EP Mounted disk and pgdata ready."
 
       - name: "📦 Step 3 — Install PostgreSQL"
         run: |
           set -Eeuo pipefail
-          echo "$EP Installing PostgreSQL..."
           sudo apt-get update -y
           sudo apt-get install -y postgresql
-          echo "$EP PostgreSQL installed."
 
-      - name: "🛠 Step 4 — InitDB inside 100MB disk (now allowed)"
+      - name: "🛠 Step 4 — Initialize PostgreSQL inside 100MB disk"
         run: |
           set -Eeuo pipefail
-          echo "$EP Running initdb inside /mnt/fakedisk/pgdata ..."
+          echo "$EP Running initdb..."
           sudo -u postgres /usr/lib/postgresql/*/bin/initdb -D /mnt/fakedisk/pgdata
           echo "$EP initdb completed."
 
-      - name: "🚀 Step 5 — Start PostgreSQL (pg_ctl)"
+      - name: "📝 Step 5 — Create postgres log directory"
+        run: |
+          set -Eeuo pipefail
+          echo "$EP Creating log dir..."
+          sudo mkdir -p /var/log/postgres_manual
+          sudo chown -R postgres:postgres /var/log/postgres_manual
+          echo "$EP Log dir ready."
+
+      - name: "🚀 Step 6 — Start PostgreSQL (fixed log path)"
         run: |
           set -Eeuo pipefail
           echo "$EP Starting PostgreSQL manual..."
           sudo -u postgres /usr/lib/postgresql/*/bin/pg_ctl \
             -D /mnt/fakedisk/pgdata \
             -o "-p 5432" \
-            -l logfile start
+            -l /var/log/postgres_manual/server.log start
 
           sleep 5
 
-          echo "$EP Checking server status..."
-          sudo -u postgres psql -p 5432 -c "SELECT version();" || exit 1
+          echo "$EP Verifying PostgreSQL startup..."
+          sudo -u postgres psql -p 5432 -c "SELECT version();" || (
+            echo "ERROR: PostgreSQL did not start."
+            cat /var/log/postgres_manual/server.log
+            exit 1
+          )
 
-      - name: "📄 Step 6 — Create Table + Insert 300k rows (BR_NO=580)"
+      - name: "📄 Step 7 — Create schema + 300k rows"
         run: |
           set -Eeuo pipefail
-          echo "$EP Creating schema and inserting rows..."
           sudo -u postgres psql -p 5432 <<EOF
           CREATE TABLE branch (
             br_no VARCHAR(10),
@@ -82,56 +86,58 @@ jobs:
           EOF
           echo "$EP Data inserted."
 
-      - name: "🔒 Step 7 — Start Blocking Transaction (Session A)"
+      - name: "🔒 Step 8 — Start Blocking Session (Session A)"
         run: |
-          echo "$EP Starting blocking session..."
+          set -Eeuo pipefail
           echo "BEGIN; UPDATE branch SET data='LOCKED';" > block.sql
           sudo -u postgres psql -p 5432 -f block.sql &
           sleep 2
-          echo "$EP Blocking session A active."
+          echo "$EP Blocking session active."
 
-      - name: "⚠ Step 8 — Try UPDATE 580 → 570 (Session B)"
+      - name: "⚠ Step 9 — Try UPDATE 580 → 570 (Session B)"
         run: |
-          echo "$EP Running update (expected lock)..."
+          set -Eeuo pipefail
           echo "UPDATE branch SET br_no='570' WHERE br_no='580';" > update.sql
           sudo -u postgres psql -p 5432 -f update.sql || true
           echo "$EP UPDATE issued."
 
-      - name: "🔎 Step 9 — Check Lock Status"
+      - name: "🔍 Step 10 — Check Lock Status"
         run: |
-          echo "$EP Checking lock status..."
+          set -Eeuo pipefail
+          echo "$EP Checking locks..."
           sudo -u postgres psql -p 5432 <<EOF
           SELECT pid, wait_event, wait_event_type, state, query
           FROM pg_stat_activity
           WHERE state != 'idle';
           EOF
 
-      - name: "💣 Step 10 — WAL Explosion (simulate Undo overflow)"
+      - name: "💣 Step 11 — Generate WAL Explosion"
         run: |
+          set -Eeuo pipefail
           echo "$EP Generating WAL explosion..."
           sudo -u postgres psql -p 5432 <<EOF
           INSERT INTO branch
           SELECT '580', md5(random()::text)
           FROM generate_series(1, 1500000);
           EOF
-          echo "$EP WAL explosion triggered."
+          echo "$EP WAL explosion done."
 
-      - name: "📊 Step 11 — Disk Full Check"
+      - name: "📊 Step 12 — Check Disk Usage"
         run: |
-          echo "$EP Disk usage:"
+          set -Eeuo pipefail
           df -h /mnt/fakedisk
 
-      - name: "📣 Step 12 — Final Report"
+      - name: "📣 Step 13 — Final Lock Report"
         run: |
-          echo "$EP Final lock state:"
+          set -Eeuo pipefail
           sudo -u postgres psql -p 5432 <<EOF
           SELECT pid, wait_event, wait_event_type, state, query
           FROM pg_stat_activity;
           EOF
 
-      - name: "🛑 Step 13 — Shutdown PostgreSQL"
+      - name: "🛑 Step 14 — Stop PostgreSQL"
         run: |
-          echo "$EP Stopping PostgreSQL..."
+          set -Eeuo pipefail
           sudo -u postgres /usr/lib/postgresql/*/bin/pg_ctl \
             -D /mnt/fakedisk/pgdata stop
           echo "$EP PostgreSQL stopped."
