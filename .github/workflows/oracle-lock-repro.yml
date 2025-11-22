@@ -1,10 +1,10 @@
-name: "🧩 EchoOps + DR + Self-Heal + PreCheck + 580→570 + Lock Simulation — vALL-SAFE"
+name: "🇵🇭 Manila Shinhan Bank Branch Migration — 580 → 570 (SAFE)"
 
 on:
   workflow_dispatch:
 
 jobs:
-  all_safe:
+  branch_migration:
     runs-on: ubuntu-latest
 
     env:
@@ -12,50 +12,65 @@ jobs:
 
     steps:
 
-      ###############################
-      # 0) Runner Self-Heal
-      ###############################
-
-      - name: "♻ Runner Self-Heal"
-        continue-on-error: true
+      ############################################################
+      # 0) EchoOps / SafeEcho 초기 준비
+      ############################################################
+      - name: "♻ Init EchoOps"
         run: |
           set -Eeuo pipefail
-          echo "$E Runner disk/mem check..."
-          df -h
-          free -h || true
-          echo "$E Runner self-heal complete (safe mode)."
+          echo "$E Initializing EchoOps..."
+          mkdir -p logs snapshots output
+          echo "$E EchoOps ready."
 
-      ###############################
-      # 1) Oracle Tablespace Safe Scan (Mock)
-      ###############################
-      - name: "🧪 Oracle Tablespace Check (Safe)"
+      ############################################################
+      # 1) 마닐라 신한은행 지점 정보 생성
+      ############################################################
+      - name: "🏦 Generate Manila Branch Metadata"
         run: |
           set -Eeuo pipefail
-          echo "$E Simulating Oracle TS check..."
-          echo "TS_FREE_MB=150" > ts_status.txt
-          echo "AUTOEXTEND=ON" >> ts_status.txt
-          cat ts_status.txt
+          echo "$E Generating Manila branch info..."
 
-      ###############################
-      # 2) Pre-Check for 580→570 update
-      ###############################
-      - name: "🔍 Pre-Check 580→570"
+          cat <<EOF > output/manila_branch.yml
+          country: "PHILIPPINES"
+          city: "MANILA"
+          branch_name: "SHINHAN BANK MANILA"
+          old_branch_no: "580"
+          new_branch_no: "570"
+          created_at: "$(date '+%Y-%m-%d %H:%M:%S')"
+          EOF
+
+          cat output/manila_branch.yml
+
+      ############################################################
+      # 2) FK 관계 모의 검사 (SAFE)
+      ############################################################
+      - name: "🔍 FK Dependency Pre-Check"
         run: |
           set -Eeuo pipefail
           echo "$E Checking FK dependencies..."
-          echo "Mock-FK: TB_SALES(BR_NO), TB_ACCOUNT(BR_NO)" > fk_check.txt
-          cat fk_check.txt
+          cat <<EOF > output/fk_dependencies.txt
+          TB_BRANCH(BR_NO)
+          TB_SALES(BR_NO)
+          TB_ACCOUNT(BR_NO)
+          TB_HISTORY(BR_NO)
+          EOF
+          cat output/fk_dependencies.txt
 
-          echo "$E Checking rowcount before update..."
-          echo "ROWCOUNT_580=300000" > pre_rows.txt
-          cat pre_rows.txt
+      ############################################################
+      # 3) Pre-Snapshot (Before Migration)
+      ############################################################
+      - name: "📸 Create Pre-Migration Snapshot (Mock)"
+        run: |
+          set -Eeuo pipefail
+          echo "$E Creating pre-snapshot..."
+          echo "ROWCOUNT_580=300000" > snapshots/pre_snapshot.txt
+          echo "ROWCOUNT_570=0" >> snapshots/pre_snapshot.txt
+          cat snapshots/pre_snapshot.txt
 
-          echo "$E Pre-Check completed."
-
-      ###############################
-      # 3) PostgreSQL Lock Simulation (Safe, no crash)
-      ###############################
-      - name: "🧱 Install PostgreSQL"
+      ############################################################
+      # 4) PostgreSQL Lock Simulation — SAFE
+      ############################################################
+      - name: "🐘 Install PostgreSQL"
         run: |
           sudo apt-get update -y
           sudo apt-get install -y postgresql
@@ -65,7 +80,7 @@ jobs:
           sudo systemctl start postgresql
           sudo -u postgres psql -c "SELECT version();"
 
-      - name: "📄 Create branch table + insert rows"
+      - name: "📂 Create branch table for simulation"
         run: |
           sudo -u postgres psql <<EOF
           DROP TABLE IF EXISTS branch;
@@ -75,82 +90,96 @@ jobs:
           );
           INSERT INTO branch
           SELECT '580', md5(random()::text)
-          FROM generate_series(1, 50000);
+          FROM generate_series(1, 20000);
           EOF
 
-      - name: "🔒 Session A — Lock table"
+      - name: "🔒 Create Lock (Session A)"
         run: |
           echo "BEGIN; UPDATE branch SET data='LOCKED';" > /tmp/block.sql
           sudo -u postgres psql -f /tmp/block.sql &
           sleep 1
 
-      - name: "⚠ Session B — UPDATE 580→570 (expected LOCK)"
+      - name: "⚠ Attempt Update 580 → 570 (Session B)"
         continue-on-error: true
         run: |
           echo "UPDATE branch SET br_no='570' WHERE br_no='580';" > /tmp/update.sql
           sudo -u postgres psql -f /tmp/update.sql || true
-          echo "$E Lock simulation completed (safe)."
+          echo "$E Lock simulation (safe) completed."
 
-      - name: "🔎 Check lock state (safe)"
+      - name: "🔎 Show Lock State"
         run: |
           sudo -u postgres psql <<EOF
           SELECT pid, wait_event, wait_event_type, state, query
           FROM pg_stat_activity
-          WHERE state != 'idle';
+          WHERE state!='idle';
           EOF
 
-      ###############################
-      # 4) Safe 580→570 Update Execution (Mock)
-      ###############################
-
-      - name: "🛠 Execute 580→570 Update (Safe)"
+      ############################################################
+      # 5) 실제 580 → 570 변경 (Safe Mock)
+      ############################################################
+      - name: "🛠 Execute Branch Code Migration"
         run: |
-          set -Eeuo pipefail
-          echo "$E Applying 580→570 update (safe mock)..."
-          echo "UPDATE_SUCCESS=true" > update_result.txt
-          echo "UPDATED_ROWS=300000" >> update_result.txt
-          cat update_result.txt
+          echo "$E Executing migration 580 → 570 (safe mock)..."
 
-      ###############################
-      # 5) DR Snapshot (Safe Mock)
-      ###############################
-      - name: "📦 DR Snapshot"
+          cat <<EOF > output/migration_result.txt
+          STATUS: SUCCESS
+          UPDATED_ROWS: 300000
+          OLD_BRANCH: 580
+          NEW_BRANCH: 570
+          EOF
+
+          cat output/migration_result.txt
+
+      ############################################################
+      # 6) After Snapshot (Post Migration)
+      ############################################################
+      - name: "📸 Create Post-Migration Snapshot (Mock)"
         run: |
-          set -Eeuo pipefail
-          mkdir -p DR_snapshot
-          cp pre_rows.txt DR_snapshot/rowcount_before.txt
-          cp update_result.txt DR_snapshot/update_result.txt
-          echo "$E DR Snapshot completed."
-          ls -R DR_snapshot
+          echo "ROWCOUNT_580=0" > snapshots/post_snapshot.txt
+          echo "ROWCOUNT_570=300000" >> snapshots/post_snapshot.txt
+          cat snapshots/post_snapshot.txt
 
-      ###############################
-      # 6) Auto Rollback SQL Generator (Safe)
-      ###############################
-      - name: "↩ Generate rollback SQL"
+      ############################################################
+      # 7) Rollback SQL 자동 생성
+      ############################################################
+      - name: "↩ Generate Rollback SQL"
         run: |
           set -Eeuo pipefail
           echo "$E Generating rollback SQL..."
-          echo "
-          UPDATE branch SET br_no='580' WHERE br_no='570';
-          " > rollback_580.sql
-          cat rollback_580.sql
 
-      ###############################
-      # 7) Final Echo Summary (Success Message)
-      ###############################
-      - name: "🎉 Final Summary"
+          cat <<EOF > output/rollback_580.sql
+          -- Rollback: Return branch code from 570 → 580
+          UPDATE TB_BRANCH SET BR_NO='580' WHERE BR_NO='570';
+          UPDATE TB_SALES SET BR_NO='580' WHERE BR_NO='570';
+          UPDATE TB_ACCOUNT SET BR_NO='580' WHERE BR_NO='570';
+          UPDATE TB_HISTORY SET BR_NO='580' WHERE BR_NO='570';
+          EOF
+
+          cat output/rollback_580.sql
+
+      ############################################################
+      # 8) DR Snapshot 저장(Mock)
+      ############################################################
+      - name: "📦 DR Snapshot"
+        run: |
+          cp -r snapshots DR_backup
+          echo "$E DR Snapshot backup ready."
+          ls -R DR_backup
+
+      ############################################################
+      # 9) 최종 Summary
+      ############################################################
+      - name: "🎉 Summary"
         run: |
           echo "==============================================================="
-          echo " ALL-SAFE INTEGRATION WORKFLOW COMPLETED "
+          echo " Manila Shinhan Branch Migration Completed (SAFE MODE) "
           echo "---------------------------------------------------------------"
-          echo " - Runner Self-Heal ✔"
-          echo " - Oracle TS Scan (Safe) ✔"
           echo " - FK 검사 ✔"
-          echo " - 580→570 Pre-Check ✔"
-          echo " - Lock Simulation(Deadlock only) ✔"
-          echo " - Update 수행(Mock) ✔"
-          echo " - DR Snapshot ✔"
+          echo " - Pre-Snapshot ✔"
+          echo " - Lock Simulation ✔"
+          echo " - Migration 580 → 570 ✔"
           echo " - Rollback SQL 생성 ✔"
+          echo " - DR Snapshot ✔"
           echo "==============================================================="
-          echo " HEALTHY FINISH (SAFE MODE) "
+          echo " SUCCESS (SAFE MODE FINISHED) "
           echo "==============================================================="
