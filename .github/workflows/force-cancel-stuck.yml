@@ -6,40 +6,40 @@ on:
 jobs:
 
   init:
-    uses: ${{ github.repository }}/.github/workflows/init.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/init.yml@main
 
   schema:
     needs: init
-    uses: ${{ github.repository }}/.github/workflows/schema.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/schema.yml@main
 
   trade_engine:
     needs: schema
-    uses: ${{ github.repository }}/.github/workflows/trade-engine.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/trade-engine.yml@main
 
   fraud:
     needs: trade_engine
-    uses: ${{ github.repository }}/.github/workflows/fraud-ai.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/fraud-ai.yml@main
 
   multi_db:
     needs: fraud
-    uses: ${{ github.repository }}/.github/workflows/multi-db.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/multi-db.yml@main
 
   docker_cluster:
     needs: multi_db
-    uses: ${{ github.repository }}/.github/workflows/docker-cluster.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/docker-cluster.yml@main
 
   migration:
     needs: docker_cluster
-    uses: ${{ github.repository }}/.github/workflows/migration.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/migration.yml@main
 
   snapshot:
     needs: migration
-    uses: ${{ github.repository }}/.github/workflows/snapshot.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/snapshot.yml@main
 
   report:
     needs: snapshot
-    uses: ${{ github.repository }}/.github/workflows/report.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/report.yml@main
 
   finalize:
     needs: report
-    uses: ${{ github.repository }}/.github/workflows/finalize.yml@main
+    uses: {OWNER}/{REPO}/.github/workflows/finalize.yml@main
