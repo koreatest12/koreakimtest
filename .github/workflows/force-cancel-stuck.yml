@@ -1,44 +1,45 @@
 name: "🏦 Manila Bank ULTRA Edition v10 — FULL SYSTEM"
+
 on:
   workflow_dispatch:
 
 jobs:
 
   init:
-    uses: ./.github/workflows/init.yml
+    uses: ${{ github.repository }}/.github/workflows/init.yml@main
 
   schema:
     needs: init
-    uses: ./.github/workflows/schema.yml
+    uses: ${{ github.repository }}/.github/workflows/schema.yml@main
 
   trade_engine:
     needs: schema
-    uses: ./.github/workflows/trade-engine.yml
+    uses: ${{ github.repository }}/.github/workflows/trade-engine.yml@main
 
   fraud:
     needs: trade_engine
-    uses: ./.github/workflows/fraud-ai.yml
+    uses: ${{ github.repository }}/.github/workflows/fraud-ai.yml@main
 
   multi_db:
     needs: fraud
-    uses: ./.github/workflows/multi-db.yml
+    uses: ${{ github.repository }}/.github/workflows/multi-db.yml@main
 
   docker_cluster:
     needs: multi_db
-    uses: ./.github/workflows/docker-cluster.yml
+    uses: ${{ github.repository }}/.github/workflows/docker-cluster.yml@main
 
   migration:
     needs: docker_cluster
-    uses: ./.github/workflows/migration.yml
+    uses: ${{ github.repository }}/.github/workflows/migration.yml@main
 
   snapshot:
     needs: migration
-    uses: ./.github/workflows/snapshot.yml
+    uses: ${{ github.repository }}/.github/workflows/snapshot.yml@main
 
   report:
     needs: snapshot
-    uses: ./.github/workflows/report.yml
+    uses: ${{ github.repository }}/.github/workflows/report.yml@main
 
   finalize:
     needs: report
-    uses: ./.github/workflows/finalize.yml
+    uses: ${{ github.repository }}/.github/workflows/finalize.yml@main
