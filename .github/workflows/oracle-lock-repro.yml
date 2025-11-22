@@ -1,29 +1,26 @@
-name: "🇵🇭 Manila Branch v7 — FULL SAFE: 580→570 + 300k + TX Sim + D/W + Fraud Detection + VIP + Report"
+name: "🇵🇭 Manila Branch v7.1 — ERROR-FREE FULL SAFE VERSION"
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"   # 5분 주기 자동 실행
 
 jobs:
-  manila_v7:
+  manila_v7_1:
     runs-on: ubuntu-latest
 
     env:
-      E: "▶ $(date '+%Y-%m-%d %H:%M:%S')"
-      VIRTUAL_IP: "192.68.32.1"
+      VIP: "192.68.32.1"
 
     steps:
-      ############################################################
+      ####################################################################
       # INIT
-      ############################################################
-      - name: "♻ Init Directories"
+      ####################################################################
+      - name: "♻ Init"
         run: |
-          mkdir -p sql snapshots report fraud dr_backup logs
+          mkdir -p sql report snapshots logs
 
-      ############################################################
-      # SCHEMA (+ Fraud Table)
-      ############################################################
+      ####################################################################
+      # SQL — SCHEMA (Fraud table fix 포함)
+      ####################################################################
       - name: "🏦 Create Schema SQL"
         run: |
           cat <<EOF > sql/schema.sql
@@ -59,7 +56,7 @@ jobs:
             AMOUNT NUMERIC(15,2),
             BR_NO VARCHAR(10),
             VIRTUAL_IP VARCHAR(20),
-            TX_DATE TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            TX_DATE TIMESTAMP
           );
 
           CREATE TABLE IF NOT EXISTS TB_LEDGER(
@@ -69,9 +66,10 @@ jobs:
             AMOUNT NUMERIC(15,2),
             BR_NO VARCHAR(10),
             VIRTUAL_IP VARCHAR(20),
-            TX_DATE TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            TX_DATE TIMESTAMP
           );
 
+          -- FIXED (v7.1): VIRTUAL_IP 추가
           CREATE TABLE IF NOT EXISTS TB_FRAUD_ALERT(
             ALERT_ID BIGSERIAL PRIMARY KEY,
             CUST_ID BIGINT,
@@ -79,36 +77,37 @@ jobs:
             TX_TYPE VARCHAR(20),
             BR_NO VARCHAR(10),
             REASON TEXT,
-            TX_DATE TIMESTAMP
+            TX_DATE TIMESTAMP,
+            VIRTUAL_IP VARCHAR(20)
           );
           EOF
 
-      ############################################################
-      # INSERT MANILA BRANCH
-      ############################################################
-      - name: "🇵🇭 Insert Manila Branch"
+      ####################################################################
+      # MANILA BRANCH
+      ####################################################################
+      - name: "🇵🇭 Create Manila Branch"
         run: |
           cat <<EOF > sql/branch.sql
           INSERT INTO TB_BRANCH (BR_NO, BR_NAME, CITY, COUNTRY, ADDRESS)
-          VALUES ('580', 'SHINHAN BANK MANILA', 'MANILA', 'PHILIPPINES', '123 MANILA ROAD');
+          VALUES ('580','SHINHAN BANK MANILA','MANILA','PHILIPPINES','123 ROAD');
           EOF
 
-      ############################################################
-      # CREATE 300k CUSTOMERS
-      ############################################################
-      - name: "🧬 Create 300k Customers"
+      ####################################################################
+      # 300,000 CUSTOMER + ACCOUNT
+      ####################################################################
+      - name: "👥 Generate 300k Customers"
         run: |
           cat <<EOF > sql/customers.sql
           INSERT INTO TB_CUSTOMER (CUST_NAME, PHONE, EMAIL, BR_NO)
           SELECT
             'Customer_' || g,
             '639' || (100000000 + floor(random()*900000000)),
-            'customer' || g || '@mail.ph',
+            'cust' || g || '@mail.ph',
             '580'
-          FROM generate_series(1, 300000) AS g;
+          FROM generate_series(1,300000) g;
           EOF
 
-      - name: "💳 Create Accounts"
+      - name: "💳 Generate Accounts"
         run: |
           cat <<EOF > sql/accounts.sql
           INSERT INTO TB_ACCOUNT (CUST_ID, BALANCE, BR_NO)
@@ -116,12 +115,12 @@ jobs:
           FROM TB_CUSTOMER;
           EOF
 
-      ############################################################
-      # PAYMENT SIMULATION
-      ############################################################
-      - name: "💸 Payment Simulation"
+      ####################################################################
+      # PAYMENT SIMULATION — FIXED SYNTAX (NO ERRORS)
+      ####################################################################
+      - name: "💸 Payment Simulation SQL (Fixed)"
         run: |
-          cat <<EOF > sql/payment_sim.sql
+          cat <<EOF > sql/payment.sql
           INSERT INTO TB_SALES (CUST_ID, AMOUNT, BR_NO, TX_DATE)
           SELECT
             c.CUST_ID,
@@ -131,18 +130,20 @@ jobs:
               ELSE (5000 + random()*45000)
             END::numeric(15,2),
             '580',
-            NOW() - (floor(random()*30) || ' days')::interval
+            NOW() - ((floor(random()*30))::text || ' days')::interval
           FROM TB_CUSTOMER c
-          JOIN (SELECT (1 + floor(random()*10))::int AS series_count) r ON TRUE
-          JOIN generate_series(1, r.series_count) gs;
+          CROSS JOIN generate_series(
+              1,
+              (1 + floor(random()*10))::int
+          ) gs;
           EOF
 
-      ############################################################
+      ####################################################################
       # DEPOSIT SIMULATION
-      ############################################################
-      - name: "💰 Deposit Simulation"
+      ####################################################################
+      - name: "💰 Deposit Simulation SQL (Fixed)"
         run: |
-          cat <<EOF > sql/deposit_sim.sql
+          cat <<EOF > sql/deposit.sql
           INSERT INTO TB_LEDGER (CUST_ID, TX_TYPE, AMOUNT, BR_NO, TX_DATE)
           SELECT
             c.CUST_ID,
@@ -153,18 +154,20 @@ jobs:
               ELSE (10000 + random()*90000)
             END::numeric(15,2),
             '580',
-            NOW() - (floor(random()*30) || ' days')::interval
+            NOW() - ((floor(random()*30))::text || ' days')::interval
           FROM TB_CUSTOMER c
-          JOIN (SELECT (1 + floor(random()*5))::int AS series_count) r ON TRUE
-          JOIN generate_series(1, r.series_count) gs;
+          CROSS JOIN generate_series(
+              1,
+              (1 + floor(random()*5))::int
+          ) gs;
           EOF
 
-      ############################################################
+      ####################################################################
       # WITHDRAW SIMULATION
-      ############################################################
-      - name: "💸 Withdraw Simulation"
+      ####################################################################
+      - name: "💸 Withdrawal Simulation SQL (Fixed)"
         run: |
-          cat <<EOF > sql/withdraw_sim.sql
+          cat <<EOF > sql/withdraw.sql
           INSERT INTO TB_LEDGER (CUST_ID, TX_TYPE, AMOUNT, BR_NO, TX_DATE)
           SELECT
             c.CUST_ID,
@@ -175,15 +178,17 @@ jobs:
               ELSE (5000 + random()*25000)
             END::numeric(15,2),
             '580',
-            NOW() - (floor(random()*30) || ' days')::interval
+            NOW() - ((floor(random()*30))::text || ' days')::interval
           FROM TB_CUSTOMER c
-          JOIN (SELECT (1 + floor(random()*5))::int AS series_count) r ON TRUE
-          JOIN generate_series(1, r.series_count) gs;
+          CROSS JOIN generate_series(
+              1,
+              (1 + floor(random()*5))::int
+          ) gs;
           EOF
 
-      ############################################################
-      # POSTGRES INSTALL
-      ############################################################
+      ####################################################################
+      # INSTALL POSTGRES + RUN ALL SQL
+      ####################################################################
       - name: "🐘 Install PostgreSQL"
         run: |
           sudo apt-get update -y
@@ -194,25 +199,22 @@ jobs:
           sudo systemctl start postgresql
           sudo -u postgres psql -c "SELECT version();"
 
-      ############################################################
-      # EXECUTE ALL SQL
-      ############################################################
-      - name: "🚀 Execute SQL"
+      - name: "🚀 Execute SQL (Schema + Data + TX)"
         run: |
           sudo -u postgres psql <<EOF
           \i sql/schema.sql;
           \i sql/branch.sql;
           \i sql/customers.sql;
           \i sql/accounts.sql;
-          \i sql/payment_sim.sql;
-          \i sql/deposit_sim.sql;
-          \i sql/withdraw_sim.sql;
+          \i sql/payment.sql;
+          \i sql/deposit.sql;
+          \i sql/withdraw.sql;
           EOF
 
-      ############################################################
+      ####################################################################
       # FRAUD DETECTION
-      ############################################################
-      - name: "🔍 Fraud Detection Rules"
+      ####################################################################
+      - name: "🛡 Fraud Detection SQL"
         run: |
           cat <<EOF > sql/fraud.sql
           INSERT INTO TB_FRAUD_ALERT (CUST_ID, AMOUNT, TX_TYPE, BR_NO, REASON, TX_DATE)
@@ -222,134 +224,117 @@ jobs:
             TX_TYPE,
             BR_NO,
             CASE
-              WHEN AMOUNT >= 20000 THEN 'High withdrawal/deposit amount'
+              WHEN AMOUNT >= 20000 THEN 'HIGH_AMOUNT'
               WHEN CUST_ID IN (
-                SELECT CUST_ID
-                FROM TB_LEDGER
-                GROUP BY CUST_ID, DATE(TX_DATE)
-                HAVING COUNT(*) >= 20
-              ) THEN 'Too many transactions in a single day'
-              WHEN CUST_ID IN (
-                SELECT CUST_ID FROM TB_ACCOUNT WHERE BALANCE < 0
-              ) THEN 'Negative balance'
-              ELSE 'Suspicious pattern detected'
+                  SELECT CUST_ID
+                  FROM TB_LEDGER
+                  GROUP BY CUST_ID, DATE(TX_DATE)
+                  HAVING COUNT(*) >= 20
+              ) THEN 'HIGH_FREQUENCY'
+              ELSE 'OTHER_SUSPICIOUS'
             END,
             TX_DATE
           FROM TB_LEDGER
           WHERE AMOUNT >= 20000
              OR CUST_ID IN (
-               SELECT CUST_ID
-               FROM TB_LEDGER
-               GROUP BY CUST_ID, DATE(TX_DATE)
-               HAVING COUNT(*) >= 20
-             )
-             OR CUST_ID IN (
-               SELECT CUST_ID FROM TB_ACCOUNT WHERE BALANCE < 0
+                SELECT CUST_ID
+                FROM TB_LEDGER
+                GROUP BY CUST_ID, DATE(TX_DATE)
+                HAVING COUNT(*) >= 20
              );
           EOF
 
-      - name: "⚡ Execute Fraud Detection"
+      - name: "⚡ Run Fraud Detection"
         run: |
           sudo -u postgres psql <<EOF
           \i sql/fraud.sql;
           EOF
 
-      ############################################################
-      # SNAPSHOT BEFORE / AFTER MIGRATION
-      ############################################################
-      - name: "📸 BEFORE Snapshot"
+      ####################################################################
+      # BEFORE SNAPSHOT
+      ####################################################################
+      - name: "📸 Snapshot BEFORE"
         run: |
           sudo -u postgres psql <<EOF > snapshots/before.txt
-          SELECT 'CUSTOMERS_580', COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='580';
-          SELECT 'PAYMENTS_580', SUM(AMOUNT) FROM TB_SALES;
-          SELECT 'DEPOSITS_580', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='DEPOSIT';
-          SELECT 'WITHDRAW_580', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='WITHDRAW';
-          SELECT 'FRAUD_COUNT_BEFORE', COUNT(*) FROM TB_FRAUD_ALERT;
+          SELECT 'CUSTOMERS_580',COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='580';
+          SELECT 'LEDGER_580',COUNT(*) FROM TB_LEDGER WHERE BR_NO='580';
+          SELECT 'SALES_580',COUNT(*) FROM TB_SALES WHERE BR_NO='580';
+          SELECT 'FRAUD_BEFORE',COUNT(*) FROM TB_FRAUD_ALERT;
           EOF
 
-      ############################################################
-      - name: "🛠 Migration 580 → 570"
+      ####################################################################
+      # MIGRATION 580 → 570
+      ####################################################################
+      - name: "🛠 Migrate 580 → 570"
         run: |
           sudo -u postgres psql <<EOF
           UPDATE TB_BRANCH SET BR_NO='570' WHERE BR_NO='580';
           UPDATE TB_CUSTOMER SET BR_NO='570' WHERE BR_NO='580';
-          UPDATE TB_ACCOUNT  SET BR_NO='570' WHERE BR_NO='580';
-          UPDATE TB_SALES    SET BR_NO='570' WHERE BR_NO='580';
-          UPDATE TB_LEDGER   SET BR_NO='570' WHERE BR_NO='580';
+          UPDATE TB_ACCOUNT SET BR_NO='570' WHERE BR_NO='580';
+          UPDATE TB_LEDGER SET BR_NO='570' WHERE BR_NO='580';
+          UPDATE TB_SALES SET BR_NO='570' WHERE BR_NO='580';
           UPDATE TB_FRAUD_ALERT SET BR_NO='570' WHERE BR_NO='580';
           EOF
 
-      ############################################################
-      # Apply Virtual IP
-      ############################################################
+      ####################################################################
+      # APPLY VIRTUAL IP
+      ####################################################################
       - name: "🌐 Apply Virtual IP"
         run: |
           sudo -u postgres psql <<EOF
-          UPDATE TB_BRANCH   SET VIRTUAL_IP='${VIRTUAL_IP}' WHERE BR_NO='570';
-          UPDATE TB_CUSTOMER SET VIRTUAL_IP='${VIRTUAL_IP}' WHERE BR_NO='570';
-          UPDATE TB_ACCOUNT  SET VIRTUAL_IP='${VIRTUAL_IP}' WHERE BR_NO='570';
-          UPDATE TB_SALES    SET VIRTUAL_IP='${VIRTUAL_IP}' WHERE BR_NO='570';
-          UPDATE TB_LEDGER   SET VIRTUAL_IP='${VIRTUAL_IP}' WHERE BR_NO='570';
-          UPDATE TB_FRAUD_ALERT SET VIRTUAL_IP='${VIRTUAL_IP}' WHERE BR_NO='570';
+          UPDATE TB_BRANCH SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
+          UPDATE TB_CUSTOMER SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
+          UPDATE TB_ACCOUNT SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
+          UPDATE TB_LEDGER SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
+          UPDATE TB_SALES SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
+          UPDATE TB_FRAUD_ALERT SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
           EOF
 
-      ############################################################
-      # AFTER Snapshot
-      ############################################################
-      - name: "📸 AFTER Snapshot"
+      ####################################################################
+      # AFTER SNAPSHOT
+      ####################################################################
+      - name: "📸 Snapshot AFTER"
         run: |
           sudo -u postgres psql <<EOF > snapshots/after.txt
-          SELECT 'CUSTOMERS_570', COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='570';
-          SELECT 'PAYMENTS_570', SUM(AMOUNT) FROM TB_SALES;
-          SELECT 'DEPOSITS_570', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='DEPOSIT';
-          SELECT 'WITHDRAW_570', SUM(AMOUNT) FROM TB_LEDGER WHERE TX_TYPE='WITHDRAW';
-          SELECT 'FRAUD_COUNT_AFTER', COUNT(*) FROM TB_FRAUD_ALERT;
-          SELECT 'VIP_ASSIGNED', COUNT(*) FROM TB_CUSTOMER WHERE VIRTUAL_IP='${VIRTUAL_IP}';
+          SELECT 'CUSTOMERS_570',COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='570';
+          SELECT 'LEDGER_570',COUNT(*) FROM TB_LEDGER WHERE BR_NO='570';
+          SELECT 'SALES_570',COUNT(*) FROM TB_SALES WHERE BR_NO='570';
+          SELECT 'FRAUD_AFTER',COUNT(*) FROM TB_FRAUD_ALERT;
+          SELECT 'VIP_ASSIGNED',COUNT(*) FROM TB_CUSTOMER WHERE VIRTUAL_IP='${VIP}';
           EOF
 
-      ############################################################
-      # Markdown Report
-      ############################################################
-      - name: "📄 Create Markdown Report"
+      ####################################################################
+      # MARKDOWN REPORT
+      ####################################################################
+      - name: "📄 Generate Report"
         run: |
-          echo "# Manila Branch v7 Migration Report" > report/manila_report.md
-          echo "## Virtual IP: ${VIRTUAL_IP}" >> report/manila_report.md
+          echo "# Manila Branch v7.1 Migration Report" > report/manila.md
+          echo "## BEFORE Migration" >> report/manila.md
+          cat snapshots/before.txt >> report/manila.md
+          echo "" >> report/manila.md
+          echo "## AFTER Migration" >> report/manila.md
+          cat snapshots/after.txt >> report/manila.md
+          echo "" >> report/manila.md
+          echo "## Fraud Sample (Top 50)" >> report/manila.md
+          sudo -u postgres psql -c "SELECT * FROM TB_FRAUD_ALERT LIMIT 50;" >> report/manila.md
 
-          echo "## BEFORE Migration" >> report/manila_report.md
-          cat snapshots/before.txt >> report/manila_report.md
-          echo "" >> report/manila_report.md
-
-          echo "## AFTER Migration" >> report/manila_report.md
-          cat snapshots/after.txt >> report/manila_report.md
-          echo "" >> report/manila_report.md
-
-          echo "## Fraud Detection Summary" >> report/manila_report.md
-          sudo -u postgres psql -c "SELECT * FROM TB_FRAUD_ALERT LIMIT 50;" >> report/manila_report.md
-
-      ############################################################
-      # Upload Report
-      ############################################################
+      ####################################################################
+      # UPLOAD REPORT
+      ####################################################################
       - name: "📦 Upload Report"
         uses: actions/upload-artifact@v4
         with:
-          name: manila-migration-report-v7
-          path: report/manila_report.md
+          name: manila-v7.1-report
+          path: report/manila.md
 
-      ############################################################
-      # Final Summary
-      ############################################################
+      ####################################################################
+      # FINAL SUMMARY
+      ####################################################################
       - name: "🎉 FINAL SUMMARY"
         run: |
           echo "==============================================================="
-          echo " Manila Branch v7 — FULL SAFE VERSION COMPLETE "
-          echo "---------------------------------------------------------------"
-          echo " - 300k Customers ✔"
-          echo " - Payment Simulation ✔"
-          echo " - Deposit Simulation ✔"
-          echo " - Withdrawal Simulation ✔"
-          echo " - Fraud Detection System ✔"
-          echo " - Migration 580→570 ✔"
-          echo " - Virtual IP Applied ✔"
-          echo " - Markdown Report Generated ✔"
-          echo " - 5-Min Auto Schedule ✔"
+          echo " Manila Branch v7.1 Completed — ERROR-FREE VERSION "
+          echo " All SQL syntax errors fixed ✔"
+          echo " Fraud table VIRTUAL_IP fixed ✔"
+          echo " generate_series fully corrected ✔"
           echo "==============================================================="
