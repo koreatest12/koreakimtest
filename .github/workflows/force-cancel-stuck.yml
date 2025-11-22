@@ -1,208 +1,74 @@
-name: "💱 Trade Framework — Infinity LTS (Full EchoOps + Zero Syntax Error)"
+name: "🏦 Manila Bank ULTRA Edition v10 — FULL SYSTEM"
 
 on:
   workflow_dispatch:
-    inputs:
-      action:
-        type: choice
-        options: [create, lock, unlock, execute]
-        default: create
-      trade_id:
-        required: false
-        default: ""
-      amount:
-        required: false
-        default: "0"
 
 jobs:
-  trade_framework:
-    runs-on: ubuntu-latest
+  ###########################################################################
+  # 1) INIT & ECHO ENGINE
+  ###########################################################################
+  init:
+    uses: ./.github/workflows/modules/init.yml
 
-    env:
-      TZ: Asia/Seoul
-      LOG_DIR: workflow_logs
-      JSON_DIR: workflow_logs/json
+  ###########################################################################
+  # 2) SCHEMA (ALL TABLES)
+  ###########################################################################
+  schema:
+    needs: init
+    uses: ./.github/workflows/modules/schema.yml
 
-    steps:
-      ###########################################################################
-      # INIT — ★ 안정 모드 EchoOps
-      ###########################################################################
-      - name: "🔧 Init EchoOps"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
+  ###########################################################################
+  # 3) TRADE ENGINE (수수료 / 취소 / 해외송금)
+  ###########################################################################
+  trade_engine:
+    needs: schema
+    uses: ./.github/workflows/modules/trade-engine.yml
 
-          echo "=== INIT ==="
+  ###########################################################################
+  # 4) FRAUD + AI FRAUD ENGINE
+  ###########################################################################
+  fraud:
+    needs: trade_engine
+    uses: ./.github/workflows/modules/fraud-ai.yml
 
-          mkdir -p "$LOG_DIR"
-          mkdir -p "$JSON_DIR"
+  ###########################################################################
+  # 5) MULTI-DB CLUSTER 구축
+  ###########################################################################
+  multi_db:
+    needs: fraud
+    uses: ./.github/workflows/modules/multi-db.yml
 
-          cat <<'EOS' > /tmp/echo.sh
-#!/usr/bin/env bash
-safe_echo() { echo "▶ $(date +'%Y-%m-%dT%H:%M:%S') » $1"; }
-echo_trace() { echo "TRACE $(date +'%H:%M:%S') » $1"; }
-EOS
+  ###########################################################################
+  # 6) DOCKER MULTI BRANCH CLUSTER (Manila / Seoul / Tokyo / Singapore)
+  ###########################################################################
+  docker_cluster:
+    needs: multi_db
+    uses: ./.github/workflows/modules/docker-cluster.yml
 
-          chmod +x /tmp/echo.sh
-          source /tmp/echo.sh
+  ###########################################################################
+  # 7) MIGRATION (580 → 570) + VIP 적용
+  ###########################################################################
+  migration:
+    needs: docker_cluster
+    uses: ./.github/workflows/modules/migration.yml
 
-          safe_echo "EchoOps Engine Loaded"
-          echo "=== INIT DONE ==="
+  ###########################################################################
+  # 8) SNAPSHOT BEFORE/AFTER
+  ###########################################################################
+  snapshot:
+    needs: migration
+    uses: ./.github/workflows/modules/snapshot.yml
 
-      ###########################################################################
-      # CREATE — ★ 모든 echo 호출 + EOF 안전 버전
-      ###########################################################################
-      - name: "🆕 Create Trade"
-        if: ${{ inputs.action == 'create' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source /tmp/echo.sh
+  ###########################################################################
+  # 9) MARKDOWN REPORT GENERATION
+  ###########################################################################
+  report:
+    needs: snapshot
+    uses: ./.github/workflows/modules/report.yml
 
-          safe_echo "[CREATE] 시작"
-
-          TRADE_ID="T$(date +%s)"
-          AMOUNT="${{ inputs.amount }}"
-
-          echo_trace "TRADE_ID=$TRADE_ID"
-          echo_trace "AMOUNT=$AMOUNT"
-
-          echo "TRADE_ID=$TRADE_ID" >> $GITHUB_ENV
-
-          LOG_FILE="$LOG_DIR/trade_${TRADE_ID}_create.log"
-          JSON_FILE="$JSON_DIR/trade_${TRADE_ID}.json"
-
-          safe_echo "로그 파일 생성: $LOG_FILE"
-          cat <<EOF > "$LOG_FILE"
-[TRADE CREATE]
-Trade ID: $TRADE_ID
-Amount: $AMOUNT
-Status: CREATED
-Timestamp: $(date +'%Y-%m-%d %H:%M:%S')
-EOF
-
-          safe_echo "JSON 생성: $JSON_FILE"
-          cat <<EOF > "$JSON_FILE"
-{
-  "trade_id": "$TRADE_ID",
-  "amount": "$AMOUNT",
-  "action": "create",
-  "status": "created",
-  "timestamp": "$(date +'%Y-%m-%d %H:%M:%S')"
-}
-EOF
-
-          safe_echo "[CREATE] 완료"
-
-      ###########################################################################
-      # LOCK — ★ echo full + null 안전
-      ###########################################################################
-      - name: "🔒 Lock Trade"
-        if: ${{ inputs.action == 'lock' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source /tmp/echo.sh
-
-          safe_echo "[LOCK] 시작"
-
-          TRADE_ID="${{ inputs.trade_id }}"
-          echo_trace "TRADE_ID=$TRADE_ID"
-
-          if [[ -z "$TRADE_ID" ]]; then
-            safe_echo "❌ trade_id 없음"
-            exit 1
-          fi
-
-          LOCK_FILE="$LOG_DIR/trade_${TRADE_ID}.lock"
-          echo_trace "LOCK_FILE=$LOCK_FILE"
-
-          echo "LOCKED" > "$LOCK_FILE"
-          safe_echo "[LOCK] 완료"
-
-      ###########################################################################
-      # UNLOCK — ★ echo full + 파일 체크 안정 버전
-      ###########################################################################
-      - name: "🔓 Unlock Trade"
-        if: ${{ inputs.action == 'unlock' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source /tmp/echo.sh
-
-          safe_echo "[UNLOCK] 시작"
-
-          TRADE_ID="${{ inputs.trade_id }}"
-          echo_trace "TRADE_ID=$TRADE_ID"
-
-          LOCK_FILE="$LOG_DIR/trade_${TRADE_ID}.lock"
-          echo_trace "LOCK_FILE=$LOCK_FILE"
-
-          if [[ ! -f "$LOCK_FILE" ]]; then
-            safe_echo "이미 해제 상태"
-          else
-            rm -f "$LOCK_FILE"
-            safe_echo "해제됨"
-          fi
-
-          safe_echo "[UNLOCK] 완료"
-
-      ###########################################################################
-      # EXECUTE — ★ echo full + EOF 안전 버전
-      ###########################################################################
-      - name: "🚀 Execute Trade"
-        if: ${{ inputs.action == 'execute' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source /tmp/echo.sh
-
-          safe_echo "[EXECUTE] 시작"
-
-          TRADE_ID="${{ inputs.trade_id }}"
-          AMOUNT="${{ inputs.amount }}"
-
-          echo_trace "TRADE_ID=$TRADE_ID"
-          echo_trace "AMOUNT=$AMOUNT"
-
-          LOCK_FILE="$LOG_DIR/trade_${TRADE_ID}.lock"
-
-          if [[ -f "$LOCK_FILE" ]]; then
-            safe_echo "❌ LOCK 상태 — 실행 불가"
-            exit 1
-          fi
-
-          LOG_FILE="$LOG_DIR/trade_${TRADE_ID}_execute.log"
-          JSON_FILE="$JSON_DIR/trade_${TRADE_ID}.json"
-
-          safe_echo "로그 생성: $LOG_FILE"
-          cat <<EOF > "$LOG_FILE"
-[TRADE EXECUTE]
-Trade ID: $TRADE_ID
-Amount: $AMOUNT
-Executed: OK
-Timestamp: $(date +'%Y-%m-%d %H:%M:%S')
-EOF
-
-          safe_echo "JSON 갱신: $JSON_FILE"
-          cat <<EOF > "$JSON_FILE"
-{
-  "trade_id": "$TRADE_ID",
-  "amount": "$AMOUNT",
-  "action": "execute",
-  "status": "executed",
-  "timestamp": "$(date +'%Y-%m-%d %H:%M:%S')"
-}
-EOF
-
-          safe_echo "[EXECUTE] 완료"
-
-      ###########################################################################
-      # LOG UPLOAD
-      ###########################################################################
-      - name: "📤 Upload Logs"
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trade-framework-infinity-logs
-          path: workflow_logs
+  ###########################################################################
+  # 10) FINAL SUMMARY (모든 기능 성공)
+  ###########################################################################
+  finalize:
+    needs: report
+    uses: ./.github/workflows/modules/finalize.yml
