@@ -1,10 +1,10 @@
-name: "🇵🇭 Manila Shinhan Bank Branch Migration — 580 → 570 (SAFE)"
+name: "🇵🇭 Manila Shinhan Branch — SQL + FakeDB + Customer/Branch Gen + 580→570 Migration (SAFE)"
 
 on:
   workflow_dispatch:
 
 jobs:
-  branch_migration:
+  manila_branch_full:
     runs-on: ubuntu-latest
 
     env:
@@ -12,64 +12,121 @@ jobs:
 
     steps:
 
-      ############################################################
-      # 0) EchoOps / SafeEcho 초기 준비
-      ############################################################
+      ###################################################################
+      # 0) EchoOps 초기화
+      ###################################################################
       - name: "♻ Init EchoOps"
         run: |
           set -Eeuo pipefail
-          echo "$E Initializing EchoOps..."
-          mkdir -p logs snapshots output
-          echo "$E EchoOps ready."
+          echo "$E Initializing workflow..."
+          mkdir -p sql output logs snapshots dr_backup
 
-      ############################################################
-      # 1) 마닐라 신한은행 지점 정보 생성
-      ############################################################
-      - name: "🏦 Generate Manila Branch Metadata"
+      ###################################################################
+      # 1) Manila Branch 기본 정보 SQL 생성
+      ###################################################################
+      - name: "🏦 Generate Manila Branch Base SQL"
         run: |
           set -Eeuo pipefail
-          echo "$E Generating Manila branch info..."
+          echo "$E Generating branch SQL..."
 
-          cat <<EOF > output/manila_branch.yml
-          country: "PHILIPPINES"
-          city: "MANILA"
-          branch_name: "SHINHAN BANK MANILA"
-          old_branch_no: "580"
-          new_branch_no: "570"
-          created_at: "$(date '+%Y-%m-%d %H:%M:%S')"
+          cat <<EOF > sql/create_branch_table.sql
+          -- Branch Table (Oracle/PG Compatible)
+          CREATE TABLE IF NOT EXISTS TB_BRANCH (
+            BR_NO        VARCHAR(10) PRIMARY KEY,
+            BR_NAME      VARCHAR(200),
+            CITY         VARCHAR(100),
+            COUNTRY      VARCHAR(100),
+            ADDRESS      VARCHAR(300),
+            OPEN_DATE    DATE DEFAULT CURRENT_DATE
+          );
           EOF
 
-          cat output/manila_branch.yml
-
-      ############################################################
-      # 2) FK 관계 모의 검사 (SAFE)
-      ############################################################
-      - name: "🔍 FK Dependency Pre-Check"
-        run: |
-          set -Eeuo pipefail
-          echo "$E Checking FK dependencies..."
-          cat <<EOF > output/fk_dependencies.txt
-          TB_BRANCH(BR_NO)
-          TB_SALES(BR_NO)
-          TB_ACCOUNT(BR_NO)
-          TB_HISTORY(BR_NO)
+          cat <<EOF > sql/insert_manila_branch.sql
+          -- Manila Shinhan Bank Branch Insert
+          INSERT INTO TB_BRANCH (BR_NO, BR_NAME, CITY, COUNTRY, ADDRESS)
+          VALUES ('580', 'SHINHAN BANK MANILA', 'MANILA', 'PHILIPPINES', '123 MANILA ROAD');
           EOF
-          cat output/fk_dependencies.txt
 
-      ############################################################
-      # 3) Pre-Snapshot (Before Migration)
-      ############################################################
-      - name: "📸 Create Pre-Migration Snapshot (Mock)"
+          cat <<EOF > sql/update_branch_580_to_570.sql
+          -- Branch Code Migration 580 → 570
+          UPDATE TB_BRANCH SET BR_NO='570'
+           WHERE BR_NO='580';
+          EOF
+
+          ls -R sql
+
+      ###################################################################
+      # 2) 고객/거래/점포 가상 정보 테이블 SQL 생성
+      ###################################################################
+      - name: "👥 Generate Customer / Account / Sales SQL"
         run: |
           set -Eeuo pipefail
-          echo "$E Creating pre-snapshot..."
-          echo "ROWCOUNT_580=300000" > snapshots/pre_snapshot.txt
-          echo "ROWCOUNT_570=0" >> snapshots/pre_snapshot.txt
-          cat snapshots/pre_snapshot.txt
+          echo "$E Generating customer/account/sales tables..."
 
-      ############################################################
-      # 4) PostgreSQL Lock Simulation — SAFE
-      ############################################################
+          cat <<EOF > sql/create_customer_tables.sql
+          -- Customer Table
+          CREATE TABLE IF NOT EXISTS TB_CUSTOMER (
+            CUST_ID      BIGSERIAL PRIMARY KEY,
+            CUST_NAME    VARCHAR(200),
+            PHONE        VARCHAR(50),
+            EMAIL        VARCHAR(300),
+            BR_NO        VARCHAR(10)
+          );
+
+          -- Account Table
+          CREATE TABLE IF NOT EXISTS TB_ACCOUNT (
+            ACC_ID       BIGSERIAL PRIMARY KEY,
+            CUST_ID      BIGINT,
+            BALANCE      NUMERIC(15,2),
+            BR_NO        VARCHAR(10)
+          );
+
+          -- Sales/Transaction Table
+          CREATE TABLE IF NOT EXISTS TB_SALES (
+            TX_ID        BIGSERIAL PRIMARY KEY,
+            CUST_ID      BIGINT,
+            AMOUNT       NUMERIC(15,2),
+            BR_NO        VARCHAR(10),
+            TX_DATE      DATE DEFAULT CURRENT_DATE
+          );
+          EOF
+
+          ls -R sql
+
+      ###################################################################
+      # 3) Manila 고객/거래 데이터 가상 생성 SQL
+      ###################################################################
+      - name: "🧬 Generate Fake Manila Customer Data SQL"
+        run: |
+          set -Eeuo pipefail
+          echo "$E Generating fake Manila customer data..."
+
+          cat <<EOF > sql/insert_fake_customers.sql
+          -- Generate 5,000 Fake Manila Customers
+          INSERT INTO TB_CUSTOMER (CUST_NAME, PHONE, EMAIL, BR_NO)
+          SELECT
+            'Customer_' || generate_series,
+            '639' || (100000000 + floor(random() * 900000000)),
+            'customer' || generate_series || '@mail.ph',
+            '580'
+          FROM generate_series(1,5000);
+          EOF
+
+          cat <<EOF > sql/insert_fake_accounts.sql
+          INSERT INTO TB_ACCOUNT (CUST_ID, BALANCE, BR_NO)
+          SELECT CUST_ID, (random() * 50000)::numeric(15,2), '580'
+          FROM TB_CUSTOMER;
+          EOF
+
+          cat <<EOF > sql/insert_fake_sales.sql
+          INSERT INTO TB_SALES (CUST_ID, AMOUNT, BR_NO)
+          SELECT CUST_ID, (random() * 1000)::numeric(15,2), '580'
+          FROM TB_CUSTOMER;
+          EOF
+
+      ###################################################################
+      # 4) PostgreSQL DB 준비
+      ###################################################################
       - name: "🐘 Install PostgreSQL"
         run: |
           sudo apt-get update -y
@@ -80,106 +137,100 @@ jobs:
           sudo systemctl start postgresql
           sudo -u postgres psql -c "SELECT version();"
 
-      - name: "📂 Create branch table for simulation"
+      ###################################################################
+      # 5) 모든 SQL 실행 (테이블 생성 + 데이터 생성)
+      ###################################################################
+      - name: "📄 Execute All SQL (Safe Load)"
         run: |
           sudo -u postgres psql <<EOF
-          DROP TABLE IF EXISTS branch;
-          CREATE TABLE branch (
-            br_no VARCHAR(10),
-            data TEXT
-          );
-          INSERT INTO branch
-          SELECT '580', md5(random()::text)
-          FROM generate_series(1, 20000);
+          \i sql/create_branch_table.sql;
+          \i sql/create_customer_tables.sql;
+          \i sql/insert_manila_branch.sql;
+          \i sql/insert_fake_customers.sql;
+          \i sql/insert_fake_accounts.sql;
+          \i sql/insert_fake_sales.sql;
           EOF
 
-      - name: "🔒 Create Lock (Session A)"
-        run: |
-          echo "BEGIN; UPDATE branch SET data='LOCKED';" > /tmp/block.sql
-          sudo -u postgres psql -f /tmp/block.sql &
-          sleep 1
+          echo "$E All SQL executed."
 
-      - name: "⚠ Attempt Update 580 → 570 (Session B)"
-        continue-on-error: true
+      ###################################################################
+      # 6) Snapshot Before Migration
+      ###################################################################
+      - name: "📸 Pre-Migration Snapshot"
         run: |
-          echo "UPDATE branch SET br_no='570' WHERE br_no='580';" > /tmp/update.sql
-          sudo -u postgres psql -f /tmp/update.sql || true
-          echo "$E Lock simulation (safe) completed."
+          sudo -u postgres psql <<EOF > snapshots/pre_snapshot.txt
+          SELECT 'COUNT_BRANCH_580', COUNT(*) FROM TB_BRANCH WHERE BR_NO='580';
+          SELECT 'CUSTOMERS_580', COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='580';
+          SELECT 'ACCOUNTS_580', COUNT(*) FROM TB_ACCOUNT WHERE BR_NO='580';
+          SELECT 'SALES_580', COUNT(*) FROM TB_SALES WHERE BR_NO='580';
+          EOF
 
-      - name: "🔎 Show Lock State"
+          cat snapshots/pre_snapshot.txt
+
+      ###################################################################
+      # 7) 마닐라 지점코드 변경 (580 → 570)
+      ###################################################################
+      - name: "🛠 Execute Branch Migration 580 → 570"
         run: |
           sudo -u postgres psql <<EOF
-          SELECT pid, wait_event, wait_event_type, state, query
-          FROM pg_stat_activity
-          WHERE state!='idle';
+          \i sql/update_branch_580_to_570.sql;
+
+          UPDATE TB_CUSTOMER SET BR_NO='570' WHERE BR_NO='580';
+          UPDATE TB_ACCOUNT SET BR_NO='570' WHERE BR_NO='580';
+          UPDATE TB_SALES SET BR_NO='570' WHERE BR_NO='580';
           EOF
 
-      ############################################################
-      # 5) 실제 580 → 570 변경 (Safe Mock)
-      ############################################################
-      - name: "🛠 Execute Branch Code Migration"
-        run: |
-          echo "$E Executing migration 580 → 570 (safe mock)..."
+          echo "$E Migration completed."
 
-          cat <<EOF > output/migration_result.txt
-          STATUS: SUCCESS
-          UPDATED_ROWS: 300000
-          OLD_BRANCH: 580
-          NEW_BRANCH: 570
+      ###################################################################
+      # 8) Snapshot After Migration
+      ###################################################################
+      - name: "📸 Post-Migration Snapshot"
+        run: |
+          sudo -u postgres psql <<EOF > snapshots/post_snapshot.txt
+          SELECT 'COUNT_BRANCH_570', COUNT(*) FROM TB_BRANCH WHERE BR_NO='570';
+          SELECT 'CUSTOMERS_570', COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='570';
+          SELECT 'ACCOUNTS_570', COUNT(*) FROM TB_ACCOUNT WHERE BR_NO='570';
+          SELECT 'SALES_570', COUNT(*) FROM TB_SALES WHERE BR_NO='570';
           EOF
 
-          cat output/migration_result.txt
-
-      ############################################################
-      # 6) After Snapshot (Post Migration)
-      ############################################################
-      - name: "📸 Create Post-Migration Snapshot (Mock)"
-        run: |
-          echo "ROWCOUNT_580=0" > snapshots/post_snapshot.txt
-          echo "ROWCOUNT_570=300000" >> snapshots/post_snapshot.txt
           cat snapshots/post_snapshot.txt
 
-      ############################################################
-      # 7) Rollback SQL 자동 생성
-      ############################################################
+      ###################################################################
+      # 9) Rollback SQL 자동 생성
+      ###################################################################
       - name: "↩ Generate Rollback SQL"
         run: |
-          set -Eeuo pipefail
-          echo "$E Generating rollback SQL..."
-
-          cat <<EOF > output/rollback_580.sql
-          -- Rollback: Return branch code from 570 → 580
+          cat <<EOF > output/rollback_manila.sql
+          -- Rollback Manila Migration (570 → 580)
           UPDATE TB_BRANCH SET BR_NO='580' WHERE BR_NO='570';
-          UPDATE TB_SALES SET BR_NO='580' WHERE BR_NO='570';
+          UPDATE TB_CUSTOMER SET BR_NO='580' WHERE BR_NO='570';
           UPDATE TB_ACCOUNT SET BR_NO='580' WHERE BR_NO='570';
-          UPDATE TB_HISTORY SET BR_NO='580' WHERE BR_NO='570';
+          UPDATE TB_SALES SET BR_NO='580' WHERE BR_NO='570';
           EOF
 
-          cat output/rollback_580.sql
+          cat output/rollback_manila.sql
 
-      ############################################################
-      # 8) DR Snapshot 저장(Mock)
-      ############################################################
-      - name: "📦 DR Snapshot"
+      ###################################################################
+      # 10) DR Snapshot 백업(Mock)
+      ###################################################################
+      - name: "📦 DR Snapshot Backup"
         run: |
-          cp -r snapshots DR_backup
-          echo "$E DR Snapshot backup ready."
-          ls -R DR_backup
+          cp -r snapshots dr_backup/
+          ls -R dr_backup
 
-      ############################################################
-      # 9) 최종 Summary
-      ############################################################
-      - name: "🎉 Summary"
+      ###################################################################
+      # 11) Summary
+      ###################################################################
+      - name: "🎉 Final Summary"
         run: |
           echo "==============================================================="
-          echo " Manila Shinhan Branch Migration Completed (SAFE MODE) "
+          echo " MANILA SHINHAN BRANCH MIGRATION COMPLETE (SAFE MODE) "
           echo "---------------------------------------------------------------"
-          echo " - FK 검사 ✔"
-          echo " - Pre-Snapshot ✔"
-          echo " - Lock Simulation ✔"
-          echo " - Migration 580 → 570 ✔"
+          echo " - Branch/Customer/Account/Sales SQL 생성 ✔"
+          echo " - Manila 가상 고객 5,000명 생성 ✔"
+          echo " - Branch 580 → 570 Migration ✔"
+          echo " - Snapshot Before/After ✔"
           echo " - Rollback SQL 생성 ✔"
           echo " - DR Snapshot ✔"
-          echo "==============================================================="
-          echo " SUCCESS (SAFE MODE FINISHED) "
           echo "==============================================================="
