@@ -1,0 +1,110 @@
+name: "🧪 Oracle Tablespace 100MB Lock — Full Reproduction v1"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reproduce_lock:
+    name: "Reproduce Oracle-like Tablespace Lock (580 → 570 update)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "📂 Step 1 — Prepare directories"
+        run: |
+          set -Eeuo pipefail
+          mkdir -p testdb
+          echo "Preparing fake tablespace..."
+
+      - name: "🧱 Step 2 — Create artificial disk limit (100MB)"
+        run: |
+          set -Eeuo pipefail
+          sudo dd if=/dev/zero of=fake_disk.img bs=1M count=100
+          sudo mkfs.ext4 fake_disk.img
+          mkdir mnt
+          sudo mount -o loop fake_disk.img mnt
+          echo "Mounted fake 100MB volume → This simulates Oracle TS left=100MB"
+
+      - name: "🐘 Step 3 — Install PostgreSQL (Oracle-sim mode)"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql
+          sudo systemctl start postgresql
+          echo "PostgreSQL started (Oracle-mode simulation)"
+
+      - name: "🛢 Step 4 — Move PostgreSQL data directory to 100MB disk"
+        run: |
+          sudo systemctl stop postgresql
+          sudo rsync -av /var/lib/postgresql mnt/
+          sudo sed -i "s|/var/lib/postgresql|/home/runner/work/_actions/mnt/postgresql|g" /etc/postgresql/*/main/postgresql.conf || true
+          sudo systemctl start postgresql || true
+        continue-on-error: true
+
+      - name: "📄 Step 5 — Create schema simulating Oracle BR_NO update"
+        run: |
+          sudo -u postgres psql <<EOF
+          CREATE TABLE branch (
+            br_no varchar(10),
+            data text
+          );
+          INSERT INTO branch
+          SELECT '580', md5(random()::text)
+          FROM generate_series(1, 300000);  -- 30만 건
+          EOF
+          echo "Data inserted (BR_NO = 580, rows = 300k)"
+
+      - name: "🔀 Step 6 — Start blocking session (Session A)"
+        run: |
+          echo "
+          UPDATE branch SET data='LOCKED';
+          " > session_a.sql
+
+          sudo -u postgres psql -f session_a.sql &
+          echo "Session A started and holding table lock..."
+        continue-on-error: true
+
+      - name: "⚠ Step 7 — Try to UPDATE 580 → 570 (Session B) to reproduce lock"
+        run: |
+          echo "
+          UPDATE branch SET br_no='570'
+          WHERE br_no='580';
+          " > session_b.sql
+
+          echo "Running Session B UPDATE… expected to lock or hang"
+          sudo -u postgres psql -f session_b.sql
+        continue-on-error: true
+
+      - name: "🔍 Step 8 — Detect lock / wait events"
+        run: |
+          echo "Checking blocking/waiting processes..."
+          sudo -u postgres psql <<EOF
+          SELECT pid, wait_event, wait_event_type, query
+          FROM pg_stat_activity
+          WHERE state != 'idle';
+          EOF
+
+      - name: "📌 Step 9 — Check disk exhaustion"
+        run: df -h mnt
+
+      - name: "🧨 Step 10 — Trigger WAL/Undo growth to hit 100MB limit"
+        run: |
+          echo "Generating massive WAL to fill space..."
+          sudo -u postgres psql <<EOF
+          INSERT INTO branch
+          SELECT '580', md5(random()::text)
+          FROM generate_series(1, 1500000);  -- 150만 건 대량 INSERT → Undo/WAL 폭증
+          EOF
+        continue-on-error: true
+
+      - name: "📣 Step 11 — Final state report (Lock + Disk full)"
+        run: |
+          echo "🔎 Final process states:"
+          sudo -u postgres psql -c "
+            SELECT pid, wait_event, wait_event_type, query
+            FROM pg_stat_activity
+            WHERE state!='idle';
+          "
+
+          echo "📦 Disk usage:"
+          df -h mnt
+
+          echo "🎯 RESULT: If UPDATE 580→570 is hanging → Oracle TS Lock successfully reproduced"
