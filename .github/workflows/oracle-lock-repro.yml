@@ -1,110 +1,138 @@
-name: "🧪 Oracle Tablespace 100MB Lock — Full Reproduction v1"
+name: "🧪 Oracle Tablespace Lock Reproduction — v3 (Stable + Full Echo)"
 
 on:
   workflow_dispatch:
 
 jobs:
-  reproduce_lock:
-    name: "Reproduce Oracle-like Tablespace Lock (580 → 570 update)"
+  reproduce:
     runs-on: ubuntu-latest
 
+    env:
+      ECHO_PREFIX: "▶ $(date '+%Y-%m-%d %H:%M:%S')"
+
     steps:
-      - name: "📂 Step 1 — Prepare directories"
+      - name: "📂 Step 1 — Prepare Env"
         run: |
           set -Eeuo pipefail
-          mkdir -p testdb
-          echo "Preparing fake tablespace..."
+          echo "$ECHO_PREFIX Creating directories..."
+          mkdir -p workdir
+          cd workdir
+          mkdir -p pgdata
+          echo "$ECHO_PREFIX Env prepared."
 
-      - name: "🧱 Step 2 — Create artificial disk limit (100MB)"
+      - name: "💾 Step 2 — Create 100MB Fake Disk"
         run: |
           set -Eeuo pipefail
-          sudo dd if=/dev/zero of=fake_disk.img bs=1M count=100
-          sudo mkfs.ext4 fake_disk.img
-          mkdir mnt
-          sudo mount -o loop fake_disk.img mnt
-          echo "Mounted fake 100MB volume → This simulates Oracle TS left=100MB"
+          echo "$ECHO_PREFIX Creating 100MB disk image..."
+          dd if=/dev/zero of=fake.img bs=1M count=100
+          mkfs.ext4 fake.img
+          mkdir -p mount
+          sudo mount -o loop fake.img mount
+          echo "$ECHO_PREFIX Disk mounted at ./mount with 100MB limit."
 
-      - name: "🐘 Step 3 — Install PostgreSQL (Oracle-sim mode)"
+      - name: "📦 Step 3 — Install PostgreSQL"
         run: |
-          sudo apt-get update
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Installing PostgreSQL..."
+          sudo apt-get update -y
           sudo apt-get install -y postgresql
-          sudo systemctl start postgresql
-          echo "PostgreSQL started (Oracle-mode simulation)"
+          echo "$ECHO_PREFIX PostgreSQL installed."
 
-      - name: "🛢 Step 4 — Move PostgreSQL data directory to 100MB disk"
+      - name: "🔧 Step 4 — Initialize PostgreSQL into 100MB disk"
         run: |
-          sudo systemctl stop postgresql
-          sudo rsync -av /var/lib/postgresql mnt/
-          sudo sed -i "s|/var/lib/postgresql|/home/runner/work/_actions/mnt/postgresql|g" /etc/postgresql/*/main/postgresql.conf || true
-          sudo systemctl start postgresql || true
-        continue-on-error: true
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Initializing new PostgreSQL cluster..."
+          sudo -u postgres /usr/lib/postgresql/*/bin/initdb -D mount/pgdata
+          echo "$ECHO_PREFIX PostgreSQL initialized."
 
-      - name: "📄 Step 5 — Create schema simulating Oracle BR_NO update"
+      - name: "🚀 Step 5 — Start PostgreSQL manually (pg_ctl)"
         run: |
-          sudo -u postgres psql <<EOF
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Starting PostgreSQL manually..."
+          sudo -u postgres /usr/lib/postgresql/*/bin/pg_ctl \
+            -D mount/pgdata \
+            -o "-p 5432" \
+            -l logfile start
+
+          sleep 5
+          echo "$ECHO_PREFIX Checking PostgreSQL..."
+          sudo -u postgres psql -p 5432 -c "SELECT version();" || exit 1
+          echo "$ECHO_PREFIX PostgreSQL is running."
+
+      - name: "📄 Step 6 — Create Schema + Insert 300k rows (BR_NO=580)"
+        run: |
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Creating schema..."
+          sudo -u postgres psql -p 5432 <<EOF
           CREATE TABLE branch (
-            br_no varchar(10),
-            data text
+            br_no VARCHAR(10),
+            data TEXT
           );
           INSERT INTO branch
           SELECT '580', md5(random()::text)
-          FROM generate_series(1, 300000);  -- 30만 건
+          FROM generate_series(1, 300000);
           EOF
-          echo "Data inserted (BR_NO = 580, rows = 300k)"
+          echo "$ECHO_PREFIX Rows inserted."
 
-      - name: "🔀 Step 6 — Start blocking session (Session A)"
+      - name: "🔒 Step 7 — Start Blocking Transaction (Session A)"
         run: |
-          echo "
-          UPDATE branch SET data='LOCKED';
-          " > session_a.sql
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Starting a blocking session..."
+          echo "BEGIN; UPDATE branch SET data='LOCKED';" > block.sql
+          sudo -u postgres psql -p 5432 -f block.sql &
+          sleep 3
+          echo "$ECHO_PREFIX Blocking session active."
 
-          sudo -u postgres psql -f session_a.sql &
-          echo "Session A started and holding table lock..."
-        continue-on-error: true
-
-      - name: "⚠ Step 7 — Try to UPDATE 580 → 570 (Session B) to reproduce lock"
+      - name: "⚠ Step 8 — Attempt UPDATE 580 → 570 (Session B)"
         run: |
-          echo "
-          UPDATE branch SET br_no='570'
-          WHERE br_no='580';
-          " > session_b.sql
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Running UPDATE BR_NO=580 → 570..."
+          echo "UPDATE branch SET br_no='570' WHERE br_no='580';" > update.sql
+          sudo -u postgres psql -p 5432 -f update.sql || true
+          echo "$ECHO_PREFIX UPDATE issued (expected to lock)."
 
-          echo "Running Session B UPDATE… expected to lock or hang"
-          sudo -u postgres psql -f session_b.sql
-        continue-on-error: true
-
-      - name: "🔍 Step 8 — Detect lock / wait events"
+      - name: "🔍 Step 9 — Check Lock Status"
         run: |
-          echo "Checking blocking/waiting processes..."
-          sudo -u postgres psql <<EOF
-          SELECT pid, wait_event, wait_event_type, query
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Checking lock status..."
+          sudo -u postgres psql -p 5432 <<EOF
+          SELECT pid, wait_event, wait_event_type, state, query
           FROM pg_stat_activity
           WHERE state != 'idle';
           EOF
 
-      - name: "📌 Step 9 — Check disk exhaustion"
-        run: df -h mnt
-
-      - name: "🧨 Step 10 — Trigger WAL/Undo growth to hit 100MB limit"
+      - name: "💣 Step 10 — Generate WAL explosion (simulate Undo overflow)"
         run: |
-          echo "Generating massive WAL to fill space..."
-          sudo -u postgres psql <<EOF
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Creating WAL/Undo explosion..."
+          sudo -u postgres psql -p 5432 <<EOF
           INSERT INTO branch
           SELECT '580', md5(random()::text)
-          FROM generate_series(1, 1500000);  -- 150만 건 대량 INSERT → Undo/WAL 폭증
+          FROM generate_series(1, 1200000); -- 120만 건
           EOF
-        continue-on-error: true
+          echo "$ECHO_PREFIX WAL explosion triggered."
 
-      - name: "📣 Step 11 — Final state report (Lock + Disk full)"
+      - name: "📊 Step 11 — Check Disk Full Status"
         run: |
-          echo "🔎 Final process states:"
-          sudo -u postgres psql -c "
-            SELECT pid, wait_event, wait_event_type, query
-            FROM pg_stat_activity
-            WHERE state!='idle';
-          "
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Disk usage:"
+          df -h mount
 
-          echo "📦 Disk usage:"
-          df -h mnt
+      - name: "📣 Step 12 — Final Lock Report"
+        run: |
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Final lock/wait event result:"
+          sudo -u postgres psql -p 5432 <<EOF
+          SELECT pid, wait_event, wait_event_type, state, query
+          FROM pg_stat_activity;
+          EOF
 
-          echo "🎯 RESULT: If UPDATE 580→570 is hanging → Oracle TS Lock successfully reproduced"
+          echo "$ECHO_PREFIX If UPDATE is waiting → Oracle 100MB Tablespace Lock correctly reproduced."
+
+      - name: "🛑 Step 13 — Stop PostgreSQL"
+        run: |
+          set -Eeuo pipefail
+          echo "$ECHO_PREFIX Stopping PostgreSQL..."
+          sudo -u postgres /usr/lib/postgresql/*/bin/pg_ctl \
+            -D mount/pgdata stop
+          echo "$ECHO_PREFIX PostgreSQL stopped."
