@@ -1,62 +1,62 @@
-name: "🇵🇭 Manila Branch v8 — OLD/NEW DB Dual Server + Migration + Fraud + Simulation"
+name: "🇵🇭 Manila Branch v7.1 — FULL ECHO EXPANDED VERSION"
 
 on:
   workflow_dispatch:
 
 jobs:
-  manila_v8:
+  manila_v7_1:
     runs-on: ubuntu-latest
 
     env:
       VIP: "192.68.32.1"
-      OLD_PORT: "5432"
-      NEW_PORT: "5433"
-      OLD_DIR: "/var/lib/postgresql/old_data"
-      NEW_DIR: "/var/lib/postgresql/new_data"
 
     steps:
-
-      ###########################################################################
-      # 0) INIT
-      ###########################################################################
-      - name: "♻ Init directories"
+      #######################################################################
+      # 0) INIT + ECHO HELPERS
+      #######################################################################
+      - name: "♻ Init Environment + Echo Helpers"
+        shell: bash
         run: |
           mkdir -p sql report snapshots logs
 
-      ###########################################################################
-      # 1) Install PostgreSQL binaries only
-      ###########################################################################
-      - name: "🐘 Install PostgreSQL"
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y postgresql
+          cat <<'EOF' > echo.sh
+          safe_echo() {
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+          }
 
-      ###########################################################################
-      # 2) Setup OLD Server Cluster (580 데이터 저장)
-      ###########################################################################
-      - name: "🏦 Create OLD DB Cluster"
-        run: |
-          sudo pg_dropcluster --stop 14 main || true
-          sudo pg_createcluster 14 old --datadir=${OLD_DIR}
-          sudo systemctl start postgresql@14-old
-          sleep 2
-          sudo -u postgres psql -p ${OLD_PORT} -c "SELECT 'OLD DB READY', version();"
+          echo_header() {
+            echo ""
+            echo "==============================================================="
+            echo "🔷 $1"
+            echo "==============================================================="
+          }
 
-      ###########################################################################
-      # 3) Setup NEW Server Cluster (Migration 대상 서버)
-      ###########################################################################
-      - name: "🏦 Create NEW DB Cluster"
-        run: |
-          sudo pg_createcluster 14 new --port=${NEW_PORT} --datadir=${NEW_DIR}
-          sudo systemctl start postgresql@14-new
-          sleep 2
-          sudo -u postgres psql -p ${NEW_PORT} -c "SELECT 'NEW DB READY', version();"
+          echo_step() {
+            echo "➡️  STEP: $1"
+          }
 
-      ###########################################################################
-      # 4) Schema for both OLD and NEW servers
-      ###########################################################################
-      - name: "🗂 Deploy Schema to OLD and NEW"
+          echo_error() {
+            echo "❌ ERROR: $1"
+          }
+
+          echo_ok() {
+            echo "✔ OK: $1"
+          }
+          EOF
+
+          source echo.sh
+          echo_header "INIT COMPLETE"
+          echo_ok "Directory structure prepared"
+
+      #######################################################################
+      # 1) SCHEMA
+      #######################################################################
+      - name: "🏦 Create Schema SQL"
+        shell: bash
         run: |
+          source echo.sh
+          echo_header "Preparing Schema SQL"
+
           cat <<EOF > sql/schema.sql
           CREATE TABLE IF NOT EXISTS TB_BRANCH(
             BR_NO VARCHAR(10) PRIMARY KEY,
@@ -66,7 +66,6 @@ jobs:
             ADDRESS VARCHAR(300),
             VIRTUAL_IP VARCHAR(20)
           );
-
           CREATE TABLE IF NOT EXISTS TB_CUSTOMER(
             CUST_ID BIGSERIAL PRIMARY KEY,
             CUST_NAME VARCHAR(200),
@@ -75,7 +74,6 @@ jobs:
             BR_NO VARCHAR(10),
             VIRTUAL_IP VARCHAR(20)
           );
-
           CREATE TABLE IF NOT EXISTS TB_ACCOUNT(
             ACC_ID BIGSERIAL PRIMARY KEY,
             CUST_ID BIGINT,
@@ -83,7 +81,6 @@ jobs:
             BR_NO VARCHAR(10),
             VIRTUAL_IP VARCHAR(20)
           );
-
           CREATE TABLE IF NOT EXISTS TB_SALES(
             TX_ID BIGSERIAL PRIMARY KEY,
             CUST_ID BIGINT,
@@ -92,7 +89,6 @@ jobs:
             VIRTUAL_IP VARCHAR(20),
             TX_DATE TIMESTAMP
           );
-
           CREATE TABLE IF NOT EXISTS TB_LEDGER(
             TX_ID BIGSERIAL PRIMARY KEY,
             CUST_ID BIGINT,
@@ -102,7 +98,6 @@ jobs:
             VIRTUAL_IP VARCHAR(20),
             TX_DATE TIMESTAMP
           );
-
           CREATE TABLE IF NOT EXISTS TB_FRAUD_ALERT(
             ALERT_ID BIGSERIAL PRIMARY KEY,
             CUST_ID BIGINT,
@@ -115,107 +110,204 @@ jobs:
           );
           EOF
 
-          sudo -u postgres psql -p ${OLD_PORT} -f sql/schema.sql
-          sudo -u postgres psql -p ${NEW_PORT} -f sql/schema.sql
+          echo_ok "schema.sql created"
 
-      ###########################################################################
-      # 5) INSERT MANILA BRANCH (OLD SERVER)
-      ###########################################################################
-      - name: "🇵🇭 Insert Manila branch (OLD)"
+      #######################################################################
+      # 2) MANILA BRANCH
+      #######################################################################
+      - name: "🇵🇭 Insert Manila Branch"
+        shell: bash
         run: |
-          sudo -u postgres psql -p ${OLD_PORT} <<EOF
-          INSERT INTO TB_BRANCH VALUES (
-            '580','SHINHAN BANK MANILA','MANILA','PHILIPPINES','123 ROAD',NULL
-          );
+          source echo.sh
+          echo_header "Creating Manila Branch"
+
+          cat <<EOF > sql/branch.sql
+          INSERT INTO TB_BRANCH (BR_NO, BR_NAME, CITY, COUNTRY, ADDRESS)
+          VALUES ('580','SHINHAN BANK MANILA','MANILA','PHILIPPINES','123 ROAD');
           EOF
 
-      ###########################################################################
-      # 6) Generate 300k Customers on OLD Server
-      ###########################################################################
-      - name: "👥 300k Customers (OLD)"
+          echo_ok "Branch SQL generated"
+
+      #######################################################################
+      # 3) 300,000 CUSTOMERS
+      #######################################################################
+      - name: "👥 Generate 300k Customers"
+        shell: bash
         run: |
-          sudo -u postgres psql -p ${OLD_PORT} <<EOF
-          INSERT INTO TB_CUSTOMER (CUST_NAME,PHONE,EMAIL,BR_NO)
+          source echo.sh
+          echo_header "Generating 300,000 customers"
+
+          cat <<EOF > sql/customers.sql
+          INSERT INTO TB_CUSTOMER (CUST_NAME, PHONE, EMAIL, BR_NO)
           SELECT
-            'Customer_'||g,
-            '639'||(100000000+floor(random()*900000000)),
-            'cust'||g||'@mail.ph',
+            'Customer_' || g,
+            '639' || (100000000 + floor(random()*900000000)),
+            'cust' || g || '@mail.ph',
             '580'
           FROM generate_series(1,300000) g;
           EOF
 
-      ###########################################################################
-      # 7) Accounts for all customers
-      ###########################################################################
-      - name: "💳 Accounts (OLD)"
+          echo_ok "customers.sql generated"
+
+      #######################################################################
+      # 4) ACCOUNTS
+      #######################################################################
+      - name: "💳 Generate Accounts"
+        shell: bash
         run: |
-          sudo -u postgres psql -p ${OLD_PORT} <<EOF
-          INSERT INTO TB_ACCOUNT (CUST_ID,BALANCE,BR_NO)
-          SELECT CUST_ID,(random()*50000)::numeric(15,2),'580'
+          source echo.sh
+          echo_header "Generating account data"
+
+          cat <<EOF > sql/accounts.sql
+          INSERT INTO TB_ACCOUNT (CUST_ID, BALANCE, BR_NO)
+          SELECT CUST_ID, (random()*50000)::numeric(15,2), '580'
           FROM TB_CUSTOMER;
           EOF
 
-      ###########################################################################
-      # 8) Payment / Deposit / Withdrawal Simulations (OLD)
-      ###########################################################################
-      - name: "💸 TRANSACTION SIM (Payment + Deposit + Withdrawal)"
+          echo_ok "accounts.sql generated"
+
+      #######################################################################
+      # 5) PAYMENT — FIXED SYNTAX
+      #######################################################################
+      - name: "💸 Payment Simulation SQL"
+        shell: bash
         run: |
-          # PAYMENT
-          sudo -u postgres psql -p ${OLD_PORT} <<EOF
+          source echo.sh
+          echo_header "Creating Payment Simulation SQL"
+
+          cat <<EOF > sql/payment.sql
           INSERT INTO TB_SALES (CUST_ID, AMOUNT, BR_NO, TX_DATE)
           SELECT
             c.CUST_ID,
-            CASE WHEN random()<0.6 THEN (50+random()*450)
-                 WHEN random()<0.9 THEN (500+random()*4500)
-                 ELSE (5000+random()*45000) END::numeric(15,2),
+            CASE
+              WHEN random() < 0.6 THEN (50 + random()*450)
+              WHEN random() < 0.9 THEN (500 + random()*4500)
+              ELSE (5000 + random()*45000)
+            END::numeric(15,2),
             '580',
-            NOW() - ((floor(random()*30))||' days')::interval
+            NOW() - ((floor(random()*30))::text || ' days')::interval
           FROM TB_CUSTOMER c
-          CROSS JOIN generate_series(1,(1+floor(random()*10))::int);
+          CROSS JOIN generate_series(
+              1,
+              (1 + floor(random()*10))::int
+          ) gs;
           EOF
 
-          # DEPOSIT
-          sudo -u postgres psql -p ${OLD_PORT} <<EOF
-          INSERT INTO TB_LEDGER (CUST_ID,TX_TYPE,AMOUNT,BR_NO,TX_DATE)
-          SELECT
-            c.CUST_ID,'DEPOSIT',
-            CASE WHEN random()<0.6 THEN (100+random()*900)
-                 WHEN random()<0.9 THEN (1000+random()*9000)
-                 ELSE (10000+random()*90000) END::numeric(15,2),
-            '580',
-            NOW() - ((floor(random()*30))||' days')::interval
-          FROM TB_CUSTOMER c
-          CROSS JOIN generate_series(1,(1+floor(random()*5))::int);
-          EOF
+          echo_ok "payment.sql generated"
 
-          # WITHDRAW
-          sudo -u postgres psql -p ${OLD_PORT} <<EOF
-          INSERT INTO TB_LEDGER (CUST_ID,TX_TYPE,AMOUNT,BR_NO,TX_DATE)
-          SELECT
-            c.CUST_ID,'WITHDRAW',
-            CASE WHEN random()<0.7 THEN (50+random()*450)
-                 WHEN random()<0.9 THEN (500+random()*4500)
-                 ELSE (5000+random()*25000) END::numeric(15,2),
-            '580',
-            NOW() - ((floor(random()*30))||' days')::interval
-          FROM TB_CUSTOMER c
-          CROSS JOIN generate_series(1,(1+floor(random()*5))::int);
-          EOF
-
-      ###########################################################################
-      # 9) MIGRATE OLD → NEW SERVER (580 same data)
-      ###########################################################################
-      - name: "🚛 Data Migration OLD → NEW"
+      #######################################################################
+      # 6) DEPOSIT
+      #######################################################################
+      - name: "💰 Deposit Simulation SQL"
+        shell: bash
         run: |
-          sudo -u postgres pg_dump -p ${OLD_PORT} | sudo -u postgres psql -p ${NEW_PORT}
+          source echo.sh
+          echo_header "Creating Deposit Simulation"
 
-      ###########################################################################
-      # 10) FRAUD DETECTION (NEW SERVER)
-      ###########################################################################
-      - name: "🛡 Fraud Detection (NEW)"
+          cat <<EOF > sql/deposit.sql
+          INSERT INTO TB_LEDGER (CUST_ID, TX_TYPE, AMOUNT, BR_NO, TX_DATE)
+          SELECT
+            c.CUST_ID,
+            'DEPOSIT',
+            CASE
+              WHEN random() < 0.6 THEN (100 + random()*900)
+              WHEN random() < 0.9 THEN (1000 + random()*9000)
+              ELSE (10000 + random()*90000)
+            END::numeric(15,2),
+            '580',
+            NOW() - ((floor(random()*30))::text || ' days')::interval
+          FROM TB_CUSTOMER c
+          CROSS JOIN generate_series(
+              1,
+              (1 + floor(random()*5))::int
+          ) gs;
+          EOF
+
+          echo_ok "deposit.sql generated"
+
+      #######################################################################
+      # 7) WITHDRAW
+      #######################################################################
+      - name: "💸 Withdrawal Simulation SQL"
+        shell: bash
         run: |
-          sudo -u postgres psql -p ${NEW_PORT} <<EOF
-          INSERT INTO TB_FRAUD_ALERT (CUST_ID,AMOUNT,TX_TYPE,BR_NO,REASON,TX_DATE)
+          source echo.sh
+          echo_header "Creating Withdraw Simulation"
+
+          cat <<EOF > sql/withdraw.sql
+          INSERT INTO TB_LEDGER (CUST_ID, TX_TYPE, AMOUNT, BR_NO, TX_DATE)
+          SELECT
+            c.CUST_ID,
+            'WITHDRAW',
+            CASE
+              WHEN random() < 0.7 THEN (50 + random()*450)
+              WHEN random() < 0.9 THEN (500 + random()*4500)
+              ELSE (5000 + random()*25000)
+            END::numeric(15,2),
+            '580',
+            NOW() - ((floor(random()*30))::text || ' days')::interval
+          FROM TB_CUSTOMER c
+          CROSS JOIN generate_series(
+              1,
+              (1 + floor(random()*5))::int
+          ) gs;
+          EOF
+
+          echo_ok "withdraw.sql generated"
+
+      #######################################################################
+      # 8) INSTALL POSTGRES
+      #######################################################################
+      - name: "🐘 Install PostgreSQL"
+        shell: bash
+        run: |
+          source echo.sh
+          echo_header "Installing PostgreSQL"
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql
+          echo_ok "PostgreSQL installed"
+
+      - name: "🚀 Start PostgreSQL"
+        shell: bash
+        run: |
+          source echo.sh
+          echo_header "Starting PostgreSQL"
+          sudo systemctl start postgresql
+          sudo -u postgres psql -c "SELECT version();"
+          echo_ok "PostgreSQL running"
+
+      #######################################################################
+      # 9) RUN ALL SQL
+      #######################################################################
+      - name: "🚀 Execute All SQL"
+        shell: bash
+        run: |
+          source echo.sh
+          echo_header "Executing All SQL Scripts"
+
+          sudo -u postgres psql <<EOF
+          \i sql/schema.sql;
+          \i sql/branch.sql;
+          \i sql/customers.sql;
+          \i sql/accounts.sql;
+          \i sql/payment.sql;
+          \i sql/deposit.sql;
+          \i sql/withdraw.sql;
+          EOF
+
+          echo_ok "All SQL scripts executed successfully"
+
+      #######################################################################
+      # 10) FRAUD DETECTION
+      #######################################################################
+      - name: "🛡 Fraud Detection SQL"
+        shell: bash
+        run: |
+          source echo.sh
+          echo_header "Creating Fraud Detection SQL"
+
+          cat <<EOF > sql/fraud.sql
+          INSERT INTO TB_FRAUD_ALERT (CUST_ID, AMOUNT, TX_TYPE, BR_NO, REASON, TX_DATE)
           SELECT
             CUST_ID,
             AMOUNT,
@@ -224,46 +316,64 @@ jobs:
             CASE
               WHEN AMOUNT >= 20000 THEN 'HIGH_AMOUNT'
               WHEN CUST_ID IN (
-                SELECT CUST_ID FROM TB_LEDGER
-                GROUP BY CUST_ID,DATE(TX_DATE)
-                HAVING COUNT(*)>=20
+                  SELECT CUST_ID
+                  FROM TB_LEDGER
+                  GROUP BY CUST_ID, DATE(TX_DATE)
+                  HAVING COUNT(*) >= 20
               ) THEN 'HIGH_FREQUENCY'
-              ELSE 'OTHER'
+              ELSE 'OTHER_SUSPICIOUS'
             END,
             TX_DATE
           FROM TB_LEDGER
           WHERE AMOUNT >= 20000
              OR CUST_ID IN (
-                SELECT CUST_ID FROM TB_LEDGER
-                GROUP BY CUST_ID,DATE(TX_DATE)
-                HAVING COUNT(*)>=20
+                SELECT CUST_ID
+                FROM TB_LEDGER
+                GROUP BY CUST_ID, DATE(TX_DATE)
+                HAVING COUNT(*) >= 20
              );
           EOF
 
-      ###########################################################################
-      # 11) BEFORE SNAPSHOT (OLD & NEW)
-      ###########################################################################
+          echo_ok "fraud.sql created"
+
+      - name: "⚡ Run Fraud Detection"
+        shell: bash
+        run: |
+          source echo.sh
+          echo_header "Running Fraud Detection"
+          sudo -u postgres psql <<EOF
+          \i sql/fraud.sql;
+          EOF
+          echo_ok "Fraud detection completed"
+
+      #######################################################################
+      # 11) SNAPSHOT BEFORE
+      #######################################################################
       - name: "📸 Snapshot BEFORE"
+        shell: bash
         run: |
-          sudo -u postgres psql -p ${OLD_PORT} <<EOF > snapshots/before_old.txt
-          SELECT 'CUSTOMERS',COUNT(*) FROM TB_CUSTOMER;
-          SELECT 'SALES',COUNT(*) FROM TB_SALES;
-          SELECT 'LEDGER',COUNT(*) FROM TB_LEDGER;
+          source echo.sh
+          echo_header "Snapshot BEFORE Migration"
+
+          sudo -u postgres psql <<EOF > snapshots/before.txt
+          SELECT 'CUSTOMERS_580',COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='580';
+          SELECT 'LEDGER_580',COUNT(*) FROM TB_LEDGER WHERE BR_NO='580';
+          SELECT 'SALES_580',COUNT(*) FROM TB_SALES WHERE BR_NO='580';
+          SELECT 'FRAUD_BEFORE',COUNT(*) FROM TB_FRAUD_ALERT;
           EOF
 
-          sudo -u postgres psql -p ${NEW_PORT} <<EOF > snapshots/before_new.txt
-          SELECT 'CUSTOMERS',COUNT(*) FROM TB_CUSTOMER;
-          SELECT 'SALES',COUNT(*) FROM TB_SALES;
-          SELECT 'LEDGER',COUNT(*) FROM TB_LEDGER;
-          SELECT 'FRAUD',COUNT(*) FROM TB_FRAUD_ALERT;
-          EOF
+          echo_ok "Snapshot before created"
 
-      ###########################################################################
-      # 12) Migration 580 → 570 ON NEW SERVER ONLY
-      ###########################################################################
-      - name: "🛠 580 → 570 Migration (NEW server)"
+      #######################################################################
+      # 12) MIGRATION 580 → 570
+      #######################################################################
+      - name: "🛠 Migrate 580 → 570"
+        shell: bash
         run: |
-          sudo -u postgres psql -p ${NEW_PORT} <<EOF
+          source echo.sh
+          echo_header "Migrating 580 → 570"
+
+          sudo -u postgres psql <<EOF
           UPDATE TB_BRANCH SET BR_NO='570' WHERE BR_NO='580';
           UPDATE TB_CUSTOMER SET BR_NO='570' WHERE BR_NO='580';
           UPDATE TB_ACCOUNT SET BR_NO='570' WHERE BR_NO='580';
@@ -272,12 +382,18 @@ jobs:
           UPDATE TB_FRAUD_ALERT SET BR_NO='570' WHERE BR_NO='580';
           EOF
 
-      ###########################################################################
-      # 13) Apply Virtual IP (NEW SERVER)
-      ###########################################################################
-      - name: "🌐 Apply Virtual IP (NEW)"
+          echo_ok "Migration complete"
+
+      #######################################################################
+      # 13) APPLY VIP
+      #######################################################################
+      - name: "🌐 Apply Virtual IP"
+        shell: bash
         run: |
-          sudo -u postgres psql -p ${NEW_PORT} <<EOF
+          source echo.sh
+          echo_header "Applying Virtual IP"
+
+          sudo -u postgres psql <<EOF
           UPDATE TB_BRANCH SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
           UPDATE TB_CUSTOMER SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
           UPDATE TB_ACCOUNT SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
@@ -286,52 +402,67 @@ jobs:
           UPDATE TB_FRAUD_ALERT SET VIRTUAL_IP='${VIP}' WHERE BR_NO='570';
           EOF
 
-      ###########################################################################
-      # 14) AFTER SNAPSHOT (NEW SERVER)
-      ###########################################################################
+          echo_ok "Virtual IP applied"
+
+      #######################################################################
+      # 14) SNAPSHOT AFTER
+      #######################################################################
       - name: "📸 Snapshot AFTER"
+        shell: bash
         run: |
-          sudo -u postgres psql -p ${NEW_PORT} <<EOF > snapshots/after_new.txt
-          SELECT 'CUSTOMERS',COUNT(*) FROM TB_CUSTOMER;
-          SELECT 'LEDGER',COUNT(*) FROM TB_LEDGER;
-          SELECT 'SALES',COUNT(*) FROM TB_SALES;
-          SELECT 'FRAUD',COUNT(*) FROM TB_FRAUD_ALERT;
+          source echo.sh
+          echo_header "Snapshot AFTER Migration"
+
+          sudo -u postgres psql <<EOF > snapshots/after.txt
+          SELECT 'CUSTOMERS_570',COUNT(*) FROM TB_CUSTOMER WHERE BR_NO='570';
+          SELECT 'LEDGER_570',COUNT(*) FROM TB_LEDGER WHERE BR_NO='570';
+          SELECT 'SALES_570',COUNT(*) FROM TB_SALES WHERE BR_NO='570';
+          SELECT 'FRAUD_AFTER',COUNT(*) FROM TB_FRAUD_ALERT;
           SELECT 'VIP_ASSIGNED',COUNT(*) FROM TB_CUSTOMER WHERE VIRTUAL_IP='${VIP}';
           EOF
 
-      ###########################################################################
-      # 15) Markdown Report
-      ###########################################################################
-      - name: "📄 Create Migration Report"
+          echo_ok "Snapshot after created"
+
+      #######################################################################
+      # 15) MARKDOWN REPORT
+      #######################################################################
+      - name: "📄 Generate Markdown Report"
+        shell: bash
         run: |
-          echo "# Manila Branch v8 — OLD/NEW Dual-Server Migration Report" > report/manila_v8.md
+          source echo.sh
+          echo_header "Generating markdown report"
 
-          echo "## OLD Server (Before)" >> report/manila_v8.md
-          cat snapshots/before_old.txt >> report/manila_v8.md
-          echo "" >> report/manila_v8.md
+          echo "# Manila Branch v7.1 Migration Report" > report/manila.md
+          echo "## BEFORE Migration" >> report/manila.md
+          cat snapshots/before.txt >> report/manila.md
+          echo "" >> report/manila.md
+          echo "## AFTER Migration" >> report/manila.md
+          cat snapshots/after.txt >> report/manila.md
+          echo "" >> report/manila.md
+          echo "## FRAUD SAMPLE (TOP 50)" >> report/manila.md
+          sudo -u postgres psql -c "SELECT * FROM TB_FRAUD_ALERT LIMIT 50;" >> report/manila.md
 
-          echo "## NEW Server (Before)" >> report/manila_v8.md
-          cat snapshots/before_new.txt >> report/manila_v8.md
-          echo "" >> report/manila_v8.md
+          echo_ok "Report generated"
 
-          echo "## NEW Server (After Migration)" >> report/manila_v8.md
-          cat snapshots/after_new.txt >> report/manila_v8.md
-          echo "" >> report/manila_v8.md
-
-      ###########################################################################
-      # 16) Upload Report
-      ###########################################################################
+      #######################################################################
+      # 16) UPLOAD REPORT
+      #######################################################################
       - name: "📦 Upload Report"
         uses: actions/upload-artifact@v4
         with:
-          name: manila-v8-report
-          path: report/manila_v8.md
+          name: manila-v7.1-report
+          path: report/manila.md
 
-      ###########################################################################
-      # 17) Done
-      ###########################################################################
-      - name: "🎉 DONE"
+      #######################################################################
+      # 17) FINAL SUMMARY
+      #######################################################################
+      - name: "🎉 FINAL SUMMARY"
+        shell: bash
         run: |
-          echo "==============================================================="
-          echo "Manila Branch v8 COMPLETED — OLD/NEW Dual DB System INSTALLED"
-          echo "==============================================================="
+          source echo.sh
+          echo_header "FINAL SUMMARY"
+          echo_ok "Manila Branch v7.1 (Full Echo Version) completed!"
+          echo_ok "All SQL executed successfully"
+          echo_ok "Migration 580→570 completed"
+          echo_ok "VIP applied: ${VIP}"
+          echo_ok "Fraud detection completed"
