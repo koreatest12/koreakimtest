@@ -127,4 +127,23 @@ jobs:
       - name: End
         shell: bash
         run: |
-          echo "== ALL MOCK AWS SERVICES COMPLETE =="
+          echo "== ALL MOCK AWS SERVICES COMPLETE ==
+
+      - name: "AWS FULL MOCK EXPANSION — ALL SERVICES INCLUDED"
+        shell: bash
+        run: |
+          echo "== FULL AWS MOCK EXPANSION START =="
+
+          # 대량 서비스 목록
+          services=( ec2 rds s3 efs fsx eks ecs elb cloudfront route53 waf shield inspector config backup organizations budgets ce athena glue redshift neptune qldb timestream kinesis firehose emr stepfunctions mq sns sqs ses ssm kms secretsmanager cognito cloudformation cloudtrail cloudwatch lambda apigw ecr codecommit codedeploy codepipeline codebuild codestar eventbridge opensearch elasticache memorydb dynamodb iam sts acm directconnect sagemaker bedrock datazone datapipeline snowball transfer mediaconvert mediapackage mediastore mediatailor cloudhsm iot iotcore iotevents greengrass alexa robomaker gamelift workspaces workdocs workmail chime route53resolver migrationhub drs dms mgn)
+
+          mkdir -p mock_aws_all
+
+          for svc in "${services[@]}"; do
+            echo "[AWS-MOCK] Installing service: $svc"
+            mkdir -p mock_aws_all/$svc
+            echo "SERVICE=$svc" > mock_aws_all/$svc/INFO.txt
+            echo "MOCK_GENERATED=$(date)" >> mock_aws_all/$svc/INFO.txt
+          done
+
+          echo "== FULL AWS MOCK EXPANSION COMPLETE ==""
