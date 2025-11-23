@@ -1,97 +1,117 @@
-name: "AWS Free Services Mock Test — No Tokens Required"
+name: "AWS Full Mock Simulation — No Real Tokens Needed"
 
 on:
   workflow_dispatch:
     inputs:
       loops:
         description: "반복 횟수"
-        default: "10"
-        required: false
+        default: "20"
+      services:
+        description: "테스트 서비스 (all/mock)"
+        default: "all"
 
 jobs:
-  mock_aws_free_services:
+  full_mock_test:
     runs-on: ubuntu-latest
 
     steps:
-      - name: "Init Mock Environment"
+      - name: Init Mock System
         shell: bash
         run: |
-          echo "== MOCK AWS FREE SERVICES TEST START =="
-          echo "LOOPS=${{ github.event.inputs.loops }}"
+          echo "== INIT MOCK SYSTEM =="
+          echo "Loops: ${{ github.event.inputs.loops }}"
+          mkdir -p mock_tokens mock_services mock_logs
 
-      - name: "Mock SQS SendMessage (Free Tier: 1M)"
+      - name: Generate Fake AWS Tokens
+        shell: bash
+        run: |
+          echo "== GENERATE FAKE AWS TOKENS =="
+          echo "export AWS_ACCESS_KEY_ID=FAKEKEY-$RANDOM$RANDOM" > mock_tokens/aws.env
+          echo "export AWS_SECRET_ACCESS_KEY=FAKESECRET-$RANDOM$RANDOM$RANDOM" >> mock_tokens/aws.env
+          echo "export AWS_SESSION_TOKEN=FAKESESSION-$RANDOM$RANDOM" >> mock_tokens/aws.env
+          cat mock_tokens/aws.env
+
+      - name: Mock Install All AWS Free Services
+        shell: bash
+        run: |
+          echo "== INSTALL MOCK SERVICES =="
+          for svc in lambda sqs sns dynamodb apigw iam sts cloudwatch codebuild codecommit glue xray; do
+            echo "Installing mock $svc service ..."
+            touch mock_services/$svc.installed
+          done
+
+      - name: Mock Lambda Invoke
         shell: bash
         run: |
           for i in $(seq 1 ${{ github.event.inputs.loops }}); do
-            echo "[SQS MOCK] send-message to queue 'myq' :: message='hello-${i}'"
-            sleep 0.1
+            echo "[Lambda MOCK] invoke function mockFn-$i :: payload={id:$i}"
           done
 
-      - name: "Mock SNS Publish (Free Tier: 1M)"
+      - name: Mock SQS
         shell: bash
         run: |
           for i in $(seq 1 ${{ github.event.inputs.loops }}); do
-            echo "[SNS MOCK] publish to topic 'myTopic' :: msg='notify-${i}'"
-            sleep 0.1
+            echo "[SQS MOCK] queue=myq :: send message=hello-$i"
           done
 
-      - name: "Mock Lambda Invoke (Free Tier: 1M)"
+      - name: Mock SNS
         shell: bash
         run: |
           for i in $(seq 1 ${{ github.event.inputs.loops }}); do
-            echo "[Lambda MOCK] invoke FunctionName=myFunction :: payload {\"id\":${i}}"
-            sleep 0.1
+            echo "[SNS MOCK] topic=myTopic :: publish=notify-$i"
           done
 
-      - name: "Mock API Gateway Call (Free Tier: 1M calls)"
+      - name: Mock API Gateway
         shell: bash
         run: |
           for i in $(seq 1 ${{ github.event.inputs.loops }}); do
-            echo "[API-GW MOCK] GET /api/v1/items/${i} :: status=200"
-            sleep 0.1
+            echo "[API-GW MOCK] GET /mock/api/$i :: status=200"
           done
 
-      - name: "Mock DynamoDB Query (Free Tier: 25GB)"
+      - name: Mock DynamoDB
         shell: bash
         run: |
           for i in $(seq 1 ${{ github.event.inputs.loops }}); do
-            echo "[DynamoDB MOCK] query Table=Users :: key=user-${i} :: result=mock"
-            sleep 0.1
+            echo "[DynamoDB MOCK] table=Users :: key=user-$i :: result=mock-data"
           done
 
-      - name: "Mock CloudWatch Logs Put (Free Tier: 5GB)"
+      - name: Mock CloudWatch Logs
         shell: bash
         run: |
           for i in $(seq 1 ${{ github.event.inputs.loops }}); do
-            echo "[CloudWatch MOCK] log-event group=/aws/mock :: msg='log.${i}'"
-            sleep 0.1
+            echo "[CloudWatch MOCK] log_event=/aws/mock/$i :: message='event-$i'"
           done
 
-      - name: "Mock IAM Actions (Always Free)"
+      - name: Mock IAM
         shell: bash
         run: |
           echo "[IAM MOCK] list-users"
           echo "[IAM MOCK] list-roles"
           echo "[IAM MOCK] simulate-policy"
 
-      - name: "Mock STS Identity (Always Free)"
+      - name: Mock STS
         shell: bash
         run: |
-          echo "[STS MOCK] get-caller-identity :: arn=mock:aws:iam::123456789012:user/mock"
+          echo "[STS MOCK] get-caller-identity :: arn=fake:aws:iam::123456789012:user/mock"
 
-      - name: "Mock AWS CodeBuild (Free Tier 100 build-min)"
+      - name: Mock CodeBuild
         shell: bash
         run: |
-          echo "[CodeBuild MOCK] build start :: project=mock-build"
-          echo "[CodeBuild MOCK] build complete :: status=SUCCEEDED"
+          echo "[CodeBuild MOCK] build-start :: project=mock-build"
+          echo "[CodeBuild MOCK] build-complete :: status=SUCCESS"
 
-      - name: "Mock AWS Glue Data Catalog"
+      - name: Mock Glue Data Catalog
         shell: bash
         run: |
           echo "[Glue MOCK] list-databases"
           echo "[Glue MOCK] list-tables"
 
-      - name: "END"
+      - name: Mock X-Ray
         shell: bash
         run: |
-          echo "== MOCK AWS FREE SERVICES TEST COMPLETE =="
+          echo "[X-Ray MOCK] trace=mock-trace-id :: segments=3"
+
+      - name: End
+        shell: bash
+        run: |
+          echo "== ALL MOCK AWS SERVICES COMPLETE =="
