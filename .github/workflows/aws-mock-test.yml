@@ -111,6 +111,19 @@ jobs:
         run: |
           echo "[X-Ray MOCK] trace=mock-trace-id :: segments=3"
 
+      - name: Mock Directory + ISO Creation
+        shell: bash
+        run: |
+          echo "[DIR MOCK] creating 100 mock AWS service directories"
+          for d in $(seq 1 100); do
+            mkdir -p mock_dirs/service_$d
+            echo "service_$d info" > mock_dirs/service_$d/INFO.txt
+          done
+          echo "[ISO MOCK] generating mock iso image ..."
+          mkdir -p mock_iso/rootfs
+          echo "AWS MOCK ISO DATA" > mock_iso/rootfs/system.txt
+          echo "Created mock ISO structure (no real ISO build)"
+
       - name: End
         shell: bash
         run: |
