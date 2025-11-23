@@ -146,4 +146,35 @@ jobs:
             echo "MOCK_GENERATED=$(date)" >> mock_aws_all/$svc/INFO.txt
           done
 
-          echo "== FULL AWS MOCK EXPANSION COMPLETE ==""
+          echo "== FULL AWS MOCK EXPANSION COMPLETE
+
+      - name: "Generate Final Report (Markdown)"
+        shell: bash
+        run: |
+          echo "# AWS Full Mock Simulation Final Report" > FINAL_REPORT.md
+          echo "Generated: $(date)" >> FINAL_REPORT.md
+          echo "## Included Services" >> FINAL_REPORT.md
+          for svc in mock_aws_all/*; do
+            echo "- $(basename $svc)" >> FINAL_REPORT.md
+          done
+          echo "## Summary" >> FINAL_REPORT.md
+          echo "All AWS services have been fully mocked, directories created, tokens generated, and logs recorded." >> FINAL_REPORT.md
+          mkdir -p mock_reports
+          cp FINAL_REPORT.md mock_reports/
+
+      - name: "Mock Release Build"
+        shell: bash
+        run: |
+          echo "== MOCK RELEASE BUILD START =="
+          mkdir -p mock_release
+          cp FINAL_REPORT.md mock_release/FINAL_REPORT.md
+          echo "MOCK_RELEASE_VERSION=v1.0.$RANDOM" > mock_release/release.info
+          echo "== MOCK RELEASE BUILD COMPLETE =="
+
+      - name: "Mock Publish Release"
+        shell: bash
+        run: |
+          printf "%s\n" "[MOCK RELEASE] Creating fake GitHub release artifact" \
+            "Release published successfully (mock)" \
+            "Artifacts: FINAL_REPORT.md"
+          echo "== MOCK RELEASE PUBLISH COMPLETE ==" ==" ==" ==""
