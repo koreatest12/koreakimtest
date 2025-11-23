@@ -1,0 +1,97 @@
+name: "AWS Free Services Mock Test — No Tokens Required"
+
+on:
+  workflow_dispatch:
+    inputs:
+      loops:
+        description: "반복 횟수"
+        default: "10"
+        required: false
+
+jobs:
+  mock_aws_free_services:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Init Mock Environment"
+        shell: bash
+        run: |
+          echo "== MOCK AWS FREE SERVICES TEST START =="
+          echo "LOOPS=${{ github.event.inputs.loops }}"
+
+      - name: "Mock SQS SendMessage (Free Tier: 1M)"
+        shell: bash
+        run: |
+          for i in $(seq 1 ${{ github.event.inputs.loops }}); do
+            echo "[SQS MOCK] send-message to queue 'myq' :: message='hello-${i}'"
+            sleep 0.1
+          done
+
+      - name: "Mock SNS Publish (Free Tier: 1M)"
+        shell: bash
+        run: |
+          for i in $(seq 1 ${{ github.event.inputs.loops }}); do
+            echo "[SNS MOCK] publish to topic 'myTopic' :: msg='notify-${i}'"
+            sleep 0.1
+          done
+
+      - name: "Mock Lambda Invoke (Free Tier: 1M)"
+        shell: bash
+        run: |
+          for i in $(seq 1 ${{ github.event.inputs.loops }}); do
+            echo "[Lambda MOCK] invoke FunctionName=myFunction :: payload {\"id\":${i}}"
+            sleep 0.1
+          done
+
+      - name: "Mock API Gateway Call (Free Tier: 1M calls)"
+        shell: bash
+        run: |
+          for i in $(seq 1 ${{ github.event.inputs.loops }}); do
+            echo "[API-GW MOCK] GET /api/v1/items/${i} :: status=200"
+            sleep 0.1
+          done
+
+      - name: "Mock DynamoDB Query (Free Tier: 25GB)"
+        shell: bash
+        run: |
+          for i in $(seq 1 ${{ github.event.inputs.loops }}); do
+            echo "[DynamoDB MOCK] query Table=Users :: key=user-${i} :: result=mock"
+            sleep 0.1
+          done
+
+      - name: "Mock CloudWatch Logs Put (Free Tier: 5GB)"
+        shell: bash
+        run: |
+          for i in $(seq 1 ${{ github.event.inputs.loops }}); do
+            echo "[CloudWatch MOCK] log-event group=/aws/mock :: msg='log.${i}'"
+            sleep 0.1
+          done
+
+      - name: "Mock IAM Actions (Always Free)"
+        shell: bash
+        run: |
+          echo "[IAM MOCK] list-users"
+          echo "[IAM MOCK] list-roles"
+          echo "[IAM MOCK] simulate-policy"
+
+      - name: "Mock STS Identity (Always Free)"
+        shell: bash
+        run: |
+          echo "[STS MOCK] get-caller-identity :: arn=mock:aws:iam::123456789012:user/mock"
+
+      - name: "Mock AWS CodeBuild (Free Tier 100 build-min)"
+        shell: bash
+        run: |
+          echo "[CodeBuild MOCK] build start :: project=mock-build"
+          echo "[CodeBuild MOCK] build complete :: status=SUCCEEDED"
+
+      - name: "Mock AWS Glue Data Catalog"
+        shell: bash
+        run: |
+          echo "[Glue MOCK] list-databases"
+          echo "[Glue MOCK] list-tables"
+
+      - name: "END"
+        shell: bash
+        run: |
+          echo "== MOCK AWS FREE SERVICES TEST COMPLETE =="
