@@ -1,4 +1,4 @@
-name: "💠 ULTRA VersionOps — Error-Free + Auto-Mock + Full Pipeline (LEFT-ECHO FULL)"
+name: "🌐 Enterprise Deployment Orchestrator — GitOps + MultiCloud + Helm + Vault + Federation (LEFT-ECHO FULL / RETRY10 / NO-FAIL)"
 
 on:
   workflow_dispatch:
@@ -6,26 +6,28 @@ on:
 env:
   TZ: Asia/Seoul
   VERSION_FILE: .github/version/VERSION
-  BACKUP_DIR: .github/version/backups
-  LOG_DIR: .github/version/logs
-  DOCKER_IMAGE: mock/copilot-server
-  K8S_DEPLOY_BLUE: mock-blue
-  K8S_DEPLOY_GREEN: mock-green
-  CANARY_DEPLOY: mock-canary
-  ARGO_APP: mock-app
-  TF_DIR: infra/terraform
+  LOG_DIR: .github/edo/logs
+  BACKUP_DIR: .github/edo/backups
+  HELM_CHART: deploy/helm/copilot
+  DOCKER_IMAGE: mock/copilot
+  GITOPS_REPO_DEV: git@github.com:org/dev-env.git
+  GITOPS_REPO_STAGE: git@github.com:org/stage-env.git
+  GITOPS_REPO_PROD: git@github.com:org/prod-env.git
+  FED_CLUSTERS: "cluster-a cluster-b cluster-c"
+  CLOUD_REGIONS: "aws ap-northeast-2; gcp asia-northeast1; azure southeastasia"
+  VAULT_PATH: secret/data/copilot
 
 jobs:
-  versionops:
+  deploy:
     runs-on: ubuntu-latest
     continue-on-error: true
 
     steps:
 
-    #######################################################################
+    #########################################################################
     # INIT
-    #######################################################################
-    - name: INIT Paths
+    #########################################################################
+    - name: INIT
       shell: bash
       run: |
         echo "▶ mkdir -p ${LOG_DIR}"; mkdir -p "${LOG_DIR}"
@@ -35,223 +37,162 @@ jobs:
         if [ ! -f "${VERSION_FILE}" ]; then
           echo "▶ echo 1.0.0 > ${VERSION_FILE}"; echo "1.0.0" > "${VERSION_FILE}"
         fi
-
-        echo "▶ CURRENT=$(cat ${VERSION_FILE})"; CURRENT=$(cat ${VERSION_FILE})
-        echo "Current Version=${CURRENT}" | tee "${LOG_DIR}/00_init.txt"
+        echo "Current Version: $(cat ${VERSION_FILE})" | tee "${LOG_DIR}/00_init.txt"
 
 
-    #######################################################################
-    # BACKUP
-    #######################################################################
-    - name: BACKUP
+    #########################################################################
+    # TEST SERVER MODE (DEV Environment Simulation)
+    #########################################################################
+    - name: TEST SERVER RUN
       shell: bash
       run: |
-        NOW=$(date +%Y%m%d_%H%M%S)
-        BK="${BACKUP_DIR}/VERSION_${NOW}.bak"
-
-        echo "▶ cp ${VERSION_FILE} ${BK}"; cp "${VERSION_FILE}" "${BK}"
-        echo "Backup created: ${BK}" | tee "${LOG_DIR}/01_backup.txt"
-
-
-    #######################################################################
-    # RESTORE (test)
-    #######################################################################
-    - name: RESTORE (just validation)
-      shell: bash
-      run: |
-        LAST=$(ls -t ${BACKUP_DIR} | head -1)
-        echo "▶ cp ${BACKUP_DIR}/${LAST} ${VERSION_FILE}"; cp "${BACKUP_DIR}/${LAST}" "${VERSION_FILE}"
-        echo "Restored backup" | tee "${LOG_DIR}/02_restore.txt"
+        echo "▶ Simulate Test Server Boot"
+        for i in {1..10}; do
+          echo "▶ Starting Test Server Attempt $i"
+          sleep 1
+          if echo "mock-test-server-boot"; then
+            echo "▶ Test Server Up (Attempt $i)"
+            break
+          fi
+        done
+        echo "▶ FORCE SUCCESS: Test Server Mode Complete"
 
 
-    #######################################################################
-    # UPGRADE
-    #######################################################################
-    - name: UPGRADE Version
-      shell: bash
-      run: |
-        CUR=$(cat ${VERSION_FILE})
-        NEXT=$(date +%Y.%m.%d.%H%M)
-        echo "▶ echo ${NEXT} > ${VERSION_FILE}"; echo "${NEXT}" > "${VERSION_FILE}"
-        echo "Upgrade: ${CUR} → ${NEXT}" | tee "${LOG_DIR}/03_upgrade.txt"
-
-
-    #######################################################################
-    # DOWNGRADE
-    #######################################################################
-    - name: DOWNGRADE
-      shell: bash
-      run: |
-        CUR=$(cat ${VERSION_FILE})
-        DOWN=$(echo $CUR | awk -F. '{print $1"."$2"."$3".0000"}')
-        echo "▶ echo ${DOWN} > ${VERSION_FILE}"; echo "${DOWN}" > "${VERSION_FILE}"
-        echo "Downgrade: ${CUR} → ${DOWN}" | tee "${LOG_DIR}/04_downgrade.txt"
-
-
-    #######################################################################
-    # ROLLBACK
-    #######################################################################
-    - name: ROLLBACK
-      shell: bash
-      run: |
-        LAST=$(ls -t ${BACKUP_DIR} | head -1)
-        echo "▶ cp ${BACKUP_DIR}/${LAST} ${VERSION_FILE}"; cp "${BACKUP_DIR}/${LAST}" "${VERSION_FILE}"
-        echo "Rollback to $(cat ${VERSION_FILE})" | tee "${LOG_DIR}/05_rollback.txt"
-
-
-    #######################################################################
-    # Docker Build (Mock if needed)
-    #######################################################################
-    - name: Ensure Docker Mock Image
-      shell: bash
-      run: |
-        echo "▶ echo 'FROM alpine' > Dockerfile"; echo "FROM alpine" > Dockerfile
-        echo "▶ echo 'CMD echo mock image' >> Dockerfile"; echo "CMD echo mock image" >> Dockerfile
-
-        echo "▶ docker build -t mock-image ."; docker build -t mock-image . || true
-
-        # Make mock image available for tagging
-        echo "▶ docker tag mock-image ${DOCKER_IMAGE}:latest"; docker tag mock-image "${DOCKER_IMAGE}:latest" || true
-
-
-    #######################################################################
-    # Docker Tag + Multi-Region Push (Mock)
-    #######################################################################
-    - name: Docker Tag / Push
+    #########################################################################
+    # GITOPS Dev → Stage → Prod Promotion Pipeline
+    #########################################################################
+    - name: GitOps Promotion Pipeline
       shell: bash
       run: |
         VER=$(cat ${VERSION_FILE})
-        echo "▶ docker tag ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:${VER}"
-        docker tag "${DOCKER_IMAGE}:latest" "${DOCKER_IMAGE}:${VER}" || true
+        echo "▶ GITOPS Version = ${VER}"
 
-        for r in asia us eu; do
-          IMG="${DOCKER_IMAGE}-${r}:${VER}"
-          echo "▶ docker tag ${DOCKER_IMAGE}:latest ${IMG}"; docker tag "${DOCKER_IMAGE}:latest" "${IMG}" || true
-          echo "▶ docker push ${IMG} (mock)"; echo "[MOCK PUSH] ${IMG}" | tee -a "${LOG_DIR}/06_docker.txt"
+        promote(){
+          NAME=$1
+          REPO=$2
+
+          echo "▶ GitOps Promote → ${NAME}"
+          for i in {1..10}; do
+            echo "Attempt $i"
+            # 실제 git 작업 생략 (mock)
+            echo "[MOCK] Update version ${VER} to ${NAME} repo" && break
+          done
+          echo "▶ FORCE SUCCESS GitOps ${NAME}"
+        }
+
+        promote "DEV"   "${GITOPS_REPO_DEV}"
+        promote "STAGE" "${GITOPS_REPO_STAGE}"
+        promote "PROD"  "${GITOPS_REPO_PROD}"
+
+
+    #########################################################################
+    # HELM CHART VERSION UPDATE (Auto VersionOps)
+    #########################################################################
+    - name: Helm Chart Versioning
+      shell: bash
+      run: |
+        VER=$(cat ${VERSION_FILE})
+
+        echo "▶ Updating Helm chart version → ${VER}"
+
+        for i in {1..10}; do
+          echo "Attempt $i"
+          echo "[MOCK] helm version update ${VER}"
+          break
         done
 
-        echo "Docker Version Tagged=${VER}" | tee "${LOG_DIR}/06_docker.txt"
+        echo "▶ FORCE SUCCESS Helm Chart Version Updated"
 
 
-    #######################################################################
-    # K8S Connection Check
-    #######################################################################
-    - name: Check K8s
-      id: k8scheck
+    #########################################################################
+    # Multi-Cluster Federation Deploy
+    #########################################################################
+    - name: Federation Deployment
       shell: bash
       run: |
-        if kubectl get ns >/dev/null 2>&1; then
-          echo "k8s_ok=true" >> $GITHUB_OUTPUT
-        else
-          echo "k8s_ok=false" >> $GITHUB_OUTPUT
-        fi
-        echo "K8s Available=${{ steps.k8scheck.outputs.k8s_ok }}" | tee "${LOG_DIR}/07_k8scheck.txt"
-
-
-    #######################################################################
-    # Canary Deployment (Soft-Skip)
-    #######################################################################
-    - name: Canary Deploy
-      shell: bash
-      run: |
-        if [ "${{ steps.k8scheck.outputs.k8s_ok }}" != "true" ]; then
-          echo "[SKIP] K8s unavailable → Canary skipped" | tee "${LOG_DIR}/08_canary.txt"
-          exit 0
-        fi
-
-        VER=$(cat ${VERSION_FILE})
-        echo "▶ kubectl set image deployment/${CANARY_DEPLOY}=${DOCKER_IMAGE}:${VER}"
-        kubectl set image deployment/${CANARY_DEPLOY} ${CANARY_DEPLOY}=${DOCKER_IMAGE}:${VER} || true
-
-        echo "▶ kubectl rollout status deployment/${CANARY_DEPLOY}"
-        kubectl rollout status deployment/${CANARY_DEPLOY} || true
-
-
-    #######################################################################
-    # Blue/Green Deployment (Soft-Skip)
-    #######################################################################
-    - name: BlueGreen Switch
-      shell: bash
-      run: |
-        if [ "${{ steps.k8scheck.outputs.k8s_ok }}" != "true" ]; then
-          echo "[SKIP] K8s unavailable → BlueGreen skipped" | tee "${LOG_DIR}/09_bluegreen.txt"
-          exit 0
-        fi
-
-        VER=$(cat ${VERSION_FILE})
-        echo "▶ kubectl set image deployment/${K8S_DEPLOY_GREEN}=${DOCKER_IMAGE}:${VER}"
-        kubectl set image deployment/${K8S_DEPLOY_GREEN} ${K8S_DEPLOY_GREEN}=${DOCKER_IMAGE}:${VER} || true
-
-        echo "▶ kubectl patch svc copilot-server -p '{\"spec\":{\"selector\":{\"version\":\"green\"}}}'"
-        kubectl patch svc copilot-server -p '{"spec":{"selector":{"version":"green"}}}' || true
-
-        echo "BlueGreen switched to GREEN" | tee "${LOG_DIR}/09_bluegreen.txt"
-
-
-    #######################################################################
-    # GitOps (Soft-Skip)
-    #######################################################################
-    - name: GitOps
-      shell: bash
-      run: |
-        if [ "${{ steps.k8scheck.outputs.k8s_ok }}" != "true" ]; then
-          echo "[SKIP] K8s unavailable → GitOps SKIPPED" | tee "${LOG_DIR}/10_gitops.txt"
-          exit 0
-        fi
-
-        echo "▶ argocd app sync ${ARGO_APP}"; argocd app sync ${ARGO_APP} || true
-        echo "▶ argocd app wait ${ARGO_APP}"; argocd app wait ${ARGO_APP} || true
-
-
-    #######################################################################
-    # Terraform (Mock if missing)
-    #######################################################################
-    - name: Terraform
-      shell: bash
-      run: |
-        if [ ! -d "${TF_DIR}" ]; then
-          echo "[MOCK] Terraform not found → SKIP" | tee "${LOG_DIR}/11_tf.txt"
-          exit 0
-        fi
-
         VER=$(cat ${VERSION_FILE})
 
-        echo "▶ cd ${TF_DIR}"; cd "${TF_DIR}"
-        echo "▶ terraform init"; terraform init -input=false || true
-        echo "▶ terraform apply -auto-approve -var version=${VER}"
-        terraform apply -auto-approve -var version=${VER} || true
+        for CL in ${FED_CLUSTERS}; do
+          echo "▶ Deploying to Federation Cluster: ${CL}"
+
+          for i in {1..10}; do
+            echo "Attempt $i"
+            echo "[MOCK] kubectl apply to $CL version ${VER}"
+            break
+          done
+
+          echo "▶ FORCE SUCCESS Federation Deploy → ${CL}"
+        done
 
 
-    #######################################################################
-    # Secret Rotation (Soft-Skip)
-    #######################################################################
-    - name: Secret Rotation
+    #########################################################################
+    # AWS/GCP/Azure MULTI-CLOUD DEPLOYMENT
+    #########################################################################
+    - name: Multi-Cloud Deployment
       shell: bash
       run: |
-        if [ "${{ steps.k8scheck.outputs.k8s_ok }}" != "true" ]; then
-          echo "[SKIP] K8s unavailable → Secret Rotation skipped" | tee "${LOG_DIR}/12_secret.txt"
-          exit 0
-        fi
+        VER=$(cat ${VERSION_FILE})
 
-        NEW_KEY=$(openssl rand -hex 24)
-        echo "▶ kubectl create secret generic copilot-secret"
-        kubectl create secret generic copilot-secret \
-          --dry-run=client -o yaml \
-          --from-literal=key=${NEW_KEY} | kubectl apply -f - || true
+        echo "${CLOUD_REGIONS}" | while read CLOUD REGION; do
+          echo "▶ Deploying to ${CLOUD} region ${REGION}"
+
+          for i in {1..10}; do
+            echo "Attempt $i"
+            echo "[MOCK] Deploy image ${DOCKER_IMAGE}:${VER} to ${CLOUD}/${REGION}"
+            break
+          done
+
+          echo "▶ FORCE SUCCESS Multi-Cloud Deploy → ${CLOUD}/${REGION}"
+        done
 
 
-    #######################################################################
+    #########################################################################
+    # BLUE/GREEN + CANARY + A/B Hybrid Deployment Strategy
+    #########################################################################
+    - name: Traffic Strategy Deployment
+      shell: bash
+      run: |
+        VER=$(cat ${VERSION_FILE})
+
+        deploy_mode(){
+          MODE=$1
+          for i in {1..10}; do
+            echo "▶ Deploy(${MODE}) Attempt $i"
+            echo "[MOCK] Deployment for ${MODE} version ${VER}"
+            break
+          done
+          echo "▶ FORCE SUCCESS ${MODE}"
+        }
+
+        deploy_mode "BLUE/GREEN"
+        deploy_mode "CANARY"
+        deploy_mode "A/B"
+
+        echo "▶ Traffic Strategy COMPLETED"
+
+
+    #########################################################################
+    # VAULT SECRETOPS INTEGRATION
+    #########################################################################
+    - name: Vault SecretOps
+      shell: bash
+      run: |
+        NEW_SECRET=$(openssl rand -hex 24)
+        echo "▶ New Secret ${NEW_SECRET}"
+
+        for i in {1..10}; do
+          echo "Attempt $i"
+          echo "[MOCK] Write secret to Vault path ${VAULT_PATH}"
+          break
+        done
+
+        echo "▶ FORCE SUCCESS Vault Secret Rotation"
+
+
+    #########################################################################
     # FINAL SUMMARY
-    #######################################################################
+    #########################################################################
     - name: Final Summary
       shell: bash
       run: |
-        echo "=== FINAL REPORT ===" | tee "${LOG_DIR}/99_final.txt"
-        echo "Version=$(cat ${VERSION_FILE})" | tee -a "${LOG_DIR}/99_final.txt"
-        echo "Backups=$(ls -1 ${BACKUP_DIR} | wc -l)" | tee -a "${LOG_DIR}/99_final.txt"
-        echo "K8sOK=${{ steps.k8scheck.outputs.k8s_ok }}" | tee -a "${LOG_DIR}/99_final.txt"
-
-    - uses: actions/upload-artifact@v4
-      with:
-        name: versionops-final
-        path: ${{ env.LOG_DIR }}/
+        echo "▶ Deployment Pipeline Completed" | tee "${LOG_DIR}/99_summary.txt"
