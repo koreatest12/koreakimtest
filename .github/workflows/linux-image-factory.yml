@@ -1,4 +1,4 @@
-name: "💠 ULTRA VersionOps — Upgrade + Downgrade + Rollback + Canary + GitOps + BlueGreen + Terraform + Secrets (LEFT-ECHO FULL / NO SKIP)"
+name: "💠 ULTRA VersionOps — Error-Free + Auto-Mock + Full Pipeline (LEFT-ECHO FULL)"
 
 on:
   workflow_dispatch:
@@ -8,13 +8,12 @@ env:
   VERSION_FILE: .github/version/VERSION
   BACKUP_DIR: .github/version/backups
   LOG_DIR: .github/version/logs
-  DOCKER_IMAGE: your-registry/copilot-server
-  K8S_DEPLOY_BLUE: copilot-server-blue
-  K8S_DEPLOY_GREEN: copilot-server-green
-  CANARY_DEPLOY: copilot-server-canary
-  ARGO_APP: copilot-server
+  DOCKER_IMAGE: mock/copilot-server
+  K8S_DEPLOY_BLUE: mock-blue
+  K8S_DEPLOY_GREEN: mock-green
+  CANARY_DEPLOY: mock-canary
+  ARGO_APP: mock-app
   TF_DIR: infra/terraform
-  SECRET_TARGET: "secret/copilot-server"
 
 jobs:
   versionops:
@@ -22,10 +21,11 @@ jobs:
     continue-on-error: true
 
     steps:
+
     #######################################################################
     # INIT
     #######################################################################
-    - name: INIT paths
+    - name: INIT Paths
       shell: bash
       run: |
         echo "▶ mkdir -p ${LOG_DIR}"; mkdir -p "${LOG_DIR}"
@@ -36,8 +36,9 @@ jobs:
           echo "▶ echo 1.0.0 > ${VERSION_FILE}"; echo "1.0.0" > "${VERSION_FILE}"
         fi
 
-        echo "▶ CURRENT=\$(cat ${VERSION_FILE})"; CURRENT=$(cat ${VERSION_FILE})
+        echo "▶ CURRENT=$(cat ${VERSION_FILE})"; CURRENT=$(cat ${VERSION_FILE})
         echo "Current Version=${CURRENT}" | tee "${LOG_DIR}/00_init.txt"
+
 
     #######################################################################
     # BACKUP
@@ -49,29 +50,31 @@ jobs:
         BK="${BACKUP_DIR}/VERSION_${NOW}.bak"
 
         echo "▶ cp ${VERSION_FILE} ${BK}"; cp "${VERSION_FILE}" "${BK}"
-        echo "Backup created ${BK}" | tee "${LOG_DIR}/01_backup.txt"
+        echo "Backup created: ${BK}" | tee "${LOG_DIR}/01_backup.txt"
+
 
     #######################################################################
-    # RESTORE (just to validate backup system)
+    # RESTORE (test)
     #######################################################################
-    - name: RESTORE (validation)
+    - name: RESTORE (just validation)
       shell: bash
       run: |
         LAST=$(ls -t ${BACKUP_DIR} | head -1)
         echo "▶ cp ${BACKUP_DIR}/${LAST} ${VERSION_FILE}"; cp "${BACKUP_DIR}/${LAST}" "${VERSION_FILE}"
-        echo "Restored from backup" | tee "${LOG_DIR}/02_restore.txt"
+        echo "Restored backup" | tee "${LOG_DIR}/02_restore.txt"
+
 
     #######################################################################
-    # UPGRADE (datetime tag)
+    # UPGRADE
     #######################################################################
-    - name: UPGRADE version
+    - name: UPGRADE Version
       shell: bash
       run: |
         CUR=$(cat ${VERSION_FILE})
         NEXT=$(date +%Y.%m.%d.%H%M)
-
         echo "▶ echo ${NEXT} > ${VERSION_FILE}"; echo "${NEXT}" > "${VERSION_FILE}"
         echo "Upgrade: ${CUR} → ${NEXT}" | tee "${LOG_DIR}/03_upgrade.txt"
+
 
     #######################################################################
     # DOWNGRADE
@@ -81,9 +84,9 @@ jobs:
       run: |
         CUR=$(cat ${VERSION_FILE})
         DOWN=$(echo $CUR | awk -F. '{print $1"."$2"."$3".0000"}')
-
         echo "▶ echo ${DOWN} > ${VERSION_FILE}"; echo "${DOWN}" > "${VERSION_FILE}"
         echo "Downgrade: ${CUR} → ${DOWN}" | tee "${LOG_DIR}/04_downgrade.txt"
+
 
     #######################################################################
     # ROLLBACK
@@ -95,132 +98,147 @@ jobs:
         echo "▶ cp ${BACKUP_DIR}/${LAST} ${VERSION_FILE}"; cp "${BACKUP_DIR}/${LAST}" "${VERSION_FILE}"
         echo "Rollback to $(cat ${VERSION_FILE})" | tee "${LOG_DIR}/05_rollback.txt"
 
+
     #######################################################################
-    # Docker Tag Update (Multi-region push)
+    # Docker Build (Mock if needed)
     #######################################################################
-    - name: Docker tag update
+    - name: Ensure Docker Mock Image
+      shell: bash
+      run: |
+        echo "▶ echo 'FROM alpine' > Dockerfile"; echo "FROM alpine" > Dockerfile
+        echo "▶ echo 'CMD echo mock image' >> Dockerfile"; echo "CMD echo mock image" >> Dockerfile
+
+        echo "▶ docker build -t mock-image ."; docker build -t mock-image . || true
+
+        # Make mock image available for tagging
+        echo "▶ docker tag mock-image ${DOCKER_IMAGE}:latest"; docker tag mock-image "${DOCKER_IMAGE}:latest" || true
+
+
+    #######################################################################
+    # Docker Tag + Multi-Region Push (Mock)
+    #######################################################################
+    - name: Docker Tag / Push
       shell: bash
       run: |
         VER=$(cat ${VERSION_FILE})
+        echo "▶ docker tag ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:${VER}"
+        docker tag "${DOCKER_IMAGE}:latest" "${DOCKER_IMAGE}:${VER}" || true
 
-        echo "▶ docker pull ${DOCKER_IMAGE}:latest"; docker pull "${DOCKER_IMAGE}:latest" || true
-        echo "▶ docker tag ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:${VER}"; docker tag "${DOCKER_IMAGE}:latest" "${DOCKER_IMAGE}:${VER}" || true
-
-        # MULTI REGION EXAMPLE
-        for region in asia-northeast3 us-east1 eu-west1; do
-          IMG="${DOCKER_IMAGE}-${region}:${VER}"
+        for r in asia us eu; do
+          IMG="${DOCKER_IMAGE}-${r}:${VER}"
           echo "▶ docker tag ${DOCKER_IMAGE}:latest ${IMG}"; docker tag "${DOCKER_IMAGE}:latest" "${IMG}" || true
-          echo "▶ docker push ${IMG}"; docker push "${IMG}" || true
+          echo "▶ docker push ${IMG} (mock)"; echo "[MOCK PUSH] ${IMG}" | tee -a "${LOG_DIR}/06_docker.txt"
         done
 
-        echo "Docker Tagged → ${VER}" | tee "${LOG_DIR}/06_docker_push.txt"
+        echo "Docker Version Tagged=${VER}" | tee "${LOG_DIR}/06_docker.txt"
+
 
     #######################################################################
-    # Detect K8S availability
+    # K8S Connection Check
     #######################################################################
-    - name: Check K8s Connection
+    - name: Check K8s
       id: k8scheck
       shell: bash
       run: |
-        echo "▶ kubectl version --client"; kubectl version --client || true
         if kubectl get ns >/dev/null 2>&1; then
           echo "k8s_ok=true" >> $GITHUB_OUTPUT
         else
           echo "k8s_ok=false" >> $GITHUB_OUTPUT
         fi
+        echo "K8s Available=${{ steps.k8scheck.outputs.k8s_ok }}" | tee "${LOG_DIR}/07_k8scheck.txt"
+
 
     #######################################################################
-    # Canary Deployment
+    # Canary Deployment (Soft-Skip)
     #######################################################################
-    - name: Canary Deployment
-      if: always()
+    - name: Canary Deploy
       shell: bash
       run: |
         if [ "${{ steps.k8scheck.outputs.k8s_ok }}" != "true" ]; then
-          echo "[INFO] K8s not available → Canary SKIPPED (treated as success)" | tee "${LOG_DIR}/07_canary.txt"
+          echo "[SKIP] K8s unavailable → Canary skipped" | tee "${LOG_DIR}/08_canary.txt"
           exit 0
         fi
 
         VER=$(cat ${VERSION_FILE})
-
-        echo "▶ kubectl set image deployment/${CANARY_DEPLOY} ${CANARY_DEPLOY}=${DOCKER_IMAGE}:${VER}"
+        echo "▶ kubectl set image deployment/${CANARY_DEPLOY}=${DOCKER_IMAGE}:${VER}"
         kubectl set image deployment/${CANARY_DEPLOY} ${CANARY_DEPLOY}=${DOCKER_IMAGE}:${VER} || true
 
         echo "▶ kubectl rollout status deployment/${CANARY_DEPLOY}"
-        kubectl rollout status deployment/${CANARY_DEPLOY} || true | tee "${LOG_DIR}/07_canary.txt"
+        kubectl rollout status deployment/${CANARY_DEPLOY} || true
+
 
     #######################################################################
-    # Blue/Green Traffic Switching
+    # Blue/Green Deployment (Soft-Skip)
     #######################################################################
-    - name: BlueGreen Deployment
-      if: always()
+    - name: BlueGreen Switch
       shell: bash
       run: |
         if [ "${{ steps.k8scheck.outputs.k8s_ok }}" != "true" ]; then
-          echo "[INFO] K8s not available → BlueGreen SKIPPED" | tee "${LOG_DIR}/08_bluegreen.txt"
+          echo "[SKIP] K8s unavailable → BlueGreen skipped" | tee "${LOG_DIR}/09_bluegreen.txt"
           exit 0
         fi
 
         VER=$(cat ${VERSION_FILE})
-
-        echo "▶ kubectl set image deployment/${K8S_DEPLOY_GREEN} ${K8S_DEPLOY_GREEN}=${DOCKER_IMAGE}:${VER}"
+        echo "▶ kubectl set image deployment/${K8S_DEPLOY_GREEN}=${DOCKER_IMAGE}:${VER}"
         kubectl set image deployment/${K8S_DEPLOY_GREEN} ${K8S_DEPLOY_GREEN}=${DOCKER_IMAGE}:${VER} || true
-
-        echo "▶ kubectl rollout status deployment/${K8S_DEPLOY_GREEN}"
-        kubectl rollout status deployment/${K8S_DEPLOY_GREEN} || true
 
         echo "▶ kubectl patch svc copilot-server -p '{\"spec\":{\"selector\":{\"version\":\"green\"}}}'"
         kubectl patch svc copilot-server -p '{"spec":{"selector":{"version":"green"}}}' || true
 
-        echo "BlueGreen switched → GREEN" | tee "${LOG_DIR}/08_bluegreen.txt"
+        echo "BlueGreen switched to GREEN" | tee "${LOG_DIR}/09_bluegreen.txt"
+
 
     #######################################################################
-    # GitOps (ArgoCD Sync)
+    # GitOps (Soft-Skip)
     #######################################################################
-    - name: GitOps (ArgoCD Sync)
-      if: always()
+    - name: GitOps
       shell: bash
       run: |
         if [ "${{ steps.k8scheck.outputs.k8s_ok }}" != "true" ]; then
-          echo "[INFO] K8s not available → ArgoCD Sync SKIPPED" | tee "${LOG_DIR}/09_gitops.txt"
+          echo "[SKIP] K8s unavailable → GitOps SKIPPED" | tee "${LOG_DIR}/10_gitops.txt"
           exit 0
         fi
 
-        echo "▶ argocd app sync ${ARGO_APP}"; argocd app sync "${ARGO_APP}" || true
-        echo "▶ argocd app wait ${ARGO_APP}"; argocd app wait "${ARGO_APP}" || true
+        echo "▶ argocd app sync ${ARGO_APP}"; argocd app sync ${ARGO_APP} || true
+        echo "▶ argocd app wait ${ARGO_APP}"; argocd app wait ${ARGO_APP} || true
 
-        echo "ArgoCD Sync Completed" | tee "${LOG_DIR}/09_gitops.txt"
 
     #######################################################################
-    # Terraform Infra VersionOps
+    # Terraform (Mock if missing)
     #######################################################################
-    - name: Terraform VersionOps
+    - name: Terraform
       shell: bash
       run: |
+        if [ ! -d "${TF_DIR}" ]; then
+          echo "[MOCK] Terraform not found → SKIP" | tee "${LOG_DIR}/11_tf.txt"
+          exit 0
+        fi
+
         VER=$(cat ${VERSION_FILE})
 
-        echo "▶ cd ${TF_DIR}"; cd "${TF_DIR}" || exit 0
-
+        echo "▶ cd ${TF_DIR}"; cd "${TF_DIR}"
         echo "▶ terraform init"; terraform init -input=false || true
         echo "▶ terraform apply -auto-approve -var version=${VER}"
-        terraform apply -auto-approve -var version=${VER} || true | tee "${LOG_DIR}/10_terraform.txt"
+        terraform apply -auto-approve -var version=${VER} || true
+
 
     #######################################################################
-    # Secret Rotation
+    # Secret Rotation (Soft-Skip)
     #######################################################################
     - name: Secret Rotation
       shell: bash
       run: |
-        NEW_SECRET=$(openssl rand -hex 24)
+        if [ "${{ steps.k8scheck.outputs.k8s_ok }}" != "true" ]; then
+          echo "[SKIP] K8s unavailable → Secret Rotation skipped" | tee "${LOG_DIR}/12_secret.txt"
+          exit 0
+        fi
 
-        echo "▶ echo NEW_SECRET=\${NEW_SECRET}"; echo "NEW_SECRET=${NEW_SECRET}"
-
-        echo "▶ kubectl create secret generic copilot-secret --dry-run=client -o yaml --from-literal=key=${NEW_SECRET} | kubectl apply -f -"
+        NEW_KEY=$(openssl rand -hex 24)
+        echo "▶ kubectl create secret generic copilot-secret"
         kubectl create secret generic copilot-secret \
           --dry-run=client -o yaml \
-          --from-literal=key=${NEW_SECRET} | kubectl apply -f - || true
+          --from-literal=key=${NEW_KEY} | kubectl apply -f - || true
 
-        echo "Secret Rotated" | tee "${LOG_DIR}/11_secret.txt"
 
     #######################################################################
     # FINAL SUMMARY
@@ -229,11 +247,11 @@ jobs:
       shell: bash
       run: |
         echo "=== FINAL REPORT ===" | tee "${LOG_DIR}/99_final.txt"
-        echo "Version  = $(cat ${VERSION_FILE})" | tee -a "${LOG_DIR}/99_final.txt"
-        echo "Backups  = $(ls -1 ${BACKUP_DIR} | wc -l)" | tee -a "${LOG_DIR}/99_final.txt"
-        echo "K8s Available = ${{ steps.k8scheck.outputs.k8s_ok }}" | tee -a "${LOG_DIR}/99_final.txt"
+        echo "Version=$(cat ${VERSION_FILE})" | tee -a "${LOG_DIR}/99_final.txt"
+        echo "Backups=$(ls -1 ${BACKUP_DIR} | wc -l)" | tee -a "${LOG_DIR}/99_final.txt"
+        echo "K8sOK=${{ steps.k8scheck.outputs.k8s_ok }}" | tee -a "${LOG_DIR}/99_final.txt"
 
     - uses: actions/upload-artifact@v4
       with:
-        name: versionops-ultra-report
+        name: versionops-final
         path: ${{ env.LOG_DIR }}/
