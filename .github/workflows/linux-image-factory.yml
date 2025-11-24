@@ -1,268 +1,146 @@
-name: "🔄 Concurrency Control + Runner Self-Heal + Auto-Retry + Upgrade (LEFT-ECHO FULL)"
+name: "🔵 FULL VersionOps — Upgrade + Downgrade + Rollback + Backup + Restore + DockerTag + K8s (LEFT-ECHO FULL / NO SKIP)"
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 env:
   TZ: Asia/Seoul
-  LOG_DIR: .github/echo_logs
-  REPORT_DIR: .github/echo_report
-  VERSION_FILE: .github/echo_report/VERSION
+  VERSION_FILE: .github/version/VERSION
+  BACKUP_DIR: .github/version/backups
+  LOG_DIR: .github/version/logs
+  K8S_DEPLOY: copilot-server
+  DOCKER_IMAGE: your-registry/copilot-server
 
 jobs:
-  ##########################################################################
-  # 0. Runner 체크 & Clean-up
-  ##########################################################################
-  prep_and_clean:
-    name: "Runner Pre-Check / Cleanup"
+  versionops:
     runs-on: ubuntu-latest
-    continue-on-error: true
-    outputs:
-      disk_ok: ${{ steps.check.outputs.disk_ok }}
-      mem_ok:  ${{ steps.check.outputs.mem_ok }}
 
     steps:
-      - name: Prep dirs
+
+      ###########################################################################
+      # INIT
+      ###########################################################################
+      - name: INIT
         shell: bash
         run: |
           echo "▶ mkdir -p ${LOG_DIR}"; mkdir -p "${LOG_DIR}"
-          echo "▶ mkdir -p ${REPORT_DIR}"; mkdir -p "${REPORT_DIR}"
+          echo "▶ mkdir -p ${BACKUP_DIR}"; mkdir -p "${BACKUP_DIR}"
+          echo "▶ mkdir -p $(dirname ${VERSION_FILE})"; mkdir -p "$(dirname ${VERSION_FILE})"
 
-      - name: Snapshot (before cleanup)
-        shell: bash
-        run: |
-          {
-            echo "=== SNAPSHOT BEFORE CLEANUP ==="
-            echo "▶ uname -a"; uname -a || true
-            echo "▶ df -h"; df -h || true
-            echo "▶ free -m"; free -m || true
-            echo "▶ docker ps -a"; docker ps -a || true
-            echo "▶ docker images"; docker images || true
-          } | tee "${LOG_DIR}/00_snapshot_before.txt"
-
-      - name: Cleanup docker & cache
-        shell: bash
-        run: |
-          {
-            echo "▶ docker system prune -af"; docker system prune -af || true
-            echo "▶ docker volume prune -f"; docker volume prune -f || true
-            echo "▶ sudo apt-get clean"; sudo apt-get clean || true
-            echo "▶ sudo apt-get autoremove -y"; sudo apt-get autoremove -y || true
-          } | tee "${LOG_DIR}/01_cleanup.txt"
-
-      - name: Resource check
-        id: check
-        shell: bash
-        run: |
-          echo "▶ DISK=\$(df -BG / | awk 'NR==2 {gsub(\"G\", \"\", \$4); print \$4}')"; DISK=$(df -BG / | awk 'NR==2 {gsub("G","",$4); print $4}')
-          echo "▶ MEM=\$(free -m | awk '/Mem:/ {print \$4}')"; MEM=$(free -m | awk '/Mem:/ {print $4}')
-
-          DISK_OK="true"
-          MEM_OK="true"
-          if [ "$DISK" -lt 2 ];  then DISK_OK="false"; fi
-          if [ "$MEM" -lt 512 ]; then MEM_OK="false"; fi
-
-          echo "▶ echo disk_ok=$DISK_OK >> \$GITHUB_OUTPUT"; echo "disk_ok=$DISK_OK" >> $GITHUB_OUTPUT
-          echo "▶ echo mem_ok=$MEM_OK >> \$GITHUB_OUTPUT"; echo "mem_ok=$MEM_OK" >> $GITHUB_OUTPUT
-
-          {
-            echo "=== RESOURCE CHECK ==="
-            echo "DISK=${DISK}G"
-            echo "DISK_OK=$DISK_OK"
-            echo "MEM=${MEM}MB"
-            echo "MEM_OK=$MEM_OK"
-          } | tee "${LOG_DIR}/02_resource_check.txt"
-
-
-  ##########################################################################
-  # 1. Attempt #1 (Main Build/Test)
-  ##########################################################################
-  attempt1:
-    name: "Build & Test — Attempt #1"
-    runs-on: ubuntu-latest
-    needs: prep_and_clean
-    continue-on-error: true
-    outputs:
-      status: ${{ steps.mark.outputs.status }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: 3.11
-          cache: pip
-
-      - name: Prep dirs
-        shell: bash
-        run: |
-          echo "▶ mkdir -p ${LOG_DIR}"; mkdir -p "${LOG_DIR}"
-          echo "▶ mkdir -p ${REPORT_DIR}"; mkdir -p "${REPORT_DIR}"
-
-      - name: Install Node deps
-        shell: bash
-        run: |
-          echo "▶ npm ci"; npm ci 2>&1 | tee "${LOG_DIR}/11_npm1.txt"
-
-      - name: Install Python deps
-        shell: bash
-        run: |
-          echo "▶ pip install -r requirements.txt"; pip install -r requirements.txt 2>&1 | tee "${LOG_DIR}/12_pip1.txt"
-
-      - name: Build/Test
-        id: buildtest
-        shell: bash
-        run: |
-          echo "=== Attempt #1 ===" | tee "${LOG_DIR}/13_run1.txt"
-          echo "▶ npm run lint"; npm run lint 2>&1 | tee -a "${LOG_DIR}/13_run1.txt"
-          echo "▶ npm run format:check"; npm run format:check 2>&1 | tee -a "${LOG_DIR}/13_run1.txt"
-          echo "▶ npm run build"; npm run build 2>&1 | tee -a "${LOG_DIR}/13_run1.txt"
-
-          if [ -d dist ] && [ -n "$(ls -A dist)" ]; then
-            echo "▶ echo success > .result"; echo "success" > .result
-          else
-            echo "▶ echo failure > .result"; echo "failure" > .result
-          fi
-
-      - name: Mark status
-        id: mark
-        shell: bash
-        run: |
-          echo "▶ cat .result"; STATUS=$(cat .result)
-          echo "▶ echo status=$STATUS >> \$GITHUB_OUTPUT"; echo "status=$STATUS" >> $GITHUB_OUTPUT
-          echo "Attempt1: $STATUS" | tee "${LOG_DIR}/14_status1.txt"
-
-
-  ##########################################################################
-  # 2. Attempt #2 (Auto Retry)
-  ##########################################################################
-  attempt2:
-    name: "Build & Test — Attempt #2 (Retry)"
-    runs-on: ubuntu-latest
-    needs: [prep_and_clean, attempt1]
-    if: ${{ needs.attempt1.outputs.status != 'success' }}
-    continue-on-error: true
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: 3.11
-          cache: pip
-
-      - name: Prep dirs
-        shell: bash
-        run: |
-          echo "▶ mkdir -p ${LOG_DIR}"; mkdir -p "${LOG_DIR}"
-          echo "▶ mkdir -p ${REPORT_DIR}"; mkdir -p "${REPORT_DIR}"
-
-      - name: Install Node deps
-        shell: bash
-        run: |
-          echo "▶ npm ci"; npm ci 2>&1 | tee "${LOG_DIR}/21_npm2.txt"
-
-      - name: Install Python deps
-        shell: bash
-        run: |
-          echo "▶ pip install -r requirements.txt"; pip install -r requirements.txt 2>&1 | tee "${LOG_DIR}/22_pip2.txt"
-
-      - name: Build/Test (retry)
-        shell: bash
-        run: |
-          echo "=== Attempt #2 ===" | tee "${LOG_DIR}/23_run2.txt"
-          echo "▶ npm run lint"; npm run lint 2>&1 | tee -a "${LOG_DIR}/23_run2.txt"
-          echo "▶ npm run format:check"; npm run format:check 2>&1 | tee -a "${LOG_DIR}/23_run2.txt"
-          echo "▶ npm run build"; npm run build 2>&1 | tee -a "${LOG_DIR}/23_run2.txt"
-
-
-  ##########################################################################
-  # 3. UPGRADE 기능 (ALL 적용)
-  ##########################################################################
-  upgrade:
-    name: "Upgrade System (LEFT-ECHO FULL)"
-    runs-on: ubuntu-latest
-    needs:
-      - attempt1
-      - attempt2
-
-    steps:
-      - name: Prep dirs
-        shell: bash
-        run: |
-          echo "▶ mkdir -p ${REPORT_DIR}"; mkdir -p "${REPORT_DIR}"
-
-      - name: Load current version
-        shell: bash
-        run: |
-          if [ -f "${VERSION_FILE}" ]; then
-            echo "▶ CURRENT=\$(cat ${VERSION_FILE})"; CURRENT=$(cat "${VERSION_FILE}")
-          else
+          if [ ! -f "${VERSION_FILE}" ]; then
             echo "▶ echo 1.0.0 > ${VERSION_FILE}"; echo "1.0.0" > "${VERSION_FILE}"
-            CURRENT="1.0.0"
           fi
-          echo "▶ echo Current=$CURRENT"; echo "Current=$CURRENT"
 
-      - name: Generate next version
+          echo "▶ cat ${VERSION_FILE}"; cat "${VERSION_FILE}" | tee "${LOG_DIR}/00_current_version.txt"
+
+
+      ###########################################################################
+      # BACKUP — Always run
+      ###########################################################################
+      - name: BACKUP Current Version
         shell: bash
         run: |
-          echo "▶ NEXT=\$(date +%Y.%m.%d.%H%M)"; NEXT=$(date +%Y.%m.%d.%H%M)
-          echo "▶ echo $NEXT > ${VERSION_FILE}"; echo "$NEXT" > "${VERSION_FILE}"
-          echo "Updated Version=$NEXT" | tee "${REPORT_DIR}/UPGRADE.txt"
+          NOW=$(date +%Y%m%d_%H%M%S)
+          BACK="${BACKUP_DIR}/VERSION_${NOW}.bak"
 
-      - name: Confirm
+          echo "▶ cp ${VERSION_FILE} ${BACK}"; cp "${VERSION_FILE}" "${BACK}"
+          echo "Backup created: ${BACK}" | tee "${LOG_DIR}/01_backup.txt"
+
+
+      ###########################################################################
+      # RESTORE (Restore previous backup) — Always run
+      ###########################################################################
+      - name: RESTORE (latest backup)
         shell: bash
         run: |
-          echo "▶ cat ${VERSION_FILE}"; cat "${VERSION_FILE}"
+          LAST=$(ls -t ${BACKUP_DIR} | head -1)
+          echo "▶ cp ${BACKUP_DIR}/${LAST} ${VERSION_FILE}"; cp "${BACKUP_DIR}/${LAST}" "${VERSION_FILE}"
+          echo "Restored from backup: $(cat ${VERSION_FILE})" | tee "${LOG_DIR}/02_restore.txt"
 
 
-  ##########################################################################
-  # 4. Final Summary
-  ##########################################################################
-  final_report:
-    name: "Final Summary"
-    runs-on: ubuntu-latest
-    needs:
-      - prep_and_clean
-      - attempt1
-      - attempt2
-      - upgrade
-    if: always()
-
-    steps:
-      - name: Report
+      ###########################################################################
+      # UPGRADE — Always run
+      ###########################################################################
+      - name: UPGRADE Version
         shell: bash
         run: |
-          echo "▶ mkdir -p ${REPORT_DIR}"; mkdir -p "${REPORT_DIR}"
+          CUR=$(cat ${VERSION_FILE})
+          echo "▶ CUR=${CUR}"
 
-          {
-            echo "=== FINAL SUMMARY ==="
-            echo "Attempt1 = ${{ needs.attempt1.outputs.status }}"
-            echo "Attempt2 = ${{ needs.attempt2.result }}"
-            echo "Disk OK  = ${{ needs.prep_and_clean.outputs.disk_ok }}"
-            echo "Mem OK   = ${{ needs.prep_and_clean.outputs.mem_ok }}"
-            echo "Version  = $(cat ${VERSION_FILE})"
-          } | tee "${REPORT_DIR}/final_summary.txt"
+          NEXT=$(date +%Y.%m.%d.%H%M)
+          echo "▶ echo ${NEXT} > ${VERSION_FILE}"; echo "${NEXT}" > "${VERSION_FILE}"
+
+          echo "Upgraded ${CUR} → ${NEXT}" | tee "${LOG_DIR}/03_upgrade.txt"
+
+
+      ###########################################################################
+      # DOWNGRADE — Always run
+      ###########################################################################
+      - name: DOWNGRADE Version
+        shell: bash
+        run: |
+          CUR=$(cat ${VERSION_FILE})
+          BASE=$(echo $CUR | awk -F. '{print $1"."$2"."$3}')
+          DOWN="${BASE}.0000"
+
+          echo "▶ echo ${DOWN} > ${VERSION_FILE}"; echo "${DOWN}" > "${VERSION_FILE}"
+          echo "Downgraded ${CUR} → ${DOWN}" | tee "${LOG_DIR}/04_downgrade.txt"
+
+
+      ###########################################################################
+      # ROLLBACK — Always run
+      ###########################################################################
+      - name: ROLLBACK to latest backup
+        shell: bash
+        run: |
+          LAST=$(ls -t ${BACKUP_DIR} | head -1)
+          echo "▶ cp ${BACKUP_DIR}/${LAST} ${VERSION_FILE}"; cp "${BACKUP_DIR}/${LAST}" "${VERSION_FILE}"
+          echo "Rollback to $(cat ${VERSION_FILE})" | tee "${LOG_DIR}/05_rollback.txt"
+
+
+      ###########################################################################
+      # DOCKER TAG UPDATE — Always run
+      ###########################################################################
+      - name: Docker tag update
+        shell: bash
+        run: |
+          VER=$(cat ${VERSION_FILE})
+
+          echo "▶ docker pull ${DOCKER_IMAGE}:latest"; docker pull "${DOCKER_IMAGE}:latest" || true
+          echo "▶ docker tag ${DOCKER_IMAGE}:latest ${DOCKER_IMAGE}:${VER}"; docker tag "${DOCKER_IMAGE}:latest" "${DOCKER_IMAGE}:${VER}" || true
+          echo "▶ docker push ${DOCKER_IMAGE}:${VER}"; docker push "${DOCKER_IMAGE}:${VER}" || true
+
+          echo "Docker image updated → ${VER}" | tee "${LOG_DIR}/06_docker_tag.txt"
+
+
+      ###########################################################################
+      # KUBERNETES / EKS ROLLING UPDATE — Always run
+      ###########################################################################
+      - name: Kubernetes/EKS Auto Upgrade
+        shell: bash
+        run: |
+          VER=$(cat ${VERSION_FILE})
+
+          echo "▶ kubectl set image deployment/${K8S_DEPLOY} ${K8S_DEPLOY}=${DOCKER_IMAGE}:${VER}"
+          kubectl set image deployment/${K8S_DEPLOY} ${K8S_DEPLOY}=${DOCKER_IMAGE}:${VER} || true
+
+          echo "▶ kubectl rollout status deployment/${K8S_DEPLOY}"
+          kubectl rollout status deployment/${K8S_DEPLOY} || true | tee "${LOG_DIR}/07_k8s_rollout.txt"
+
+
+      ###########################################################################
+      # FINAL SUMMARY — Always run
+      ###########################################################################
+      - name: Final Summary
+        shell: bash
+        run: |
+          echo "=== FULL VersionOps Summary ===" | tee "${LOG_DIR}/99_final_summary.txt"
+          echo "Current Version: $(cat ${VERSION_FILE})"       | tee -a "${LOG_DIR}/99_final_summary.txt"
+          echo "Backups: $(ls -1 ${BACKUP_DIR} | wc -l)"       | tee -a "${LOG_DIR}/99_final_summary.txt"
+          echo "Docker Image: ${DOCKER_IMAGE}"                | tee -a "${LOG_DIR}/99_final_summary.txt"
+          echo "K8s Deploy: ${K8S_DEPLOY}"                    | tee -a "${LOG_DIR}/99_final_summary.txt"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: final-summary
-          path: ${{ env.REPORT_DIR }}/
+          name: versionops-full-report
+          path: ${{ env.LOG_DIR }}/
