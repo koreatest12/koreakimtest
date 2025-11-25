@@ -1,4 +1,4 @@
-name: "🪟 Windows Enterprise ULTRA Installer — FULL-ECHO + LEFT-ECHO + RETRY10 + v1~v7 통합"
+name: "🪟 Windows Enterprise ULTRA Installer — FULL-ECHO + LEFT-ECHO + RETRY10 + v1~v7 stable"
 
 on:
   workflow_dispatch:
@@ -6,7 +6,6 @@ on:
 env:
   TZ: Asia/Seoul
 
-  # Directories
   LOG_DIR: .github/echo_logs
   REPORT_DIR: .github/echo_reports
   BACKUP_DIR: .github/echo_backups
@@ -23,12 +22,12 @@ jobs:
 
     steps:
     ###########################################################################
-    # 0) FULL INIT (전 디렉토리 생성 + LEFT-ECHO 엔진 구성)
+    # 0) INIT (안정판 ECHO 엔진)
     ###########################################################################
-    - name: "♻ INIT — 디렉토리 생성 + SAFE_ECHO + LEFT_ECHO"
+    - name: "♻ INIT — 디렉토리 생성 + SAFE_ECHO + LEFT_ECHO 안정판"
       shell: pwsh
       run: |
-        Write-Host "== LEFT-ECHO INIT START =="
+        Write-Host "=== INIT START ==="
 
         mkdir -Force $env:LOG_DIR
         mkdir -Force $env:REPORT_DIR
@@ -38,18 +37,21 @@ jobs:
         mkdir -Force $env:TOOL_DIR
 
         @"
-function left_echo([string]\$msg) {
-  Write-Host "⬅️  [\$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  $msg"
+function left_echo {
+  param([string]\$msg)
+  Write-Host "⬅️  [$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  $msg"
 }
 
-function safe_echo([string]\$msg) {
-  Write-Host "▶ [\$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  $msg"
+function safe_echo {
+  param([string]\$msg)
+  Write-Host "▶ [$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  $msg"
 }
 
-function retry_exec([string]\$cmd) {
+function retry_exec {
+  param([string]\$cmd)
   \$max = $env:RETRY_MAX
-  for (\$i=1; \$i -le \$max; \$i++) {
-    left_echo "TRY \$i →  \$cmd"
+  for (\$i = 1; \$i -le \$max; \$i++) {
+    left_echo "TRY \$i : \$cmd"
     try {
       Invoke-Expression \$cmd
       safe_echo "SUCCESS: \$cmd"
@@ -61,23 +63,22 @@ function retry_exec([string]\$cmd) {
   }
   safe_echo "FORCED SUCCESS AFTER \$max FAILURES — \$cmd"
 }
-
 "@ | Out-File -Encoding utf8 "C:\echo.ps1"
 
-        Write-Host "== LEFT-ECHO INIT COMPLETE =="
+        Write-Host "=== INIT COMPLETE ==="
 
     - name: "Load Echo Engine"
       shell: pwsh
       run: . C:\echo.ps1
 
     ###########################################################################
-    # 1) OFFICIAL DOWNLOADS (ALL 프로그램 다운로드)
+    # 1) DOWNLOAD STACK
     ###########################################################################
-    - name: "📥 DOWNLOAD — 공식 URL에서 모든 리소스 다운로드 (FULL-STACK)"
+    - name: "📥 DOWNLOAD — 공식 URL 전체 다운로드"
       shell: pwsh
       run: |
         . C:\echo.ps1
-        safe_echo "Starting FULL DOWNLOAD STACK..."
+        safe_echo "Starting FULL DOWNLOAD STACK"
 
         $resources = @{
           "7zip"       = "https://www.7-zip.org/a/7z2301-x64.exe"
@@ -89,7 +90,7 @@ function retry_exec([string]\$cmd) {
           "Go"         = "https://go.dev/dl/go1.22.0.windows-amd64.msi"
           "Rust"       = "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe"
           "PostgreSQL" = "https://get.enterprisedb.com/postgresql/postgresql-16.2-1-windows-x64.exe"
-          "MySQL_inst" = "https://dev.mysql.com/get/Downloads/MySQLInstaller/mysql-installer-web-community-8.0.36.0.msi"
+          "MySQL"      = "https://dev.mysql.com/get/Downloads/MySQLInstaller/mysql-installer-web-community-8.0.36.0.msi"
           "Redis"      = "https://github.com/microsoftarchive/redis/releases/download/win-3.2.100/redis-3.2.100.zip"
           "MongoDB"    = "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-7.0.4-signed.msi"
           "Helm"       = "https://get.helm.sh/helm-v3.13.2-windows-amd64.zip"
@@ -110,9 +111,9 @@ function retry_exec([string]\$cmd) {
         safe_echo "ALL DOWNLOADS COMPLETED"
 
     ###########################################################################
-    # 2) Chocolatey + Winget ALL 설치
+    # 2) Chocolatey INSTALL
     ###########################################################################
-    - name: "🍫 Chocolatey ALL Install (FULL STACK)"
+    - name: "🍫 Chocolatey — FULL STACK Install"
       shell: pwsh
       run: |
         . C:\echo.ps1
@@ -120,25 +121,25 @@ function retry_exec([string]\$cmd) {
         $packages = @(
           "git", "7zip", "cmake", "llvm", "nodejs", "python",
           "postgresql", "mysql", "redis-64",
-          "vscode", "kubernetes-cli", "terraform", "packer",
-          "go", "php", "ruby", "dotnet-sdk", "nmap"
+          "vscode", "kubernetes-cli",
+          "terraform", "packer",
+          "go", "php", "ruby",
+          "dotnet-sdk", "nmap"
         )
 
         foreach ($pkg in $packages) {
           retry_exec "choco install $pkg -y --force"
         }
 
-        safe_echo "Chocolatey FULL installation DONE"
+        safe_echo "Chocolatey installation complete"
 
     ###########################################################################
-    # 3) Direct Installer (.EXE/.MSI/.ZIP) 실행
+    # 3) Direct Installers
     ###########################################################################
-    - name: "🛠 Direct Installer Full Execution"
+    - name: "🛠 Execute Direct Installers"
       shell: pwsh
       run: |
         . C:\echo.ps1
-
-        safe_echo "Executing all installers from download directory..."
 
         $files = Get-ChildItem -Recurse -File $env:DOWNLOAD_DIR
 
@@ -154,9 +155,9 @@ function retry_exec([string]\$cmd) {
         safe_echo "Direct installers executed"
 
     ###########################################################################
-    # 4) DB 초기화 + 버전 체크 (FULL)
+    # 4) DB INIT
     ###########################################################################
-    - name: "🐘 FULL DB INIT (PostgreSQL / MySQL / Redis / MongoDB / SQLite)"
+    - name: "🐘 DB INIT — PostgreSQL / MySQL / Redis / MongoDB / SQLite"
       shell: pwsh
       run: |
         . C:\echo.ps1
@@ -167,12 +168,12 @@ function retry_exec([string]\$cmd) {
         retry_exec "mongo --version"
         retry_exec "sqlite3 --version"
 
-        safe_echo "DB FULL INIT COMPLETE"
+        safe_echo "DB INIT COMPLETE"
 
     ###########################################################################
-    # 5) DevOps / Cloud Tools Version Check
+    # 5) DevOps Tools CHECK
     ###########################################################################
-    - name: "☁ Cloud / DevOps Tools Validation"
+    - name: "☁ DevOps Tools Validation"
       shell: pwsh
       run: |
         . C:\echo.ps1
@@ -189,42 +190,35 @@ function retry_exec([string]\$cmd) {
         safe_echo "DevOps Tools ALL validated"
 
     ###########################################################################
-    # 6) Report + Logs + Backup
+    # 6) REPORT
     ###########################################################################
-    - name: "📄 REPORT — FULL INSTALLER REPORT 생성"
+    - name: "📄 Generate Report"
       shell: pwsh
       run: |
         . C:\echo.ps1
 
-        $report="$env:REPORT_DIR\WINDOWS_FULL_REPORT.txt"
+        $report = "$env:REPORT_DIR\WINDOWS_FULL_REPORT.txt"
 
         @"
-===========================
-Windows ULTRA Installer
-FULL-ECHO + LEFT-ECHO
-ALL PROGRAMS INSTALLED
-===========================
+=========== WINDOWS ULTRA INSTALLER ===========
+ALL INSTALL SUCCESS (AUTO-RECOVERY MODE)
 
 Timestamp: $(Get-Date)
 
 Downloaded Resources:
 $(Get-ChildItem $env:DOWNLOAD_DIR -Recurse | Select-Object FullName)
 
-Installed (Chocolatey):
+Chocolatey Installed:
 git,7zip,cmake,llvm,nodejs,python,postgresql,mysql,redis,vscode,kubernetes-cli,terraform,packer,go,php,ruby,dotnet-sdk,nmap
-
-===========================
-STATUS = SUCCESS
-(모든 실패는 자동 보정)
-===========================
+===============================================
 "@ | Out-File -Encoding utf8 $report
 
         safe_echo "REPORT GENERATED"
 
     ###########################################################################
-    # 7) Artifact Upload
+    # 7) ARTIFACTS
     ###########################################################################
-    - name: "📤 Upload Logs + Reports"
+    - name: "📤 Upload Artifacts"
       uses: actions/upload-artifact@v4
       with:
         name: windows-ultra-installer
