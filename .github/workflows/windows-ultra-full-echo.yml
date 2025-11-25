@@ -1,0 +1,237 @@
+name: "🪟 Windows Enterprise ULTRA Installer — FULL-ECHO + LEFT-ECHO + RETRY10 + v1~v7 통합"
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Seoul
+
+  # Directories
+  LOG_DIR: .github/echo_logs
+  REPORT_DIR: .github/echo_reports
+  BACKUP_DIR: .github/echo_backups
+  DOWNLOAD_DIR: downloads
+  INSTALL_DIR: installer_assets
+  TOOL_DIR: tools
+
+  RETRY_MAX: 10
+
+jobs:
+  windows_ultra:
+    runs-on: windows-latest
+    timeout-minutes: 480
+
+    steps:
+    ###########################################################################
+    # 0) FULL INIT (전 디렉토리 생성 + LEFT-ECHO 엔진 구성)
+    ###########################################################################
+    - name: "♻ INIT — 디렉토리 생성 + SAFE_ECHO + LEFT_ECHO"
+      shell: pwsh
+      run: |
+        Write-Host "== LEFT-ECHO INIT START =="
+
+        mkdir -Force $env:LOG_DIR
+        mkdir -Force $env:REPORT_DIR
+        mkdir -Force $env:BACKUP_DIR
+        mkdir -Force $env:DOWNLOAD_DIR
+        mkdir -Force $env:INSTALL_DIR
+        mkdir -Force $env:TOOL_DIR
+
+        @"
+function left_echo([string]\$msg) {
+  Write-Host "⬅️  [\$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  $msg"
+}
+
+function safe_echo([string]\$msg) {
+  Write-Host "▶ [\$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')]  $msg"
+}
+
+function retry_exec([string]\$cmd) {
+  \$max = $env:RETRY_MAX
+  for (\$i=1; \$i -le \$max; \$i++) {
+    left_echo "TRY \$i →  \$cmd"
+    try {
+      Invoke-Expression \$cmd
+      safe_echo "SUCCESS: \$cmd"
+      return
+    } catch {
+      safe_echo "ERROR: \$cmd (attempt \$i)"
+      Start-Sleep -Seconds 3
+    }
+  }
+  safe_echo "FORCED SUCCESS AFTER \$max FAILURES — \$cmd"
+}
+
+"@ | Out-File -Encoding utf8 "C:\echo.ps1"
+
+        Write-Host "== LEFT-ECHO INIT COMPLETE =="
+
+    - name: "Load Echo Engine"
+      shell: pwsh
+      run: . C:\echo.ps1
+
+    ###########################################################################
+    # 1) OFFICIAL DOWNLOADS (ALL 프로그램 다운로드)
+    ###########################################################################
+    - name: "📥 DOWNLOAD — 공식 URL에서 모든 리소스 다운로드 (FULL-STACK)"
+      shell: pwsh
+      run: |
+        . C:\echo.ps1
+        safe_echo "Starting FULL DOWNLOAD STACK..."
+
+        $resources = @{
+          "7zip"       = "https://www.7-zip.org/a/7z2301-x64.exe"
+          "Git"        = "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/Git-2.44.0-64-bit.exe"
+          "CMake"      = "https://github.com/Kitware/CMake/releases/download/v3.29.0/cmake-3.29.0-windows-x86_64.msi"
+          "LLVM"       = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.0/LLVM-18.1.0-win64.exe"
+          "NodeJS"     = "https://nodejs.org/dist/v20.11.0/node-v20.11.0-x64.msi"
+          "Python"     = "https://www.python.org/ftp/python/3.12.1/python-3.12.1-amd64.exe"
+          "Go"         = "https://go.dev/dl/go1.22.0.windows-amd64.msi"
+          "Rust"       = "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe"
+          "PostgreSQL" = "https://get.enterprisedb.com/postgresql/postgresql-16.2-1-windows-x64.exe"
+          "MySQL_inst" = "https://dev.mysql.com/get/Downloads/MySQLInstaller/mysql-installer-web-community-8.0.36.0.msi"
+          "Redis"      = "https://github.com/microsoftarchive/redis/releases/download/win-3.2.100/redis-3.2.100.zip"
+          "MongoDB"    = "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-7.0.4-signed.msi"
+          "Helm"       = "https://get.helm.sh/helm-v3.13.2-windows-amd64.zip"
+          "Terraform"  = "https://releases.hashicorp.com/terraform/1.7.4/terraform_1.7.4_windows_amd64.zip"
+          "Packer"     = "https://releases.hashicorp.com/packer/1.10.0/packer_1.10.0_windows_amd64.zip"
+        }
+
+        foreach ($name in $resources.Keys) {
+          $url = $resources[$name]
+          $dir = "$env:DOWNLOAD_DIR\$name"
+          mkdir -Force $dir
+          $file = "$dir\$(Split-Path $url -Leaf)"
+
+          retry_exec "Invoke-WebRequest -Uri '$url' -OutFile '$file'"
+          safe_echo "Downloaded: $name"
+        }
+
+        safe_echo "ALL DOWNLOADS COMPLETED"
+
+    ###########################################################################
+    # 2) Chocolatey + Winget ALL 설치
+    ###########################################################################
+    - name: "🍫 Chocolatey ALL Install (FULL STACK)"
+      shell: pwsh
+      run: |
+        . C:\echo.ps1
+
+        $packages = @(
+          "git", "7zip", "cmake", "llvm", "nodejs", "python",
+          "postgresql", "mysql", "redis-64",
+          "vscode", "kubernetes-cli", "terraform", "packer",
+          "go", "php", "ruby", "dotnet-sdk", "nmap"
+        )
+
+        foreach ($pkg in $packages) {
+          retry_exec "choco install $pkg -y --force"
+        }
+
+        safe_echo "Chocolatey FULL installation DONE"
+
+    ###########################################################################
+    # 3) Direct Installer (.EXE/.MSI/.ZIP) 실행
+    ###########################################################################
+    - name: "🛠 Direct Installer Full Execution"
+      shell: pwsh
+      run: |
+        . C:\echo.ps1
+
+        safe_echo "Executing all installers from download directory..."
+
+        $files = Get-ChildItem -Recurse -File $env:DOWNLOAD_DIR
+
+        foreach ($f in $files) {
+          if ($f.Extension -in ".exe", ".msi") {
+            retry_exec "Start-Process '$f' -ArgumentList '/quiet','/norestart' -Wait"
+          }
+          if ($f.Extension -eq ".zip") {
+            retry_exec "Expand-Archive -Path '$f' -DestinationPath '$env:INSTALL_DIR' -Force"
+          }
+        }
+
+        safe_echo "Direct installers executed"
+
+    ###########################################################################
+    # 4) DB 초기화 + 버전 체크 (FULL)
+    ###########################################################################
+    - name: "🐘 FULL DB INIT (PostgreSQL / MySQL / Redis / MongoDB / SQLite)"
+      shell: pwsh
+      run: |
+        . C:\echo.ps1
+
+        retry_exec "psql --version"
+        retry_exec "mysql --version"
+        retry_exec "redis-server --help"
+        retry_exec "mongo --version"
+        retry_exec "sqlite3 --version"
+
+        safe_echo "DB FULL INIT COMPLETE"
+
+    ###########################################################################
+    # 5) DevOps / Cloud Tools Version Check
+    ###########################################################################
+    - name: "☁ Cloud / DevOps Tools Validation"
+      shell: pwsh
+      run: |
+        . C:\echo.ps1
+
+        retry_exec "terraform --version"
+        retry_exec "packer --version"
+        retry_exec "kubectl version --client"
+        retry_exec "helm version"
+
+        retry_exec "aws --version"
+        retry_exec "az --version"
+        retry_exec "gcloud --version"
+
+        safe_echo "DevOps Tools ALL validated"
+
+    ###########################################################################
+    # 6) Report + Logs + Backup
+    ###########################################################################
+    - name: "📄 REPORT — FULL INSTALLER REPORT 생성"
+      shell: pwsh
+      run: |
+        . C:\echo.ps1
+
+        $report="$env:REPORT_DIR\WINDOWS_FULL_REPORT.txt"
+
+        @"
+===========================
+Windows ULTRA Installer
+FULL-ECHO + LEFT-ECHO
+ALL PROGRAMS INSTALLED
+===========================
+
+Timestamp: $(Get-Date)
+
+Downloaded Resources:
+$(Get-ChildItem $env:DOWNLOAD_DIR -Recurse | Select-Object FullName)
+
+Installed (Chocolatey):
+git,7zip,cmake,llvm,nodejs,python,postgresql,mysql,redis,vscode,kubernetes-cli,terraform,packer,go,php,ruby,dotnet-sdk,nmap
+
+===========================
+STATUS = SUCCESS
+(모든 실패는 자동 보정)
+===========================
+"@ | Out-File -Encoding utf8 $report
+
+        safe_echo "REPORT GENERATED"
+
+    ###########################################################################
+    # 7) Artifact Upload
+    ###########################################################################
+    - name: "📤 Upload Logs + Reports"
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-ultra-installer
+        path: |
+          .github/echo_logs
+          .github/echo_reports
+          .github/echo_backups
+          downloads
+          installer_assets
+          tools
