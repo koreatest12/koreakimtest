@@ -67,25 +67,25 @@ jobs:
       shell: bash
       run: |
         cat <<'EOF' > /tmp/echo.sh
-safe_echo(){ echo "▶  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
-left_echo(){ echo "⬅️  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
-right_echo(){ echo "➡️  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
-trace_echo(){ echo "🔎 $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+        safe_echo(){ echo "▶  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+        left_echo(){ echo "⬅️  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+        right_echo(){ echo "➡️  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+        trace_echo(){ echo "🔎 $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
 
-retry_exec(){
-  local cmd="$1"
-  for i in {1..10}; do
-    left_echo "TRY $i : $cmd"
-    if eval "$cmd"; then
-      safe_echo "SUCCESS: $cmd"
-      return 0
-    fi
-    safe_echo "ERROR: $cmd (attempt $i)"
-    sleep 2
-  done
-  safe_echo "FORCED SUCCESS AFTER 10 FAILURES — $cmd"
-}
-EOF
+        retry_exec(){
+          local cmd="$1"
+          for i in {1..10}; do
+            left_echo "TRY $i : $cmd"
+            if eval "$cmd"; then
+              safe_echo "SUCCESS: $cmd"
+              return 0
+            fi
+            safe_echo "ERROR: $cmd (attempt $i)"
+            sleep 2
+          done
+          safe_echo "FORCED SUCCESS AFTER 10 FAILURES — $cmd"
+        }
+        EOF
         chmod +x /tmp/echo.sh
         source /tmp/echo.sh
 
