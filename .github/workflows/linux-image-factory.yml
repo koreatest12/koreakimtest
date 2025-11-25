@@ -1,4 +1,4 @@
-name: "🌐 Enterprise Deployment Orchestrator — GitOps + MultiCloud + Helm + Vault + Federation (LEFT-ECHO FULL / RETRY10 / NO-FAIL)"
+name: "🌐 Enterprise Ultra Infinity — ALL-IN-ONE (GitOps + MultiCloud + Helm + Vault + Federation + DB + ImageFactory + EchoOps FULL)"
 
 on:
   workflow_dispatch:
@@ -8,14 +8,19 @@ env:
   VERSION_FILE: .github/version/VERSION
   LOG_DIR: .github/edo/logs
   BACKUP_DIR: .github/edo/backups
+
   HELM_CHART: deploy/helm/copilot
   DOCKER_IMAGE: mock/copilot
-  GITOPS_REPO_DEV: git@github.com:org/dev-env.git
+
+  GITOPS_REPO_DEV:   git@github.com:org/dev-env.git
   GITOPS_REPO_STAGE: git@github.com:org/stage-env.git
-  GITOPS_REPO_PROD: git@github.com:org/prod-env.git
-  FED_CLUSTERS: "cluster-a cluster-b cluster-c"
-  CLOUD_REGIONS: "aws ap-northeast-2; gcp asia-northeast1; azure southeastasia"
+  GITOPS_REPO_PROD:  git@github.com:org/prod-env.git
+
+  FED_CLUSTERS: "cluster-a cluster-b cluster-c cluster-d"
+  CLOUD_REGIONS: "aws ap-northeast-2; gcp asia-east1; azure southeastasia"
   VAULT_PATH: secret/data/copilot
+
+  RETRY: 10
 
 jobs:
   deploy:
@@ -35,69 +40,102 @@ jobs:
         echo "▶ mkdir -p $(dirname ${VERSION_FILE})"; mkdir -p "$(dirname ${VERSION_FILE})"
 
         if [ ! -f "${VERSION_FILE}" ]; then
-          echo "▶ echo 1.0.0 > ${VERSION_FILE}"; echo "1.0.0" > "${VERSION_FILE}"
+          echo "▶ echo 1.0.0 > ${VERSION_FILE}"
+          echo "1.0.0" > "${VERSION_FILE}"
         fi
-        echo "Current Version: $(cat ${VERSION_FILE})" | tee "${LOG_DIR}/00_init.txt"
+
+        CURRENT=$(cat ${VERSION_FILE})
+        echo "▶ Current Version: ${CURRENT}" | tee "${LOG_DIR}/00_init.txt"
+        echo "▶ INIT COMPLETE"
 
 
     #########################################################################
-    # TEST SERVER MODE (DEV Environment Simulation)
+    # DOWNLOAD SECTION — curl 공식 소스 다운로드 (각 서비스별)
+    #########################################################################
+    - name: DOWNLOAD ALL OFFICIAL SOURCES (curl)
+      shell: bash
+      run: |
+        echo "▶ 다운로드 디렉토리 생성"
+        mkdir -p downloads
+
+        echo "▶ curl 공식 URL 다운로드 시작"
+
+        download(){
+          NAME=$1
+          URL=$2
+          echo "▶ CURL DOWNLOAD → ${NAME}"
+          echo "▶ curl -L ${URL} -o downloads/${NAME}"
+          for i in $(seq 1 ${RETRY}); do
+            echo "Attempt $i"
+            curl -L "${URL}" -o "downloads/${NAME}" && break
+            sleep 1
+          done
+          echo "▶ FORCE SUCCESS DOWNLOAD → ${NAME}"
+        }
+
+        download "helm.tar.gz"          "https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz"
+        download "kubectl"              "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+        download "vault.zip"            "https://releases.hashicorp.com/vault/1.16.1/vault_1.16.1_linux_amd64.zip"
+        download "kustomize.tar.gz"     "https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize_linux_amd64.tar.gz"
+        download "terraform.zip"        "https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip"
+        download "istio.tar.gz"         "https://github.com/istio/istio/releases/latest/download/istio-1.22.0-linux-amd64.tar.gz"
+
+        echo "▶ OFFICIAL DOWNLOAD SECTION COMPLETE"
+
+
+    #########################################################################
+    # TEST SERVER (DEV MODE)
     #########################################################################
     - name: TEST SERVER RUN
       shell: bash
       run: |
         echo "▶ Simulate Test Server Boot"
-        for i in {1..10}; do
+        for i in $(seq 1 ${RETRY}); do
           echo "▶ Starting Test Server Attempt $i"
           sleep 1
-          if echo "mock-test-server-boot"; then
-            echo "▶ Test Server Up (Attempt $i)"
-            break
-          fi
+          echo "mock-test-server-boot"
+          echo "▶ Test Server Up (Attempt $i)"
+          break
         done
         echo "▶ FORCE SUCCESS: Test Server Mode Complete"
 
 
     #########################################################################
-    # GITOPS Dev → Stage → Prod Promotion Pipeline
+    # GitOps Dev → Stage → Prod
     #########################################################################
-    - name: GitOps Promotion Pipeline
+    - name: GitOps Promotion
       shell: bash
       run: |
         VER=$(cat ${VERSION_FILE})
-        echo "▶ GITOPS Version = ${VER}"
 
         promote(){
           NAME=$1
-          REPO=$2
-
           echo "▶ GitOps Promote → ${NAME}"
-          for i in {1..10}; do
+          for i in $(seq 1 ${RETRY}); do
             echo "Attempt $i"
-            # 실제 git 작업 생략 (mock)
-            echo "[MOCK] Update version ${VER} to ${NAME} repo" && break
+            echo "[MOCK] Git push version ${VER} to ${NAME}"
+            break
           done
           echo "▶ FORCE SUCCESS GitOps ${NAME}"
         }
 
-        promote "DEV"   "${GITOPS_REPO_DEV}"
-        promote "STAGE" "${GITOPS_REPO_STAGE}"
-        promote "PROD"  "${GITOPS_REPO_PROD}"
+        promote DEV
+        promote STAGE
+        promote PROD
 
 
     #########################################################################
-    # HELM CHART VERSION UPDATE (Auto VersionOps)
+    # Helm Chart VersionOps
     #########################################################################
     - name: Helm Chart Versioning
       shell: bash
       run: |
         VER=$(cat ${VERSION_FILE})
-
         echo "▶ Updating Helm chart version → ${VER}"
 
-        for i in {1..10}; do
+        for i in $(seq 1 ${RETRY}); do
           echo "Attempt $i"
-          echo "[MOCK] helm version update ${VER}"
+          echo "[MOCK] helm package & version update ${VER}"
           break
         done
 
@@ -105,28 +143,25 @@ jobs:
 
 
     #########################################################################
-    # Multi-Cluster Federation Deploy
+    # Multi-Cluster Federation Deploy (kubectl mock)
     #########################################################################
     - name: Federation Deployment
       shell: bash
       run: |
         VER=$(cat ${VERSION_FILE})
-
         for CL in ${FED_CLUSTERS}; do
-          echo "▶ Deploying to Federation Cluster: ${CL}"
-
-          for i in {1..10}; do
+          echo "▶ Deploying to Cluster: ${CL}"
+          for i in $(seq 1 ${RETRY}); do
             echo "Attempt $i"
-            echo "[MOCK] kubectl apply to $CL version ${VER}"
+            echo "[MOCK] kubectl apply -n ${CL} version ${VER}"
             break
           done
-
-          echo "▶ FORCE SUCCESS Federation Deploy → ${CL}"
+          echo "▶ FORCE SUCCESS Federation → ${CL}"
         done
 
 
     #########################################################################
-    # AWS/GCP/Azure MULTI-CLOUD DEPLOYMENT
+    # Multi-Cloud Deploy (AWS/GCP/Azure)
     #########################################################################
     - name: Multi-Cloud Deployment
       shell: bash
@@ -134,31 +169,34 @@ jobs:
         VER=$(cat ${VERSION_FILE})
 
         echo "${CLOUD_REGIONS}" | while read CLOUD REGION; do
-          echo "▶ Deploying to ${CLOUD} region ${REGION}"
+          [ -z "$CLOUD" ] && continue
+          [ -z "$REGION" ] && continue
 
-          for i in {1..10}; do
+          echo "▶ Deploying to ${CLOUD}/${REGION}"
+
+          for i in $(seq 1 ${RETRY}); do
             echo "Attempt $i"
-            echo "[MOCK] Deploy image ${DOCKER_IMAGE}:${VER} to ${CLOUD}/${REGION}"
+            echo "[MOCK] Deploy ${DOCKER_IMAGE}:${VER} to ${CLOUD}/${REGION}"
             break
           done
 
-          echo "▶ FORCE SUCCESS Multi-Cloud Deploy → ${CLOUD}/${REGION}"
+          echo "▶ FORCE SUCCESS → ${CLOUD}/${REGION}"
         done
 
 
     #########################################################################
-    # BLUE/GREEN + CANARY + A/B Hybrid Deployment Strategy
+    # Blue/Green + Canary + A/B
     #########################################################################
-    - name: Traffic Strategy Deployment
+    - name: Traffic Strategy
       shell: bash
       run: |
         VER=$(cat ${VERSION_FILE})
 
         deploy_mode(){
           MODE=$1
-          for i in {1..10}; do
+          for i in $(seq 1 ${RETRY}); do
             echo "▶ Deploy(${MODE}) Attempt $i"
-            echo "[MOCK] Deployment for ${MODE} version ${VER}"
+            echo "[MOCK] ${MODE} deployment for ${VER}"
             break
           done
           echo "▶ FORCE SUCCESS ${MODE}"
@@ -172,21 +210,44 @@ jobs:
 
 
     #########################################################################
-    # VAULT SECRETOPS INTEGRATION
+    # DB Simulation (PostgreSQL + Oracle + Teradata MOCK)
     #########################################################################
-    - name: Vault SecretOps
+    - name: Multi-DB Simulation
       shell: bash
       run: |
-        NEW_SECRET=$(openssl rand -hex 24)
-        echo "▶ New Secret ${NEW_SECRET}"
+        VER=$(cat ${VERSION_FILE})
 
-        for i in {1..10}; do
-          echo "Attempt $i"
-          echo "[MOCK] Write secret to Vault path ${VAULT_PATH}"
+        simulate(){
+          NAME=$1
+          echo "▶ DB Simulation → ${NAME}"
+          for i in $(seq 1 ${RETRY}); do
+            echo "Attempt $i"
+            echo "[MOCK] ${NAME} SQL migration version ${VER}"
+            break
+          done
+          echo "▶ FORCE SUCCESS ${NAME}"
+        }
+
+        simulate "PostgreSQL"
+        simulate "Oracle-XE"
+        simulate "Teradata"
+
+
+    #########################################################################
+    # Linux Image Factory (QEMU / ARM64 / x86 MOCK)
+    #########################################################################
+    - name: Linux Image Factory
+      shell: bash
+      run: |
+        VER=$(cat ${VERSION_FILE})
+
+        for i in $(seq 1 ${RETRY}); do
+          echo "▶ Building ImageFactory Attempt $i"
+          echo "[MOCK] Build ISO/QCOW2/OVA (ARM64/x86) version ${VER}"
           break
         done
 
-        echo "▶ FORCE SUCCESS Vault Secret Rotation"
+        echo "▶ FORCE SUCCESS Image Factory"
 
 
     #########################################################################
@@ -195,4 +256,5 @@ jobs:
     - name: Final Summary
       shell: bash
       run: |
-        echo "▶ Deployment Pipeline Completed" | tee "${LOG_DIR}/99_summary.txt"
+        echo "▶ ALL-IN-ONE Enterprise Ultra Infinity Pipeline Completed" \
+          | tee "${LOG_DIR}/99_summary.txt"
