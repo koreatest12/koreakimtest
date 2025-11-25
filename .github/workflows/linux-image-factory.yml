@@ -1,10 +1,11 @@
-name: "🌐 Enterprise Ultra Infinity Ω+ vMAX EXTREME — FULL STACK (v1~v7) FULL-ECHO / RETRY10 / NO-FAIL / ALL-MOCK"
+name: "🌐 Enterprise Ultra Infinity Ω+ vMAX EXTREME — (Patched) FULL ECHO / RETRY10 / NO-FAIL / ALL-MOCK / DOWNLOAD STACK / v1~v7"
 
 on:
   workflow_dispatch:
 
 env:
   TZ: Asia/Seoul
+
   VERSION_FILE: .github/version/VERSION
   LOG_DIR: .github/edo/logs
   BACKUP_DIR: .github/edo/backups
@@ -30,29 +31,50 @@ jobs:
     continue-on-error: true
 
     steps:
+
     #########################################################################
-    # INIT
+    # INIT — 오류 0% 패치 적용 버전
     #########################################################################
     - name: INIT
       shell: bash
       run: |
         echo "▶ INIT START"
-        mkdir -p "${LOG_DIR}" "${BACKUP_DIR}" "${DOWNLOAD_DIR}"
+
+        echo "▶ mkdir -p ${LOG_DIR}"
+        mkdir -p "${LOG_DIR}"
+
+        echo "▶ mkdir -p ${BACKUP_DIR}"
+        mkdir -p "${BACKUP_DIR}"
+
+        VERSION_DIR="$(dirname "${VERSION_FILE}")"
+        echo "▶ mkdir -p ${VERSION_DIR}"
+        mkdir -p "${VERSION_DIR}"
+
+        DOWNLOAD_ROOT="${DOWNLOAD_DIR}"
+        echo "▶ mkdir -p ${DOWNLOAD_ROOT}"
+        mkdir -p "${DOWNLOAD_ROOT}"
 
         if [ ! -f "${VERSION_FILE}" ]; then
+          echo "▶ VERSION 파일 없음 → 자동 생성"
           echo "1.0.0" > "${VERSION_FILE}"
+        else
+          echo "▶ VERSION 파일 존재 → 유지"
         fi
+
+        CURRENT=$(cat "${VERSION_FILE}")
+        echo "▶ CURRENT VERSION = ${CURRENT}"
 
         echo "▶ INIT COMPLETE"
 
 
     #########################################################################
-    # DOWNLOAD STACK
+    # DOWNLOAD STACK — 디렉토리 자동 생성 + 공식 다운로드
     #########################################################################
     - name: DOWNLOAD STACK
       shell: bash
       run: |
         echo "▶ DOWNLOAD STACK START"
+
         mkdir -p "${DOWNLOAD_DIR}/helm" \
                  "${DOWNLOAD_DIR}/kubectl" \
                  "${DOWNLOAD_DIR}/terraform" \
@@ -70,8 +92,10 @@ jobs:
           for i in $(seq 1 ${RETRY}); do
             echo "Attempt $i"
             curl -L "${URL}" -o "${DOWNLOAD_DIR}/${DIR}/${NAME}" && break
+            sleep 1
           done
-          echo "▶ FORCE SUCCESS ${NAME}"
+
+          echo "▶ FORCE SUCCESS DOWNLOAD ${NAME}"
         }
 
         download "helm.tar.gz"     "https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz" "helm"
@@ -86,22 +110,106 @@ jobs:
 
 
     #########################################################################
-    # ✦ v2 — MULTI-REGION FAILOVER SIMULATION
+    # MULTI-WORKFLOW CHAIN (MOCK)
+    #########################################################################
+    - name: Multi-Workflow Chain Trigger
+      shell: bash
+      run: |
+        echo "▶ WORKFLOW CHAIN TRIGGER START"
+        WORKFLOWS=("build" "test" "scan" "deploy" "release")
+
+        for WF in "${WORKFLOWS[@]}"; do
+          echo "▶ Trigger Workflow: ${WF}"
+          for i in $(seq 1 ${RETRY}); do
+            echo "Attempt $i"
+            echo "[MOCK] Trigger workflow ${WF}.yml"
+            break
+          done
+          echo "▶ FORCE SUCCESS TRIGGER ${WF}"
+        done
+
+
+    #########################################################################
+    # TERRAFORM INFRA MOCK
+    #########################################################################
+    - name: Terraform MOCK
+      shell: bash
+      run: |
+        echo "▶ TERRAFORM START"
+
+        for i in $(seq 1 ${RETRY}); do
+          echo "Attempt $i"
+          echo "[MOCK] terraform init"
+          echo "[MOCK] terraform validate"
+          echo "[MOCK] terraform plan"
+          echo "[MOCK] terraform apply -auto-approve"
+          break
+        done
+
+        echo "▶ FORCE SUCCESS TERRAFORM"
+
+
+    #########################################################################
+    # KUBERNETES CLUSTER PROVISION MOCK (EKS/GKE/AKS)
+    #########################################################################
+    - name: Kubernetes Auto Cluster Provision
+      shell: bash
+      run: |
+        echo "▶ KUBERNETES CLUSTER PROVISION START"
+
+        provision(){
+          NAME=$1
+          CLOUD=$2
+          echo "▶ Creating Cluster: ${NAME} on ${CLOUD}"
+          for i in $(seq 1 ${RETRY}); do
+            echo "Attempt $i"
+            echo "[MOCK] ${CLOUD} cluster create → ${NAME}"
+            break
+          done
+          echo "▶ FORCE SUCCESS CLUSTER ${NAME}"
+        }
+
+        provision eks-c1   "AWS(EKS)"
+        provision gke-c1   "GCP(GKE)"
+        provision aks-c1   "Azure(AKS)"
+
+
+    #########################################################################
+    # MULTI-ARCH IMAGE BUILD MOCK
+    #########################################################################
+    - name: Multi-Arch Image Build
+      shell: bash
+      run: |
+        echo "▶ MULTI ARCH IMAGE BUILD START"
+
+        for ARCH in amd64 arm64; do
+          echo "▶ Building ${ARCH}"
+          for i in $(seq 1 ${RETRY}); do
+            echo "Attempt $i"
+            echo "[MOCK] docker buildx build --platform linux/${ARCH}"
+            break
+          done
+        done
+
+        echo "▶ FORCE SUCCESS MULTI-ARCH"
+
+
+    #########################################################################
+    # v2 — MULTI-REGION FAILOVER
     #########################################################################
     - name: v2 Multi-Region Failover
       shell: bash
       run: |
-        echo "▶ MULTI-REGION FAILOVER START"
-        REGIONS=("aws/ap-northeast-2" "aws/us-west-2" "gcp/asia-east1" "azure/southeastasia")
+        echo "▶ v2 FAILOVER START"
 
+        REGIONS=("aws/ap-northeast-2" "aws/us-west-2" "gcp/asia-east1" "azure/southeastasia")
         for R in "${REGIONS[@]}"; do
           echo "▶ Active Region → ${R}"
         done
 
-        echo "▶ FAILOVER NOW"
         for i in $(seq 1 ${RETRY}); do
           echo "Attempt $i"
-          echo "[MOCK] shifting traffic from primary → secondary region"
+          echo "[MOCK] Traffic shift primary → secondary"
           break
         done
 
@@ -109,89 +217,88 @@ jobs:
 
 
     #########################################################################
-    # ✦ v3 — CHAOS ENGINEERING SIMULATION (MOCK)
+    # v3 — CHAOS ENGINEERING
     #########################################################################
     - name: v3 Chaos Engineering
       shell: bash
       run: |
-        echo "▶ CHAOS SIMULATION START"
+        echo "▶ v3 CHAOS START"
 
         chaos(){
           TYPE=$1
           echo "▶ CHAOS → ${TYPE}"
           for i in $(seq 1 ${RETRY}); do
-            echo "Attempt $i"
-            echo "[MOCK] Chaos event injected (${TYPE})"
+            echo "[MOCK] chaos injection (${TYPE})"
             break
           done
-          echo "▶ FORCE SUCCESS CHAOS → ${TYPE}"
+          echo "▶ FORCE SUCCESS CHAOS ${TYPE}"
         }
 
         chaos "Pod Kill"
-        chaos "Node Shutdown"
-        chaos "Latency +3000ms"
-        chaos "Packet Loss 40%"
-        chaos "DB Connection Loss"
-        chaos "API Timeout"
-
-        echo "▶ CHAOS SIMULATION COMPLETE"
+        chaos "Node Kill"
+        chaos "Latency Injection"
+        chaos "Packet Loss"
+        chaos "CPU Spike"
+        chaos "DB Timeout"
 
 
     #########################################################################
-    # ✦ v4 — GLOBAL EDGE DEPLOYMENT (MOCK)
+    # v4 — GLOBAL EDGE DEPLOYMENT
     #########################################################################
     - name: v4 Edge Node Deploy
       shell: bash
       run: |
-        echo "▶ EDGE NODE DEPLOY"
+        echo "▶ v4 EDGE DEPLOY START"
 
         EDGE=("cloudfront/global" "gcp/edge-tokyo" "azure/edge-singapore")
         for E in "${EDGE[@]}"; do
           echo "▶ Deploy to ${E}"
-          echo "[MOCK] edge rollout for ${E}"
+          echo "[MOCK] edge rollout ${E}"
         done
 
-        echo "▶ FORCE SUCCESS EDGE DEPLOY"
+        echo "▶ FORCE SUCCESS EDGE"
 
 
     #########################################################################
-    # ✦ v5 — ARGO ROLLOUT PROGRESSIVE CANARY (MOCK)
+    # v5 — ARGO ROLLOUT PROGRESSIVE CANARY
     #########################################################################
-    - name: v5 Argo Progressive Rollout
+    - name: v5 Argo Rollouts
       shell: bash
       run: |
-        echo "▶ ARGO ROLLOUT START"
+        echo "▶ v5 ARGO ROLLOUT START"
 
-        for STEP in 10% 25% 50% 75% 100%; do
-          echo "▶ ROLLOUT STEP ${STEP}"
-          echo "[MOCK] argo rollouts setWeight ${STEP}"
+        STEPS=(10 25 50 75 100)
+        for S in "${STEPS[@]}"; do
+          echo "▶ STEP ${S}%"
+          echo "[MOCK] argo rollouts setWeight ${S}"
         done
 
-        echo "▶ FORCE SUCCESS PROGRESSIVE ROLLOUT"
+        echo "▶ FORCE SUCCESS ARGO ROLLOUT"
 
 
     #########################################################################
-    # ✦ v6 — SBOM SIGNING + COSIGN VERIFY (MOCK)
+    # v6 — SBOM SIGNING + COSIGN
     #########################################################################
-    - name: v6 SBOM Signing & Verification
+    - name: v6 SBOM & Cosign
       shell: bash
       run: |
-        echo "▶ SBOM + COSIGN START"
+        echo "▶ v6 SBOM START"
+
         echo "mock sbom data" > sbom.json
 
         echo "[MOCK] cosign sign sbom.json"
         echo "[MOCK] cosign verify sbom.json"
 
-        echo "▶ FORCE SUCCESS SBOM SIGN & VERIFY"
+        echo "▶ FORCE SUCCESS SBOM"
 
 
     #########################################################################
-    # ✦ v7 — ARGOCD FULL GITOPS INTEGRATION (MOCK)
+    # v7 — ARGOCD FULL GITOPS SYNC
     #########################################################################
-    - name: v7 ArgoCD Integration
+    - name: v7 ArgoCD
       shell: bash
       run: |
-        echo "▶ ARGOCD INTEGRATION START"
+        echo "▶ v7 ARGOCD START"
 
         for i in $(seq 1 ${RETRY}); do
           echo "Attempt $i"
@@ -209,5 +316,5 @@ jobs:
     - name: FINAL SUMMARY
       shell: bash
       run: |
-        echo "▶ Enterprise Ultra Infinity Ω+ vMAX EXTREME Completed" \
+        echo "▶ Enterprise Ultra Infinity Ω+ vMAX EXTREME (Patched) Completed" \
           | tee "${LOG_DIR}/99_summary.txt"
