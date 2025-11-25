@@ -1,4 +1,4 @@
-name: "🌐 Enterprise Ultra Infinity Ω+ vMAX EXTREME — (Patched) FULL ECHO / RETRY10 / NO-FAIL / ALL-MOCK / DOWNLOAD STACK / v1~v7"
+name: "🟥 RED CASTLE — Enterprise Ultra Infinity Ω+ vMAX EXTREME — FULL ECHO / RETRY10 / NO-FAIL / ALL-MOCK / DOWNLOAD STACK / v1~v7"
 
 on:
   workflow_dispatch:
@@ -6,34 +6,30 @@ on:
 env:
   TZ: Asia/Seoul
 
-  VERSION_FILE: .github/version/VERSION
-  LOG_DIR: .github/edo/logs
-  BACKUP_DIR: .github/edo/backups
-  DOWNLOAD_DIR: downloads
+  VERSION_FILE: .github/redcastle/VERSION
+  LOG_DIR: .github/redcastle/logs
+  BACKUP_DIR: .github/redcastle/backups
+  DOWNLOAD_DIR: downloads/redcastle
 
-  HELM_CHART: deploy/helm/copilot
-  DOCKER_IMAGE: mock/copilot
-
-  GITOPS_REPO_DEV:   git@github.com:org/dev-env.git
-  GITOPS_REPO_STAGE: git@github.com:org/stage-env.git
-  GITOPS_REPO_PROD:  git@github.com:org/prod-env.git
-
-  FED_CLUSTERS: "cluster-a cluster-b cluster-c cluster-d"
-  CLOUD_REGIONS: "aws ap-northeast-2; gcp asia-east1; azure southeastasia"
-
-  VAULT_PATH: secret/data/copilot
+  CASTLE_INSTALL_DIR: .github/redcastle/install
   RETRY: 10
+
+  FIREWALL_RULES: "80 443 8443 10000 20000"
+  CASTLE_COMPONENTS: "core shield firewall sentinel watcher guardian"
+
+  FED_CLUSTERS: "castle-a castle-b castle-c"
+  EDGE_NODES: "tokyo seoul singapore"
+  CLOUD_REGIONS: "aws ap-northeast-2; gcp asia-east1; azure southeastasia"
 
 
 jobs:
-  deploy:
+  redcastle:
     runs-on: ubuntu-latest
     continue-on-error: true
 
     steps:
-
     #########################################################################
-    # INIT — 오류 0% 패치 적용 버전
+    # INIT — 디렉토리 준비 + VERSION 생성
     #########################################################################
     - name: INIT
       shell: bash
@@ -50,149 +46,105 @@ jobs:
         echo "▶ mkdir -p ${VERSION_DIR}"
         mkdir -p "${VERSION_DIR}"
 
-        DOWNLOAD_ROOT="${DOWNLOAD_DIR}"
-        echo "▶ mkdir -p ${DOWNLOAD_ROOT}"
-        mkdir -p "${DOWNLOAD_ROOT}"
+        echo "▶ mkdir -p ${DOWNLOAD_DIR}"
+        mkdir -p "${DOWNLOAD_DIR}"
+
+        echo "▶ mkdir -p ${CASTLE_INSTALL_DIR}"
+        mkdir -p "${CASTLE_INSTALL_DIR}"
 
         if [ ! -f "${VERSION_FILE}" ]; then
-          echo "▶ VERSION 파일 없음 → 자동 생성"
           echo "1.0.0" > "${VERSION_FILE}"
-        else
-          echo "▶ VERSION 파일 존재 → 유지"
+          echo "▶ VERSION 파일 생성"
         fi
 
         CURRENT=$(cat "${VERSION_FILE}")
         echo "▶ CURRENT VERSION = ${CURRENT}"
-
         echo "▶ INIT COMPLETE"
 
-
     #########################################################################
-    # DOWNLOAD STACK — 디렉토리 자동 생성 + 공식 다운로드
+    # DOWNLOAD STACK — 공식 스택 모의 다운로드
     #########################################################################
     - name: DOWNLOAD STACK
       shell: bash
       run: |
         echo "▶ DOWNLOAD STACK START"
 
-        mkdir -p "${DOWNLOAD_DIR}/helm" \
-                 "${DOWNLOAD_DIR}/kubectl" \
-                 "${DOWNLOAD_DIR}/terraform" \
-                 "${DOWNLOAD_DIR}/vault" \
-                 "${DOWNLOAD_DIR}/kustomize" \
-                 "${DOWNLOAD_DIR}/istio" \
-                 "${DOWNLOAD_DIR}/cosign"
+        mkdir -p "${DOWNLOAD_DIR}/core" \
+                 "${DOWNLOAD_DIR}/firewall" \
+                 "${DOWNLOAD_DIR}/sentinel" \
+                 "${DOWNLOAD_DIR}/guardian"
 
         download(){
           NAME=$1
           URL=$2
           DIR=$3
-
           echo "▶ Downloading ${NAME}"
           for i in $(seq 1 ${RETRY}); do
             echo "Attempt $i"
             curl -L "${URL}" -o "${DOWNLOAD_DIR}/${DIR}/${NAME}" && break
             sleep 1
           done
-
           echo "▶ FORCE SUCCESS DOWNLOAD ${NAME}"
         }
 
-        download "helm.tar.gz"     "https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz" "helm"
-        download "kubectl"         "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl" "kubectl"
-        download "terraform.zip"   "https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip" "terraform"
-        download "vault.zip"       "https://releases.hashicorp.com/vault/1.16.1/vault_1.16.1_linux_amd64.zip" "vault"
-        download "kustomize.tgz"   "https://github.com/kubernetes-sigs/kustomize/releases/latest/download/kustomize_linux_amd64.tar.gz" "kustomize"
-        download "istio.tar.gz"    "https://github.com/istio/istio/releases/latest/download/istio-1.22.0-linux-amd64.tar.gz" "istio"
-        download "cosign"          "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64" "cosign"
+        download "castle-core.tar.gz" "https://example.com/castle-core" "core"
+        download "castle-firewall.tar.gz" "https://example.com/castle-fw" "firewall"
+        download "castle-sentinel.tar.gz" "https://example.com/castle-sentinel" "sentinel"
+        download "castle-guardian.tar.gz" "https://example.com/castle-guardian" "guardian"
 
         echo "▶ DOWNLOAD STACK COMPLETE"
 
-
     #########################################################################
-    # MULTI-WORKFLOW CHAIN (MOCK)
+    # INSTALLATION MOCK — 레드 케슬 설치 모의
     #########################################################################
-    - name: Multi-Workflow Chain Trigger
+    - name: INSTALL RED CASTLE (MOCK)
       shell: bash
       run: |
-        echo "▶ WORKFLOW CHAIN TRIGGER START"
-        WORKFLOWS=("build" "test" "scan" "deploy" "release")
+        echo "▶ INSTALL START"
 
-        for WF in "${WORKFLOWS[@]}"; do
-          echo "▶ Trigger Workflow: ${WF}"
+        install_step(){
+          STEP=$1
+          echo "▶ INSTALL → ${STEP}"
           for i in $(seq 1 ${RETRY}); do
             echo "Attempt $i"
-            echo "[MOCK] Trigger workflow ${WF}.yml"
+            echo "[MOCK] installing ${STEP}"
             break
           done
-          echo "▶ FORCE SUCCESS TRIGGER ${WF}"
-        done
-
-
-    #########################################################################
-    # TERRAFORM INFRA MOCK
-    #########################################################################
-    - name: Terraform MOCK
-      shell: bash
-      run: |
-        echo "▶ TERRAFORM START"
-
-        for i in $(seq 1 ${RETRY}); do
-          echo "Attempt $i"
-          echo "[MOCK] terraform init"
-          echo "[MOCK] terraform validate"
-          echo "[MOCK] terraform plan"
-          echo "[MOCK] terraform apply -auto-approve"
-          break
-        done
-
-        echo "▶ FORCE SUCCESS TERRAFORM"
-
-
-    #########################################################################
-    # KUBERNETES CLUSTER PROVISION MOCK (EKS/GKE/AKS)
-    #########################################################################
-    - name: Kubernetes Auto Cluster Provision
-      shell: bash
-      run: |
-        echo "▶ KUBERNETES CLUSTER PROVISION START"
-
-        provision(){
-          NAME=$1
-          CLOUD=$2
-          echo "▶ Creating Cluster: ${NAME} on ${CLOUD}"
-          for i in $(seq 1 ${RETRY}); do
-            echo "Attempt $i"
-            echo "[MOCK] ${CLOUD} cluster create → ${NAME}"
-            break
-          done
-          echo "▶ FORCE SUCCESS CLUSTER ${NAME}"
+          echo "▶ FORCE SUCCESS ${STEP}"
         }
 
-        provision eks-c1   "AWS(EKS)"
-        provision gke-c1   "GCP(GKE)"
-        provision aks-c1   "Azure(AKS)"
-
-
-    #########################################################################
-    # MULTI-ARCH IMAGE BUILD MOCK
-    #########################################################################
-    - name: Multi-Arch Image Build
-      shell: bash
-      run: |
-        echo "▶ MULTI ARCH IMAGE BUILD START"
-
-        for ARCH in amd64 arm64; do
-          echo "▶ Building ${ARCH}"
-          for i in $(seq 1 ${RETRY}); do
-            echo "Attempt $i"
-            echo "[MOCK] docker buildx build --platform linux/${ARCH}"
-            break
-          done
+        for C in ${CASTLE_COMPONENTS}; do
+          install_step "${C}"
         done
 
-        echo "▶ FORCE SUCCESS MULTI-ARCH"
+        echo "▶ INSTALL COMPLETE"
 
+    #########################################################################
+    # FIREWALL CONFIGURATION MOCK
+    #########################################################################
+    - name: FIREWALL CONFIG
+      shell: bash
+      run: |
+        echo "▶ FIREWALL CONFIG START"
+        for PORT in ${FIREWALL_RULES}; do
+          echo "▶ Allow port ${PORT}"
+          echo "[MOCK] ufw allow ${PORT}"
+        done
+        echo "▶ FIREWALL CONFIG COMPLETE"
+
+    #########################################################################
+    # v1 — MULTI-WORKFLOW CHAIN MOCK
+    #########################################################################
+    - name: v1 Multi-Workflow Chain
+      shell: bash
+      run: |
+        echo "▶ v1 CHAIN START"
+        WF=("castle-build" "castle-scan" "castle-deploy")
+        for W in "${WF[@]}"; do
+          echo "▶ Trigger: ${W}"
+          echo "[MOCK] Trigger workflow ${W}"
+        done
+        echo "▶ FORCE SUCCESS CHAIN"
 
     #########################################################################
     # v2 — MULTI-REGION FAILOVER
@@ -201,20 +153,12 @@ jobs:
       shell: bash
       run: |
         echo "▶ v2 FAILOVER START"
-
-        REGIONS=("aws/ap-northeast-2" "aws/us-west-2" "gcp/asia-east1" "azure/southeastasia")
+        REGIONS=("aws/ap-northeast-2" "gcp/asia-east1" "azure/southeastasia")
         for R in "${REGIONS[@]}"; do
           echo "▶ Active Region → ${R}"
         done
-
-        for i in $(seq 1 ${RETRY}); do
-          echo "Attempt $i"
-          echo "[MOCK] Traffic shift primary → secondary"
-          break
-        done
-
-        echo "▶ FORCE SUCCESS FAILOVER"
-
+        echo "[MOCK] traffic shift"
+        echo "▶ FAILOVER COMPLETE"
 
     #########################################################################
     # v3 — CHAOS ENGINEERING
@@ -223,92 +167,62 @@ jobs:
       shell: bash
       run: |
         echo "▶ v3 CHAOS START"
-
-        chaos(){
-          TYPE=$1
-          echo "▶ CHAOS → ${TYPE}"
-          for i in $(seq 1 ${RETRY}); do
-            echo "[MOCK] chaos injection (${TYPE})"
-            break
-          done
-          echo "▶ FORCE SUCCESS CHAOS ${TYPE}"
-        }
-
-        chaos "Pod Kill"
-        chaos "Node Kill"
-        chaos "Latency Injection"
-        chaos "Packet Loss"
-        chaos "CPU Spike"
-        chaos "DB Timeout"
-
+        CHAOS_TYPES=("CPU Spike" "Network Drop" "Node Kill" "Pod Kill" "Latency")
+        for T in "${CHAOS_TYPES[@]}"; do
+          echo "▶ CHAOS: ${T}"
+          echo "[MOCK] injecting chaos (${T})"
+        done
+        echo "▶ CHAOS COMPLETE"
 
     #########################################################################
     # v4 — GLOBAL EDGE DEPLOYMENT
     #########################################################################
-    - name: v4 Edge Node Deploy
+    - name: v4 Edge Deployment
       shell: bash
       run: |
-        echo "▶ v4 EDGE DEPLOY START"
-
-        EDGE=("cloudfront/global" "gcp/edge-tokyo" "azure/edge-singapore")
-        for E in "${EDGE[@]}"; do
-          echo "▶ Deploy to ${E}"
-          echo "[MOCK] edge rollout ${E}"
+        echo "▶ v4 EDGE START"
+        for E in ${EDGE_NODES}; do
+          echo "▶ Deploy to edge node: ${E}"
+          echo "[MOCK] rollout to edge ${E}"
         done
-
-        echo "▶ FORCE SUCCESS EDGE"
-
+        echo "▶ EDGE COMPLETE"
 
     #########################################################################
-    # v5 — ARGO ROLLOUT PROGRESSIVE CANARY
+    # v5 — CANARY / GRADUAL ROLLOUT
     #########################################################################
-    - name: v5 Argo Rollouts
+    - name: v5 Canary Rollout
       shell: bash
       run: |
-        echo "▶ v5 ARGO ROLLOUT START"
-
-        STEPS=(10 25 50 75 100)
+        echo "▶ v5 CANARY START"
+        STEPS=(10 30 50 70 100)
         for S in "${STEPS[@]}"; do
-          echo "▶ STEP ${S}%"
-          echo "[MOCK] argo rollouts setWeight ${S}"
+          echo "▶ ROLLOUT ${S}%"
+          echo "[MOCK] rollout set ${S}%"
         done
-
-        echo "▶ FORCE SUCCESS ARGO ROLLOUT"
-
+        echo "▶ CANARY COMPLETE"
 
     #########################################################################
-    # v6 — SBOM SIGNING + COSIGN
+    # v6 — SBOM SIGNING + SECURITY
     #########################################################################
-    - name: v6 SBOM & Cosign
+    - name: v6 SBOM & Signing
       shell: bash
       run: |
         echo "▶ v6 SBOM START"
-
-        echo "mock sbom data" > sbom.json
-
+        echo "{mock sbom}" > sbom.json
         echo "[MOCK] cosign sign sbom.json"
         echo "[MOCK] cosign verify sbom.json"
-
-        echo "▶ FORCE SUCCESS SBOM"
-
+        echo "▶ SBOM COMPLETE"
 
     #########################################################################
-    # v7 — ARGOCD FULL GITOPS SYNC
+    # v7 — GITOPS SYNC (ARGOCD MOCK)
     #########################################################################
-    - name: v7 ArgoCD
+    - name: v7 GitOps / ArgoCD
       shell: bash
       run: |
-        echo "▶ v7 ARGOCD START"
-
-        for i in $(seq 1 ${RETRY}); do
-          echo "Attempt $i"
-          echo "[MOCK] argocd app sync copilot"
-          echo "[MOCK] argocd app wait copilot"
-          break
-        done
-
-        echo "▶ FORCE SUCCESS ARGOCD"
-
+        echo "▶ v7 GITOPS START"
+        echo "[MOCK] argocd app sync redcastle"
+        echo "[MOCK] argocd app wait redcastle"
+        echo "▶ GITOPS COMPLETE"
 
     #########################################################################
     # FINAL SUMMARY
@@ -316,5 +230,5 @@ jobs:
     - name: FINAL SUMMARY
       shell: bash
       run: |
-        echo "▶ Enterprise Ultra Infinity Ω+ vMAX EXTREME (Patched) Completed" \
+        echo "▶ RED CASTLE Enterprise Ultra Infinity Ω+ vMAX EXTREME COMPLETE" \
           | tee "${LOG_DIR}/99_summary.txt"
