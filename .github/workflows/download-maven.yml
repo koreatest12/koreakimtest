@@ -1,4 +1,4 @@
-name: Korea Finance Security & MD Reporting (Mass Build)
+name: Korea Finance Security & MD ISO (Fixed ClamAV)
 
 on:
   schedule:
@@ -18,8 +18,8 @@ permissions:
   contents: write
 
 jobs:
-  korea-security-md-build:
-    name: Security & MD Build (Maven ${{ matrix.maven-version }})
+  korea-fixed-build:
+    name: Build & Sec Report (Maven ${{ matrix.maven-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,10 +41,10 @@ jobs:
     env:
       MAVEN_PRIMARY_BASE_URL: https://dlcdn.apache.org/maven/maven-3
       MAVEN_ARCHIVE_BASE_URL: https://archive.apache.org/dist/maven/maven-3
-      APP_NAME: korea-fin-sec-engine
+      APP_NAME: korea-fin-engine
 
     steps:
-      # --- [환경 설정] ---
+      # --- [1. 환경 설정 및 도구 설치] ---
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -54,21 +54,33 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Install Tools
+      # [FIX] ClamAV Lock 에러 해결 로직 적용
+      - name: Install Tools & Fix ClamAV Lock
         run: |
           sudo apt-get update
-          sudo apt-get install -y genisoimage clamav sysstat
-          sudo freshclam || echo "⚠️ ClamAV DB update skipped."
+          sudo apt-get install -y genisoimage clamav clamav-daemon sysstat
+          
+          echo "🛑 Stopping conflicting ClamAV daemon..."
+          sudo systemctl stop clamav-freshclam || true
+          
+          echo "🔧 Fixing log permissions..."
+          sudo touch /var/log/clamav/freshclam.log
+          sudo chown -R clamav:clamav /var/log/clamav
+          sudo chmod 755 /var/log/clamav
+          
+          echo "🔄 Running manual Freshclam update..."
+          # 업데이트 실패해도 빌드는 계속 진행하도록 처리 (|| true)
+          sudo freshclam || echo "⚠️ Freshclam update warning (Network/Mirror issue). Using default DB."
 
+      # --- [2. 리소스 모니터링 시작] ---
       - name: Start Resource Monitoring
         run: |
           mkdir -p logs
           echo "| Timestamp | CPU% | MEM% | IO Wait |" > logs/sys_monitor.md
           echo "|---|---|---|---|" >> logs/sys_monitor.md
-          # Markdown 포맷으로 로그 기록 (awk 사용하여 파이프 포맷팅)
           vmstat -t 5 | awk '{print "| " $18 " " $19 " | " $13 " | " $4 " | " $16 " |"}' >> logs/vmstat_raw.log &
 
-      # --- [Maven 설치] ---
+      # --- [3. Maven 설치] ---
       - name: Setup Maven ${{ matrix.maven-version }}
         run: |
           set -euo pipefail
@@ -81,7 +93,7 @@ jobs:
           ARCHIVE="https://archive.apache.org/dist/maven/maven-3/${VERSION}/binaries/${FILENAME}"
 
           if curl -fL "${PRIMARY}" -o "${ARCHIVE_PATH}"; then
-            echo "✅ Downloaded Maven"
+            echo "✅ Maven Downloaded"
           else
             curl -fL "${ARCHIVE}" -o "${ARCHIVE_PATH}"
           fi
@@ -90,14 +102,14 @@ jobs:
           echo "MAVEN_HOME=${PWD}/extracted" >> "$GITHUB_ENV"
           echo "${PWD}/extracted/bin" >> "$GITHUB_PATH"
 
-      # --- [통합 시뮬레이터 소스 생성 (Markdown 엔진 포함)] ---
-      - name: Generate Simulator with MD Engine
+      # --- [4. 대한민국 금융 시뮬레이터 생성 (MD 엔진 포함)] ---
+      - name: Generate Simulator Source
         run: |
           set -euo pipefail
-          SRC_DIR="${APP_NAME}/src/main/java/com/korea/sec"
+          SRC_DIR="${APP_NAME}/src/main/java/com/korea/sim"
           mkdir -p "${SRC_DIR}"
           
-          # 1. POM.xml (의존성 추가 시뮬레이션)
+          # POM.xml (보안 의존성 포함)
           cat <<EOF > "${APP_NAME}/pom.xml"
           <project xmlns="http://maven.apache.org/POM/4.0.0" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <modelVersion>4.0.0</modelVersion>
@@ -109,235 +121,197 @@ jobs:
               <maven.compiler.target>17</maven.compiler.target>
             </properties>
             <dependencies>
-                <!-- Simulation Dependencies for Security Check -->
                 <dependency>
                     <groupId>org.apache.commons</groupId>
                     <artifactId>commons-lang3</artifactId>
                     <version>3.12.0</version>
                 </dependency>
                 <dependency>
-                    <groupId>com.google.guava</groupId>
-                    <artifactId>guava</artifactId>
-                    <version>31.1-jre</version>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>jackson-databind</artifactId>
+                    <version>2.13.0</version>
                 </dependency>
             </dependencies>
           </project>
           EOF
 
-          # 2. Java Main Logic (MD Reports + Security Logic)
-          cat <<EOF > "${SRC_DIR}/KoreaSecSimulator.java"
-          package com.korea.sec;
-          
+          # Java Code (인구/금융 시뮬레이션 + MD 리포트 생성)
+          cat <<EOF > "${SRC_DIR}/KoreaSimApp.java"
+          package com.korea.sim;
           import java.io.*;
           import java.text.DecimalFormat;
           import java.time.LocalDateTime;
           import java.util.*;
 
-          public class KoreaSecSimulator {
+          public class KoreaSimApp {
               static final long POPULATION = 51_750_000L;
               static Random rand = new Random();
-              static List<String> regions = Arrays.asList("Seoul", "Gyeonggi", "Busan", "Incheon", "Daegu");
-              
-              // 통계 집계용 변수
-              static long totalBankVol = 0;
-              static long totalStockVol = 0;
-              static long totalCryptoVol = 0;
-              
+              static DecimalFormat df = new DecimalFormat("#,###");
+
               public static void main(String[] args) throws IOException {
                   int custCount = Integer.parseInt(args.length > 0 ? args[0] : "50000");
                   int txCount = Integer.parseInt(args.length > 1 ? args[1] : "3000");
-
-                  System.out.println("=== KOREA FINANCE SECURITY SIMULATOR ===");
                   
-                  // 1. Data Simulation
-                  simulateData(custCount, txCount);
-
-                  // 2. Generate Markdown Reports
+                  System.out.println("=== KOREA FINANCE SIMULATION (FIXED BUILD) ===");
+                  
+                  // 1. Markdown 리포트 생성
                   generateMdReports(custCount, txCount);
                   
-                  System.out.println("✅ Markdown Reports Generated.");
-              }
-
-              private static void simulateData(int custCount, int txCount) {
-                  // 간단한 통계 시뮬레이션 (실제 데이터 생성은 이전 단계 로직과 동일하다고 가정하고 요약만 처리)
-                  for(int i=0; i<txCount; i++) {
-                      totalBankVol += (rand.nextInt(100) + 1) * 10000L;
-                      totalStockVol += (rand.nextInt(50) + 1) * 50000L;
-                      totalCryptoVol += (rand.nextInt(1000) + 1) * 1000L;
-                  }
+                  // 2. SQL 데이터 생성 (간략화)
+                  generateSql(custCount);
               }
 
               private static void generateMdReports(int custCount, int txCount) throws IOException {
-                  String date = LocalDateTime.now().toString();
-                  DecimalFormat df = new DecimalFormat("#,###");
-
-                  // Report 1: Executive Summary
+                  // Executive Summary
                   try(PrintWriter pw = new PrintWriter(new FileWriter("Report_00_Executive_Summary.md"))) {
-                      pw.println("# 📊 Executive Summary: Korea Financial System");
-                      pw.println("**Date:** " + date + "  ");
-                      pw.println("**Maven Version:** System Build Artifact  ");
+                      pw.println("# 🇰🇷 Executive Summary: Korea Finance System");
+                      pw.println("**Build Date:** " + LocalDateTime.now() + "  ");
+                      pw.println("**Status:** ✅ System Stable  ");
                       pw.println("");
-                      pw.println("## 📌 Key Metrics");
-                      pw.println("| Metric | Value |");
-                      pw.println("|---|---|");
-                      pw.println("| **Total Population** | " + df.format(POPULATION) + " |");
-                      pw.println("| **Active Customers** | " + df.format(custCount) + " |");
-                      pw.println("| **Total Transactions** | " + df.format(txCount * 3) + " |");
-                      pw.println("| **System Status** | 🟢 Operational |");
-                  }
-
-                  // Report 2: Population
-                  try(PrintWriter pw = new PrintWriter(new FileWriter("Report_01_Population.md"))) {
-                      pw.println("# 👥 Korea Demographics Report");
-                      pw.println("## Regional Distribution (Simulated)");
-                      pw.println("| Region | Population (Est.) | Share |");
+                      pw.println("## 📊 Key Indicators");
+                      pw.println("| Indicator | Value | Note |");
                       pw.println("|---|---|---|");
-                      pw.println("| Seoul | " + df.format(POPULATION * 0.18) + " | 18% |");
-                      pw.println("| Gyeonggi | " + df.format(POPULATION * 0.26) + " | 26% |");
-                      pw.println("| Busan | " + df.format(POPULATION * 0.06) + " | 6% |");
-                      pw.println("| Others | " + df.format(POPULATION * 0.50) + " | 50% |");
+                      pw.println("| **Total Population** | " + df.format(POPULATION) + " | 2024 Est. |");
+                      pw.println("| **Active Users** | " + df.format(custCount) + " | Simulated |");
+                      pw.println("| **Daily Transactions** | " + df.format(txCount * 3) + " | Bank/Stock/Crypto |");
                   }
-
-                  // Report 3: Financial Services
-                  try(PrintWriter pw = new PrintWriter(new FileWriter("Report_02_Financial_Services.md"))) {
-                      pw.println("# 💰 Financial Services Report");
-                      pw.println("## Transaction Volume by Sector");
-                      pw.println("| Sector | Volume (KRW) | Status |");
-                      pw.println("|---|---|---|");
-                      pw.println("| **Banking** | " + df.format(totalBankVol) + " | Normal |");
-                      pw.println("| **Stock Market** | " + df.format(totalStockVol) + " | Active |");
-                      pw.println("| **Crypto Asset** | " + df.format(totalCryptoVol) + " | Volatile |");
+                  
+                  // Financial Sector Report
+                  try(PrintWriter pw = new PrintWriter(new FileWriter("Report_02_Finance_Analysis.md"))) {
+                      pw.println("# 💰 Financial Sector Analysis");
+                      pw.println("## 1. Banking (Deposit/Withdrawal)");
+                      pw.println("- **Avg Transaction:** " + df.format(rand.nextInt(50)*10000) + " KRW");
+                      pw.println("- **Stability:** High");
                       pw.println("");
-                      pw.println("## ⚠️ Anomalies");
-                      pw.println("- No major anomalies detected in transaction logs.");
+                      pw.println("## 2. Stock Market (KOSPI/KOSDAQ)");
+                      pw.println("- **Active Traders:** " + df.format(custCount * 0.3));
+                      pw.println("- **Top Vol:** Samsung Elec, SK Hynix");
+                      pw.println("");
+                      pw.println("## 3. Crypto Assets");
+                      pw.println("- **Volatility Index:** High");
+                      pw.println("- **Top Assets:** BTC, ETH, XRP");
+                  }
+              }
+
+              private static void generateSql(int count) throws IOException {
+                  try(PrintWriter pw = new PrintWriter(new FileWriter("korea_customers.sql"))) {
+                      pw.println("-- Active Customer Dump");
+                      pw.println("INSERT INTO customers (id, name, region) VALUES");
+                      pw.println("('CUST_001', 'Kim Min-su', 'Seoul'),");
+                      pw.println("('CUST_002', 'Lee Ji-eun', 'Gyeonggi');");
+                      pw.println("-- ... (Truncated for simulation speed)");
                   }
               }
           }
           EOF
-          echo "✅ Simulator Source Generated."
 
-      # --- [빌드 및 실행] ---
-      - name: Build & Run
+      # --- [5. 빌드 및 실행] ---
+      - name: Build & Simulate
         run: |
           set -euo pipefail
           cd "${APP_NAME}"
           mvn -q -B clean package
-          java -cp "target/${APP_NAME}-1.0.0.jar" com.korea.sec.KoreaSecSimulator ${{ inputs.active_customer_count }} ${{ inputs.transaction_count }}
+          java -cp "target/${APP_NAME}-1.0.0.jar" com.korea.sim.KoreaSimApp ${{ inputs.active_customer_count }} ${{ inputs.transaction_count }}
           
-          # MD 파일 이동
+          # 아티팩트 정리
           mkdir -p ../artifacts/reports
           mv Report_*.md ../artifacts/reports/
+          cp *.sql ../artifacts/reports/
           cp target/*.jar ../artifacts/
 
-      # --- [종속성 및 보안 분석 (Dependency Submission)] ---
-      - name: Dependency & Security Analysis
+      # --- [6. 종속성 및 보안 분석 (Security Submission)] ---
+      - name: Dependency & Security Submission
         run: |
           set -euo pipefail
           cd "${APP_NAME}"
           
-          # 1. Maven Dependency Tree 생성
-          echo "Generating Dependency Tree..."
-          mvn -q dependency:tree -DoutputFile=dependency_tree.txt
+          # Dependency Tree 추출
+          mvn -q dependency:tree -DoutputFile=dep_tree.txt
           
-          # 2. Dependency List 생성
-          mvn -q dependency:list -DoutputFile=dependency_list.txt
-          
-          # 3. Security Audit Report.md 생성
-          echo "# 🛡️ Security & Dependency Audit Report" > ../artifacts/reports/Report_03_Security_Audit.md
-          echo "**Scan Date:** $(date)" >> ../artifacts/reports/Report_03_Security_Audit.md
+          # 보안 리포트 생성
+          echo "# 🛡️ Security Audit & Dependency Report" > ../artifacts/reports/Report_03_Security_Audit.md
+          echo "**Scan Timestamp:** $(date)" >> ../artifacts/reports/Report_03_Security_Audit.md
           echo "" >> ../artifacts/reports/Report_03_Security_Audit.md
           
-          echo "## 📦 Dependency Tree (SBOM)" >> ../artifacts/reports/Report_03_Security_Audit.md
+          echo "## 📦 Software Bill of Materials (SBOM)" >> ../artifacts/reports/Report_03_Security_Audit.md
           echo '```' >> ../artifacts/reports/Report_03_Security_Audit.md
-          cat dependency_tree.txt >> ../artifacts/reports/Report_03_Security_Audit.md
+          cat dep_tree.txt >> ../artifacts/reports/Report_03_Security_Audit.md
           echo '```' >> ../artifacts/reports/Report_03_Security_Audit.md
-          echo "" >> ../artifacts/reports/Report_03_Security_Audit.md
-          
-          echo "## 🔍 Vulnerability Analysis (Simulated)" >> ../artifacts/reports/Report_03_Security_Audit.md
-          echo "| Library | Version | Status | Risk |" >> ../artifacts/reports/Report_03_Security_Audit.md
-          echo "|---|---|---|---|" >> ../artifacts/reports/Report_03_Security_Audit.md
-          echo "| commons-lang3 | 3.12.0 | ✅ Secure | Low |" >> ../artifacts/reports/Report_03_Security_Audit.md
-          echo "| guava | 31.1-jre | ✅ Secure | Low |" >> ../artifacts/reports/Report_03_Security_Audit.md
-          echo "" >> ../artifacts/reports/Report_03_Security_Audit.md
 
-      # --- [바이러스 스캔 및 결과 통합] ---
-      - name: Virus Scan Integration
+      # --- [7. 바이러스 스캔 통합] ---
+      - name: ClamAV Scan Integration
         run: |
-          echo "## 🦠 Antivirus Scan (ClamAV)" >> artifacts/reports/Report_03_Security_Audit.md
+          echo "## 🦠 Antivirus Scan Results (ClamAV)" >> artifacts/reports/Report_03_Security_Audit.md
+          echo "Scanning artifacts directory..."
           echo '```' >> artifacts/reports/Report_03_Security_Audit.md
           
+          # clamscan 실행 (에러 발생 시에도 로그는 기록되도록 처리)
           if clamscan -r -i artifacts > logs/clamav_scan.log; then
-            echo "Result: CLEAN" >> artifacts/reports/Report_03_Security_Audit.md
-            cat logs/clamav_scan.log >> artifacts/reports/Report_03_Security_Audit.md
+             echo "✅ Status: CLEAN (No threats found)" >> artifacts/reports/Report_03_Security_Audit.md
           else
-            echo "Result: WARNING" >> artifacts/reports/Report_03_Security_Audit.md
+             echo "⚠️ Status: THREAT DETECTED or WARNING" >> artifacts/reports/Report_03_Security_Audit.md
           fi
+          
+          cat logs/clamav_scan.log >> artifacts/reports/Report_03_Security_Audit.md
           echo '```' >> artifacts/reports/Report_03_Security_Audit.md
 
-      # --- [시스템 리소스 로그 추가] ---
-      - name: Finalize Reports
+      # --- [8. 리소스 로그 마무리기] ---
+      - name: Finalize Resource Log
         run: |
-          # 모니터링 종료
           pkill vmstat || true
           
-          # 리소스 보고서 생성
-          echo "# ⚙️ System Resource Usage" > artifacts/reports/Report_04_System_Resources.md
-          echo "Measured during Maven Build & Simulation" >> artifacts/reports/Report_04_System_Resources.md
+          echo "# ⚙️ System Resource Logs" > artifacts/reports/Report_04_System_Resources.md
           cat logs/sys_monitor.md >> artifacts/reports/Report_04_System_Resources.md
           cat logs/vmstat_raw.log | awk '{print "| " $0 " |"}' >> artifacts/reports/Report_04_System_Resources.md
 
-      # --- [ISO 패키징] ---
+      # --- [9. ISO 패키징] ---
       - name: Package ISO
         run: |
           VERSION="${{ matrix.maven-version }}"
           ROOT="iso_root"
-          mkdir -p "${ROOT}/00_Executive_Reports_MD"
-          mkdir -p "${ROOT}/01_System_Binaries"
-          mkdir -p "${ROOT}/02_Security_Audit"
+          mkdir -p "${ROOT}/00_Executive_Reports"
+          mkdir -p "${ROOT}/01_Binaries"
+          mkdir -p "${ROOT}/02_Security_Logs"
           
-          # 1. Markdown 보고서 배치 (최상위 접근성)
+          # Markdown 보고서를 최상위에도 복사
           cp artifacts/reports/Report_00_*.md "${ROOT}/"
-          cp artifacts/reports/*.md "${ROOT}/00_Executive_Reports_MD/"
           
-          # 2. 시스템 파일
-          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ROOT}/01_System_Binaries/"
-          cp "artifacts/${APP_NAME}-1.0.0.jar" "${ROOT}/01_System_Binaries/"
-          
-          # 3. 보안 감사 자료
-          cp artifacts/reports/Report_03_Security_Audit.md "${ROOT}/02_Security_Audit/"
+          # 폴더별 정리
+          cp artifacts/reports/*.md "${ROOT}/00_Executive_Reports/"
+          cp artifacts/reports/*.sql "${ROOT}/00_Executive_Reports/"
+          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ROOT}/01_Binaries/"
+          cp "artifacts/${APP_NAME}-1.0.0.jar" "${ROOT}/01_Binaries/"
+          cp logs/clamav_scan.log "${ROOT}/02_Security_Logs/"
           
           # ISO 생성
-          mkisofs -o "dump/Korea-Sec-Report-${VERSION}.iso" -J -R -V "KOR-SEC-${VERSION}" "${ROOT}"
+          mkisofs -o "dump/Korea-Fixed-Sec-${VERSION}.iso" -J -R -V "KOR-SEC-${VERSION}" "${ROOT}"
           
-          echo "✅ ISO Created."
+          echo "✅ ISO Created Successfully"
 
+      # --- [10. 릴리즈 배포] ---
       - name: Release to GitHub
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v${{ matrix.maven-version }}-sec-md"
-          name: "Korea Fin Security & MD Reports (Maven ${{ matrix.maven-version }})"
+          tag: "v${{ matrix.maven-version }}-fixed-sec"
+          name: "Korea Fin Security & MD (Fixed ClamAV) - ${{ matrix.maven-version }}"
           body: |
-            ## 🇰🇷 Korea Finance Security & Markdown Reports
-            **Maven ${{ matrix.maven-version }} | Security Submitted**
+            ## 🇰🇷 Korea Finance Security & MD Reports (Fixed)
+            **Maven ${{ matrix.maven-version }} | ClamAV Lock Fixed**
             
-            This release features **Automated Markdown Reporting** and **Dependency/Security Submission**.
+            This release fixes the `freshclam` lock error and provides full security reporting.
             
-            ### 📄 Markdown Reports (Inside ISO)
-            - **`Report_00_Executive_Summary.md`**: Dashboard overview of Population & Finance.
-            - **`Report_01_Population.md`**: Demographics analysis (Seoul, Gyeonggi, etc.).
-            - **`Report_02_Financial_Services.md`**: Banking/Stock/Crypto volume analysis.
-            - **`Report_03_Security_Audit.md`**: **SBOM (Dependency Tree)** + **ClamAV Scan Results**.
-            - **`Report_04_System_Resources.md`**: Server CPU/RAM usage logs.
+            ### 🛠️ Fix Details
+            - Stopped `clamav-freshclam` daemon before update.
+            - Fixed permissions for `/var/log/clamav`.
             
-            ### 🛡️ Security Features
-            - **Dependency Submission:** Maven Dependency Tree analysis included.
-            - **Virus Check:** Artifacts scanned with ClamAV.
+            ### 📄 Reports (Markdown)
+            - **Executive Summary:** Overview of 51.7M Population & Transactions.
+            - **Security Audit:** Dependency Tree (SBOM) + ClamAV Scan.
+            - **System Resources:** CPU/Memory usage during simulation.
             
             *Automated by GitHub Actions.*
-          artifacts: |
-            dump/*.iso
-            artifacts/reports/*.md
+          artifacts: "dump/*.iso"
           allowUpdates: true
           replacesArtifacts: true
           makeLatest: ${{ matrix.maven-version == '3.9.11' }}
