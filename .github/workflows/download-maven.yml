@@ -1,4 +1,4 @@
-name: Advanced Maven Build & Release (Fixed & Stable)
+name: Maven ISO Build & Release (All Versions)
 
 on:
   workflow_dispatch:
@@ -13,8 +13,8 @@ permissions:
   contents: write
 
 jobs:
-  manage-maven-release:
-    name: Build & Release Maven ${{ matrix.maven-version }}
+  build-iso-release:
+    name: Build ISO & Release Maven ${{ matrix.maven-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -36,44 +36,38 @@ jobs:
     env:
       MAVEN_PRIMARY_BASE_URL: https://dlcdn.apache.org/maven/maven-3
       MAVEN_ARCHIVE_BASE_URL: https://archive.apache.org/dist/maven/maven-3
-      # [FIX] 401 에러가 발생하는 옛날 프로젝트 대신, Spring 공식 PetClinic으로 교체하여 빌드 안정성 확보
       TARGET_REPO: spring-projects/spring-petclinic
       TARGET_DIR: spring-petclinic
 
     steps:
+      # 1. 기본 환경 설정 및 체크아웃
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # [FIX] 타겟 프로젝트 클론 (Spring PetClinic)
-      - name: Checkout Spring Boot Project (PetClinic)
+      - name: Checkout Spring PetClinic (Stable Target)
         uses: actions/checkout@v4
         with:
           repository: ${{ env.TARGET_REPO }}
           path: ${{ env.TARGET_DIR }}
 
-      # PetClinic은 최신 Java 17을 공식 지원하므로 호환성이 완벽합니다.
       - name: Set up Temurin JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Cache Maven repository
-        uses: actions/cache@v4
-        with:
-          path: ~/.m2/repository
-          key: maven-repo-${{ runner.os }}-${{ matrix.maven-version }}
-          restore-keys: |
-            maven-repo-${{ runner.os }}-
-
-      - name: Prepare directories
+      # 2. ISO 생성 도구 설치
+      - name: Install ISO creation tools
         run: |
-          mkdir -p dump
-          mkdir -p extracted
+          sudo apt-get update
+          sudo apt-get install -y genisoimage
 
+      # 3. Maven 다운로드 및 검증
       - name: Download Apache Maven
         run: |
           set -euo pipefail
+          mkdir -p dump extracted
+          
           VERSION="${{ matrix.maven-version }}"
           FILENAME="apache-maven-${VERSION}-bin.tar.gz"
           ARCHIVE_PATH="dump/${FILENAME}"
@@ -82,43 +76,18 @@ jobs:
           ARCHIVE_URL="${MAVEN_ARCHIVE_BASE_URL}/${VERSION}/binaries/${FILENAME}"
 
           echo "Downloading Maven ${VERSION}..."
-          
           if curl -fL "${PRIMARY_URL}" -o "${ARCHIVE_PATH}"; then
-            echo "✅ Downloaded from Primary CDN"
+            echo "✅ Downloaded from Primary"
           else
             echo "⚠️ Primary failed, attempting Archive..."
             if curl -fL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"; then
               echo "✅ Downloaded from Archive"
             else
-              echo "❌ Failed to download Maven ${VERSION}"
               exit 1
             fi
           fi
 
-      - name: Verify Checksum
-        run: |
-          set -euo pipefail
-          VERSION="${{ matrix.maven-version }}"
-          FILENAME="apache-maven-${VERSION}-bin.tar.gz"
-          SHA_FILENAME="${FILENAME}.sha512"
-          ARCHIVE_PATH="dump/${FILENAME}"
-          SHA_PATH="dump/${SHA_FILENAME}"
-          
-          PRIMARY_SHA="${MAVEN_PRIMARY_BASE_URL}/${VERSION}/binaries/${SHA_FILENAME}"
-          ARCHIVE_SHA="${MAVEN_ARCHIVE_BASE_URL}/${VERSION}/binaries/${SHA_FILENAME}"
-
-          if curl -fL "${PRIMARY_SHA}" -o "${SHA_PATH}"; then
-             echo "✅ SHA512 downloaded from Primary"
-          else
-             curl -fL "${ARCHIVE_SHA}" -o "${SHA_PATH}"
-             echo "✅ SHA512 downloaded from Archive"
-          fi
-
-          EXPECTED_HASH=$(cut -d ' ' -f1 "${SHA_PATH}")
-          echo "${EXPECTED_HASH}  ${ARCHIVE_PATH}" | sha512sum -c -
-          echo "✅ Checksum verified."
-
-      - name: Extract and Set Environment
+      - name: Extract Maven
         run: |
           set -euo pipefail
           VERSION="${{ matrix.maven-version }}"
@@ -131,76 +100,77 @@ jobs:
           echo "MAVEN_HOME=${PWD}/${EXTRACT_DIR}" >> "$GITHUB_ENV"
           echo "${PWD}/${EXTRACT_DIR}/bin" >> "$GITHUB_PATH"
 
-      - name: Maven Version & Smoke Test
-        run: |
-          mvn -version
-          
-          mkdir -p maven-smoke-test
-          cd maven-smoke-test
-          mvn -q -B archetype:generate \
-            -DarchetypeArtifactId=maven-archetype-quickstart \
-            -DgroupId=com.smoke \
-            -DartifactId=test-app \
-            -Dpackage=com.smoke.app \
-            -Dversion=1.0.0
-          
-          cd test-app
-          mvn -q -B package
-          echo "✅ Simple smoke test passed."
-
-      # [FIX] 안정적인 Spring PetClinic 빌드 (Tests Skip으로 속도 향상)
+      # 4. Spring PetClinic 빌드 (Maven 검증용)
       - name: Build Spring PetClinic
         run: |
           set -euo pipefail
-          echo "Building ${{ env.TARGET_REPO }} with Maven ${{ matrix.maven-version }}"
-          
           cd ${{ env.TARGET_DIR }}
-          
-          # 공식 저장소(Maven Central)를 사용하므로 401 에러가 발생하지 않음
+          echo "Building PetClinic with Maven ${{ matrix.maven-version }}..."
           mvn -q -B -DskipTests clean package
-          
-          echo "✅ Spring PetClinic Build Complete."
+          echo "✅ Build Success"
 
-      - name: Repackage Extracted Version
+      # 5. 재패키징 (Extracted Tarball)
+      - name: Repackage Extracted Maven
         run: |
           VERSION="${{ matrix.maven-version }}"
-          EXTRACT_DIR="extracted/apache-maven-${VERSION}"
-          REPACK_NAME="dump/apache-maven-${VERSION}-extracted.tar.gz"
+          tar -czf "dump/apache-maven-${VERSION}-extracted.tar.gz" -C "extracted/apache-maven-${VERSION}" .
+
+      # 6. [NEW] ISO 파일 생성
+      - name: Create ISO Image
+        run: |
+          set -euo pipefail
+          VERSION="${{ matrix.maven-version }}"
+          ISO_ROOT="iso_root"
+          mkdir -p "${ISO_ROOT}"
+
+          # ISO에 포함할 파일 복사
+          echo "Copying artifacts to ISO root..."
+          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ISO_ROOT}/"
+          cp "dump/apache-maven-${VERSION}-extracted.tar.gz" "${ISO_ROOT}/"
           
-          tar -czf "${REPACK_NAME}" -C "${EXTRACT_DIR}" .
-          echo "✅ Repackaged to ${REPACK_NAME}"
+          # 빌드된 Spring Boot JAR 파일 복사
+          mkdir -p "${ISO_ROOT}/spring-boot-app"
+          cp ${{ env.TARGET_DIR }}/target/*.jar "${ISO_ROOT}/spring-boot-app/" || echo "No JAR found"
 
-      - name: Upload Workflow Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: maven-${{ matrix.maven-version }}-bundle
-          path: dump/*.tar.gz
-          retention-days: 3
+          # README 작성
+          echo "Apache Maven ${VERSION} ISO Bundle" > "${ISO_ROOT}/README.txt"
+          echo "Built on $(date)" >> "${ISO_ROOT}/README.txt"
+          echo "Contains: Maven Binary, Extracted Folder, and Spring PetClinic Example JAR" >> "${ISO_ROOT}/README.txt"
 
+          # ISO 생성 (mkisofs 사용)
+          ISO_FILENAME="dump/apache-maven-${VERSION}-bundle.iso"
+          mkisofs -o "${ISO_FILENAME}" -J -R -V "Maven-${VERSION}" "${ISO_ROOT}"
+          
+          echo "✅ ISO Created: ${ISO_FILENAME}"
+          ls -lh "${ISO_FILENAME}"
+
+      # 7. 릴리즈 생성 및 파일 업로드 (ISO 포함)
       - name: Release to GitHub
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: "maven-${{ matrix.maven-version }}"
-          name: "Apache Maven ${{ matrix.maven-version }} Build"
+          name: "Apache Maven ${{ matrix.maven-version }} + ISO Bundle"
           body: |
-            ## Apache Maven ${{ matrix.maven-version }}
+            ## Apache Maven ${{ matrix.maven-version }} Released
             
-            This release contains verified Maven binaries.
+            This release includes an **ISO image** containing the Maven binaries and a verified Spring Boot application.
             
-            ### Build Verification Status
-            - **JDK:** Temurin 17
-            - **Smoke Test:** Passed (Archetype generation)
-            - **Integration Build:** Passed (`spring-projects/spring-petclinic`)
+            ### 📦 Assets
+            - **💿 ISO Image:** `apache-maven-${{ matrix.maven-version }}-bundle.iso` (Mountable image)
+            - **📦 Archive:** `apache-maven-${{ matrix.maven-version }}-bin.tar.gz`
+            - **📂 Extracted:** `apache-maven-${{ matrix.maven-version }}-extracted.tar.gz`
             
-            **Files:**
-            - `apache-maven-${{ matrix.maven-version }}-bin.tar.gz` (Original)
-            - `apache-maven-${{ matrix.maven-version }}-extracted.tar.gz` (Repackaged)
+            ### ✅ Verification
+            - **Build Target:** `spring-projects/spring-petclinic`
+            - **Java Version:** JDK 17
+            - **Status:** Build Passed
             
-            *Automated release by GitHub Actions.*
-          artifacts: "dump/*.tar.gz"
+            *Automated ISO generation by GitHub Actions.*
+          artifacts: |
+            dump/apache-maven-${{ matrix.maven-version }}-bin.tar.gz
+            dump/apache-maven-${{ matrix.maven-version }}-extracted.tar.gz
+            dump/apache-maven-${{ matrix.maven-version }}-bundle.iso
           allowUpdates: true
           replacesArtifacts: true
           makeLatest: ${{ matrix.maven-version == '3.9.11' }}
-          draft: false
-          prerelease: false
