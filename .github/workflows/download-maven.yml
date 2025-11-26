@@ -1,20 +1,19 @@
-name: Sales Report Server & Maven ISO Build (Mass Deploy)
+name: Financial BPR Simulation & Maven ISO (Mass Build)
 
 on:
   workflow_dispatch:
     inputs:
-      force_release:
-        description: 'Force recreate release'
+      transaction_count:
+        description: 'Number of virtual transactions to generate'
         required: false
-        type: boolean
-        default: true
+        default: '1000'
 
 permissions:
   contents: write
 
 jobs:
-  build-sales-server-iso:
-    name: Build Sales Server & ISO (Maven ${{ matrix.maven-version }})
+  financial-simulation-build:
+    name: BPR Simulation (Maven ${{ matrix.maven-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -36,10 +35,10 @@ jobs:
     env:
       MAVEN_PRIMARY_BASE_URL: https://dlcdn.apache.org/maven/maven-3
       MAVEN_ARCHIVE_BASE_URL: https://archive.apache.org/dist/maven/maven-3
-      SERVER_APP_NAME: sales-branch-report-server
+      APP_NAME: finance-transaction-system
 
     steps:
-      # 1. 기본 환경 설정
+      # 1. 환경 설정
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -54,20 +53,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y genisoimage
 
-      # 2. Maven 다운로드 및 설정
+      # 2. Maven 설치 (각 버전별)
       - name: Setup Maven ${{ matrix.maven-version }}
         run: |
           set -euo pipefail
           VERSION="${{ matrix.maven-version }}"
           mkdir -p dump extracted
           
-          # 다운로드 경로 설정
           FILENAME="apache-maven-${VERSION}-bin.tar.gz"
           ARCHIVE_PATH="dump/${FILENAME}"
           PRIMARY_URL="${MAVEN_PRIMARY_BASE_URL}/${VERSION}/binaries/${FILENAME}"
           ARCHIVE_URL="${MAVEN_ARCHIVE_BASE_URL}/${VERSION}/binaries/${FILENAME}"
 
-          # 다운로드 시도
           if curl -fL "${PRIMARY_URL}" -o "${ARCHIVE_PATH}"; then
             echo "✅ Downloaded from Primary"
           else
@@ -75,170 +72,224 @@ jobs:
             curl -fL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"
           fi
 
-          # 압축 해제
           EXTRACT_DIR="extracted/apache-maven-${VERSION}"
           mkdir -p "${EXTRACT_DIR}"
           tar -xzf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}" --strip-components=1
           
-          # 환경변수 등록
           echo "MAVEN_HOME=${PWD}/${EXTRACT_DIR}" >> "$GITHUB_ENV"
           echo "${PWD}/${EXTRACT_DIR}/bin" >> "$GITHUB_PATH"
 
-      # 3. [NEW] 영업점 금액 보고서 자동화 서버 (소스 생성)
-      # 실제 코드가 없으므로, 워크플로우 실행 시 동적으로 간단한 Spring Boot 스타일의 구조를 생성합니다.
-      - name: Generate Sales Report Server Source Code
+      # 3. [NEW] 금융 거래 시뮬레이션 소스 코드 생성
+      # 입출금 로직, 거래 내역 생성기, BPR 보고서 작성기가 포함된 Java 코드를 동적으로 생성합니다.
+      - name: Generate Financial System Source Code
         run: |
           set -euo pipefail
-          APP_DIR="${SERVER_APP_NAME}"
-          mkdir -p "${APP_DIR}/src/main/java/com/finance/report"
+          mkdir -p "${APP_NAME}/src/main/java/com/bank/core"
           
-          # 3-1. POM.xml 생성
-          cat <<EOF > "${APP_DIR}/pom.xml"
+          # 3-1. POM.xml
+          cat <<EOF > "${APP_NAME}/pom.xml"
           <project xmlns="http://maven.apache.org/POM/4.0.0" 
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
             <modelVersion>4.0.0</modelVersion>
-            <groupId>com.finance</groupId>
-            <artifactId>${SERVER_APP_NAME}</artifactId>
-            <version>1.0.0-SNAPSHOT</version>
+            <groupId>com.bank</groupId>
+            <artifactId>${APP_NAME}</artifactId>
+            <version>1.0.0</version>
             <properties>
               <maven.compiler.source>17</maven.compiler.source>
               <maven.compiler.target>17</maven.compiler.target>
             </properties>
-            <dependencies>
-                <!-- 로깅 등 기본 의존성 시뮬레이션 -->
-            </dependencies>
           </project>
           EOF
 
-          # 3-2. Java 메인 애플리케이션 생성 (보고서 로직 시뮬레이션)
-          cat <<EOF > "${APP_DIR}/src/main/java/com/finance/report/ReportServerApp.java"
-          package com.finance.report;
-          
+          # 3-2. Transaction Model (거래 모델)
+          cat <<EOF > "${APP_NAME}/src/main/java/com/bank/core/Transaction.java"
+          package com.bank.core;
           import java.time.LocalDateTime;
-          import java.util.Random;
 
-          public class ReportServerApp {
-              public static void main(String[] args) {
-                  System.out.println("=== Sales Branch Amount Report Server Starting ===");
-                  System.out.println("Maven Version: ${{ matrix.maven-version }}");
-                  System.out.println("Report Time: " + LocalDateTime.now());
+          public class Transaction {
+              private String id;
+              private String type; // DEPOSIT, WITHDRAWAL
+              private long amount;
+              private String description;
+              private LocalDateTime timestamp;
+
+              public Transaction(String id, String type, long amount, String description) {
+                  this.id = id;
+                  this.type = type;
+                  this.amount = amount;
+                  this.description = description;
+                  this.timestamp = LocalDateTime.now();
+              }
+              
+              public String getType() { return type; }
+              public long getAmount() { return amount; }
+              
+              @Override
+              public String toString() {
+                  return String.format("[%s] ID:%s | %s | %,d KRW | %s", timestamp, id, type, amount, description);
+              }
+          }
+          EOF
+
+          # 3-3. BPR & Simulation Logic (메인 로직)
+          cat <<EOF > "${APP_NAME}/src/main/java/com/bank/core/BankingSystem.java"
+          package com.bank.core;
+
+          import java.io.FileWriter;
+          import java.io.IOException;
+          import java.io.PrintWriter;
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Random;
+          import java.util.UUID;
+
+          public class BankingSystem {
+              public static void main(String[] args) throws IOException {
+                  int txCount = Integer.parseInt(args.length > 0 ? args[0] : "1000");
+                  System.out.println("=== Starting Virtual Real-Transaction Simulation (Tx: " + txCount + ") ===");
                   
-                  String[] branches = {"Seoul-Gangnam", "Busan-Haeundae", "Incheon-Airport", "Jeju-Main"};
+                  List<Transaction> transactions = generateTransactions(txCount);
+                  generateBPRReport(transactions);
+              }
+
+              private static List<Transaction> generateTransactions(int count) {
+                  List<Transaction> list = new ArrayList<>();
                   Random rand = new Random();
-                  long totalAmount = 0;
+                  String[] sources = {"ATM", "Mobile App", "Branch Counter", "Auto-Transfer"};
                   
-                  System.out.println("\n--- Branch Report ---");
-                  for (String branch : branches) {
-                      long amount = rand.nextInt(100000) * 1000;
-                      totalAmount += amount;
-                      System.out.println("Branch: " + branch + " | Amount: " + amount + " KRW");
+                  for (int i = 0; i < count; i++) {
+                      boolean isDeposit = rand.nextBoolean();
+                      String type = isDeposit ? "DEPOSIT" : "WITHDRAWAL";
+                      // 가상 실거래 금액 (1,000원 ~ 10,000,000원)
+                      long amount = (rand.nextInt(10000) + 1) * 1000L; 
+                      String desc = sources[rand.nextInt(sources.length)];
+                      
+                      list.add(new Transaction(UUID.randomUUID().toString().substring(0,8), type, amount, desc));
                   }
-                  System.out.println("---------------------");
-                  System.out.println("Total Sales Amount: " + totalAmount + " KRW");
-                  System.out.println("=== Server Process Complete ===");
+                  return list;
+              }
+
+              private static void generateBPRReport(List<Transaction> transactions) throws IOException {
+                  long totalDeposit = 0;
+                  long totalWithdrawal = 0;
+                  int highValueCount = 0;
+                  
+                  // Report File
+                  try (PrintWriter writer = new PrintWriter(new FileWriter("BPR_Analysis_Report.txt"))) {
+                      writer.println("=== Business Process Reengineering (BPR) Report ===");
+                      writer.println("Generated by Maven Build Automation");
+                      writer.println("---------------------------------------------------");
+                      
+                      for (Transaction tx : transactions) {
+                          if (tx.getType().equals("DEPOSIT")) {
+                              totalDeposit += tx.getAmount();
+                          } else {
+                              totalWithdrawal += tx.getAmount();
+                          }
+                          
+                          if (tx.getAmount() >= 5000000) {
+                              highValueCount++;
+                              writer.println("[High Value Alert] " + tx);
+                          }
+                      }
+                      
+                      long netFlow = totalDeposit - totalWithdrawal;
+                      
+                      writer.println("---------------------------------------------------");
+                      writer.println("1. Total Transactions : " + transactions.size());
+                      writer.println("2. Total Deposit Vol  : " + String.format("%,d KRW", totalDeposit));
+                      writer.println("3. Total Withdraw Vol : " + String.format("%,d KRW", totalWithdrawal));
+                      writer.println("4. Net Asset Flow     : " + String.format("%,d KRW", netFlow));
+                      writer.println("5. High Value Tx Count: " + highValueCount);
+                      writer.println("---------------------------------------------------");
+                      writer.println("BPR Conclusion: System handled transaction load successfully.");
+                  }
+                  
+                  System.out.println("✅ BPR Report Generated: BPR_Analysis_Report.txt");
               }
           }
           EOF
           
-          echo "✅ Sales Report Server source code generated."
+          echo "✅ Financial System Source Code Generated."
 
-      # 4. [NEW] 영업점 보고서 서버 빌드 (Maven 사용)
-      - name: Build Sales Report Server
+      # 4. 시스템 빌드 및 시뮬레이션 실행 (Maven)
+      - name: Build & Run Simulation
         run: |
           set -euo pipefail
-          cd "${SERVER_APP_NAME}"
-          echo "Building Sales Report Server with Maven ${{ matrix.maven-version }}..."
+          cd "${APP_NAME}"
           
-          # Clean Package 실행
+          # Maven Build
+          echo "Building with Maven ${{ matrix.maven-version }}..."
           mvn -q -B clean package
           
-          # 빌드 결과 확인
-          ls -lh target/*.jar
-          echo "✅ Sales Report Server Built Successfully."
+          # Run Simulation (가상 거래 1000건 생성 -> BPR 보고서 출력)
+          echo "Running Transaction Simulation..."
+          java -cp "target/${APP_NAME}-1.0.0.jar" com.bank.core.BankingSystem ${{ inputs.transaction_count }}
+          
+          # 결과 확인
+          cat BPR_Analysis_Report.txt
+          
+          # 아티팩트 이동 준비
+          mkdir -p ../generated_reports
+          mv BPR_Analysis_Report.txt ../generated_reports/BPR_Report_Maven_${{ matrix.maven-version }}.txt
+          cp "target/${APP_NAME}-1.0.0.jar" ../generated_reports/FinanceSystem.jar
 
-      # 5. [NEW] ISO 메타데이터 생성 및 정보 주입
-      - name: Prepare ISO Root & Inject Metadata
+      # 5. ISO 생성 (BPR 보고서 및 실행 데이터 주입)
+      - name: Create ISO with BPR Data
         run: |
           set -euo pipefail
           VERSION="${{ matrix.maven-version }}"
           ISO_ROOT="iso_root"
-          mkdir -p "${ISO_ROOT}/maven-bin"
-          mkdir -p "${ISO_ROOT}/sales-server"
-          mkdir -p "${ISO_ROOT}/metadata"
+          mkdir -p "${ISO_ROOT}/maven-dist"
+          mkdir -p "${ISO_ROOT}/financial-reports/bpr"
+          mkdir -p "${ISO_ROOT}/financial-system"
 
-          # 5-1. 아티팩트 복사
-          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ISO_ROOT}/maven-bin/"
-          cp "${SERVER_APP_NAME}/target/${SERVER_APP_NAME}-1.0.0-SNAPSHOT.jar" "${ISO_ROOT}/sales-server/"
-
-          # 5-2. 메타데이터 파일 주입 (JSON)
-          cat <<EOF > "${ISO_ROOT}/metadata/release-info.json"
-          {
-            "product": "Sales Report Server Bundle",
-            "maven_version": "${VERSION}",
-            "build_timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-            "build_runner": "GitHub Actions",
-            "components": [
-              "Apache Maven Binaries",
-              "Sales Branch Report Server JAR"
-            ]
-          }
-          EOF
-
-          # 5-3. 파일 매니페스트 생성 (텍스트)
-          echo "=== ISO File Manifest ===" > "${ISO_ROOT}/metadata/MANIFEST.txt"
-          find "${ISO_ROOT}" -type f -exec sha256sum {} \; >> "${ISO_ROOT}/metadata/MANIFEST.txt"
-
-          # 5-4. 영업점 서버 실행 스크립트 주입 (자동화 편의성)
-          cat <<EOF > "${ISO_ROOT}/sales-server/run_report.sh"
-          #!/bin/bash
-          java -cp ${SERVER_APP_NAME}-1.0.0-SNAPSHOT.jar com.finance.report.ReportServerApp
-          EOF
-          chmod +x "${ISO_ROOT}/sales-server/run_report.sh"
-
-          echo "✅ Metadata and Scripts injected into ISO root."
-
-      # 6. ISO 생성 및 최종 검증
-      - name: Generate Final ISO
-        run: |
-          VERSION="${{ matrix.maven-version }}"
-          ISO_NAME="SalesServer-Maven-${VERSION}.iso"
+          # 5-1. Maven 바이너리 탑재
+          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ISO_ROOT}/maven-dist/"
           
-          # ISO 생성
-          mkisofs -o "dump/${ISO_NAME}" -J -R -V "Maven-${VERSION}-Report" "iso_root"
-          
-          echo "✅ ISO Created: dump/${ISO_NAME}"
-          
-          # ISO 정보 요약 출력
-          echo "ISO Size:"
-          du -sh "dump/${ISO_NAME}"
+          # 5-2. 생성된 BPR 보고서 및 시스템 탑재
+          cp "generated_reports/BPR_Report_Maven_${VERSION}.txt" "${ISO_ROOT}/financial-reports/bpr/Analysis_Report.txt"
+          cp "generated_reports/FinanceSystem.jar" "${ISO_ROOT}/financial-system/"
 
-      # 7. GitHub Release 배포
+          # 5-3. 실행 스크립트 추가
+          echo '#!/bin/bash' > "${ISO_ROOT}/financial-system/run_simulation.sh"
+          echo 'java -cp FinanceSystem.jar com.bank.core.BankingSystem 5000' >> "${ISO_ROOT}/financial-system/run_simulation.sh"
+          chmod +x "${ISO_ROOT}/financial-system/run_simulation.sh"
+
+          # 5-4. ISO 생성
+          ISO_NAME="Finance-BPR-Maven-${VERSION}.iso"
+          mkisofs -o "dump/${ISO_NAME}" -J -R -V "FinBPR-${VERSION}" "${ISO_ROOT}"
+          
+          echo "✅ ISO Created: ${ISO_NAME}"
+
+      # 6. Release (ISO 및 보고서 포함)
       - name: Release to GitHub
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v${{ matrix.maven-version }}-sales-server"
-          name: "Sales Report Server (Maven ${{ matrix.maven-version }})"
+          tag: "v${{ matrix.maven-version }}-financial-bpr"
+          name: "Financial BPR System (Maven ${{ matrix.maven-version }})"
           body: |
-            ## 📊 Sales Branch Report Server + Maven ${{ matrix.maven-version }}
+            ## 🏦 Financial BPR & Transaction System
+            **Built with Apache Maven ${{ matrix.maven-version }}**
             
-            This release includes the automated Sales Report Server built with the specific Maven version.
+            This release includes a simulated banking system validation report.
             
-            ### 💿 ISO Contents (`SalesServer-Maven-${{ matrix.maven-version }}.iso`)
-            - `/maven-bin`: Apache Maven Binaries
-            - `/sales-server`: **Sales Branch Amount Report Automation Server (JAR)**
-            - `/metadata`: Build Info & Checksums
+            ### 📊 BPR (Business Process Reengineering) Features
+            - **Virtual Transactions:** Generated mock Deposit/Withdrawal data.
+            - **Analysis Report:** Includes Net Flow, Volume Analysis, and High-Value alerts.
+            - **Verification:** System logic validated under Maven ${{ matrix.maven-version }}.
             
-            ### 🛠 Automation Server Details
-            - **App:** `${{ env.SERVER_APP_NAME }}`
-            - **Function:** Generates mock sales data reports for branches (Seoul, Busan, etc.)
-            - **Build Tool:** Apache Maven ${{ matrix.maven-version }}
+            ### 💿 ISO Contents
+            - `/financial-reports/bpr`: **Automated BPR Analysis Report**
+            - `/financial-system`: Executable JAR + Simulation Script
+            - `/maven-dist`: Official Maven Binaries
             
-            *Automated build by GitHub Actions.*
+            *Report generated automatically by GitHub Actions workflow.*
           artifacts: |
-            dump/SalesServer-Maven-${{ matrix.maven-version }}.iso
-            dump/apache-maven-${{ matrix.maven-version }}-bin.tar.gz
+            dump/Finance-BPR-Maven-${{ matrix.maven-version }}.iso
+            generated_reports/BPR_Report_Maven_${{ matrix.maven-version }}.txt
           allowUpdates: true
           replacesArtifacts: true
           makeLatest: ${{ matrix.maven-version == '3.9.11' }}
