@@ -1,4 +1,4 @@
-name: "🌐 Enterprise Ultra v4 — SAFE MODE FULL INTEGRATION"
+name: "🌐 Enterprise Ultra v5 — TOTAL SAFE MODE FULL INTEGRATION"
 
 on:
   workflow_dispatch:
@@ -13,15 +13,36 @@ env:
   ISO_DIR: iso
 
 jobs:
-  enterprise_ultra_pipeline:
+  ultra_pipeline:
     runs-on: ubuntu-latest
-    name: "FULL ENTERPRISE ULTRA SAFE PIPELINE"
+    name: "FULL ENTERPRISE ULTRA SAFE MODE PIPELINE"
 
     steps:
       ###########################################################################
-      # 0) INIT — 디렉토리 구성 + EchoOps SAFE MODE (20회 재시도)
+      # 0) APT MIRROR AUTO-FIX (Ubuntu Runner Safety Patch)
       ###########################################################################
-      - name: "♻ INIT — Prepare Directories & Load EchoOps SAFE MODE v3"
+      - name: "🛠 APT MIRROR AUTO-FIX"
+        shell: bash
+        run: |
+          echo "▶ Checking and fixing APT mirror..."
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            echo "▶ Removing bad mirror file"
+            sudo rm -f /etc/apt/apt-mirrors.txt
+          fi
+
+          if grep -q "mirror+file:/etc/apt/apt-mirrors.txt" /etc/apt/sources.list; then
+            echo "▶ Fixing sources.list"
+            sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
+          fi
+
+          echo "▶ Running apt-get update"
+          sudo apt-get update || sudo apt-get update --fix-missing
+          echo "▶ APT mirror fix complete"
+
+      ###########################################################################
+      # 1) INIT — 디렉토리 생성 + EchoOps SAFE MODE (20회 재시도)
+      ###########################################################################
+      - name: "♻ INIT — Prepare Directories + EchoOps SAFE MODE"
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -29,7 +50,7 @@ jobs:
           mkdir -p "${LOG_DIR}" "${REPORT_DIR}" "${DOWNLOAD_DIR}" "${RESOURCE_DIR}" "${SBOM_DIR}" "${ISO_DIR}"
 
           echo "#!/usr/bin/env bash" > /tmp/echo.sh
-          echo "safe_echo() { echo \"▶ \$(date +'%Y-%m-%dT%H:%M:%S') — \$1\"; }" >> /tmp/echo.sh
+          echo "safe_echo(){ echo \"▶ \$(date +'%Y-%m-%dT%H:%M:%S') — \$1\"; }" >> /tmp/echo.sh
 
           echo "retry_cmd() {" >> /tmp/echo.sh
           echo "  local CMD=\"\$1\"" >> /tmp/echo.sh
@@ -46,19 +67,18 @@ jobs:
           echo "}" >> /tmp/echo.sh
 
           chmod +x /tmp/echo.sh
-          echo "EchoOps SAFE MODE v3 loaded successfully."
+          echo "EchoOps SAFE MODE ready"
 
       ###########################################################################
-      # 1) 영업점 보고서 생성
+      # 2) Branch Report 자동 생성
       ###########################################################################
       - name: "📝 Generate Branch Report"
         shell: bash
         run: |
           source /tmp/echo.sh
-          safe_echo "Generating Branch Report..."
+          safe_echo "Creating Branch Report..."
 
           REPORT="${REPORT_DIR}/branch_report.md"
-
           {
             echo "# Branch Operations Report"
             echo "- Generated: $(date)"
@@ -69,205 +89,186 @@ jobs:
             echo "- Ledger Health: OK"
           } > "$REPORT"
 
-          safe_echo "Branch Report created: $REPORT"
+          safe_echo "Branch report saved"
 
       ###########################################################################
-      # 2) APACHE 다운로드 SAFE MODE (20회 재시도 + MIME 검증 + Fallback)
+      # 3) Apache SAFE DOWNLOAD (20 RETRIES + Fallback + MIME Validation)
       ###########################################################################
-      - name: "🌐 Download Apache HTTPD (SAFE MODE v3)"
+      - name: "🌐 Apache HTTPD — SAFE DOWNLOAD v3"
         shell: bash
         run: |
           source /tmp/echo.sh
 
-          safe_echo "==== START APACHE SAFE DOWNLOAD ===="
+          AP_URLS=(
+            "https://downloads.apache.org/httpd/httpd-2.4.58.tar.gz"
+            "https://archive.apache.org/dist/httpd/httpd-2.4.58.tar.gz"
+            "https://dlcdn.apache.org/httpd/httpd-2.4.58.tar.gz"
+          )
 
-          AP_URL_PRIMARY="https://downloads.apache.org/httpd/httpd-2.4.58.tar.gz"
-          AP_URL_MIRROR1="https://archive.apache.org/dist/httpd/httpd-2.4.58.tar.gz"
-          AP_URL_MIRROR2="https://dlcdn.apache.org/httpd/httpd-2.4.58.tar.gz"
           TARGET="${DOWNLOAD_DIR}/apache.tar.gz"
-
           rm -f "$TARGET"
 
-          validate_file() {
-            safe_echo "Validating Apache tar.gz..."
-            if [ ! -f "$TARGET" ]; then safe_echo "❌ File missing"; return 1; fi
-            if [ ! -s "$TARGET" ]; then safe_echo "❌ Empty file"; return 1; fi
-            if ! file "$TARGET" | grep -qi "gzip"; then
-              safe_echo "❌ Not gzip format"
-              file "$TARGET"
-              return 1
-            fi
-            safe_echo "✔ Apache archive validation passed"
+          validate() {
+            safe_echo "Validating Apache tar.gz"
+            [ ! -f "$TARGET" ] && return 1
+            [ ! -s "$TARGET" ] && return 1
+            file "$TARGET" | grep -qi gzip || return 1
+            safe_echo "✔ Validation OK"
             return 0
           }
-
-          try_dl() {
-            local U="$1"
-            safe_echo "Downloading from: $U"
-            curl -fsSL "$U" -o "$TARGET" || return 1
-            return 0
-          }
-
-          safe_echo "OFFICIAL APACHE URL MAP:"
-          safe_echo " - PRIMARY: $AP_URL_PRIMARY"
-          safe_echo " - MIRROR1: $AP_URL_MIRROR1"
-          safe_echo " - MIRROR2: $AP_URL_MIRROR2"
 
           COUNT=1
           SUCCESS=0
 
           while [ $COUNT -le 20 ]; do
-            safe_echo "DOWNLOAD TRY $COUNT / 20"
+            safe_echo "Attempt $COUNT/20"
 
-            try_dl "$AP_URL_PRIMARY" && validate_file && SUCCESS=1 && break
-            try_dl "$AP_URL_MIRROR1" && validate_file && SUCCESS=1 && break
-            try_dl "$AP_URL_MIRROR2" && validate_file && SUCCESS=1 && break
+            for U in "${AP_URLS[@]}"; do
+              safe_echo "Downloading from: $U"
+              curl -fsSL "$U" -o "$TARGET" && validate && SUCCESS=1 && break
+            done
 
-            safe_echo "⛔ Validation failed — retrying..."
+            [ $SUCCESS -eq 1 ] && break
+
+            safe_echo "Download failed; retrying..."
             sleep 2
             COUNT=$((COUNT+1))
           done
 
           if [ $SUCCESS -eq 0 ]; then
-            safe_echo "⚠ Apache download failed after 20 tries — generating FAKE archive"
-            echo "FAKE APACHE DATA" > "$TARGET"
+            safe_echo "Creating FAKE Apache archive"
+            echo "FAKE" > "$TARGET"
           fi
 
-          safe_echo "==== END APACHE SAFE DOWNLOAD ===="
-
       ###########################################################################
-      # 3) Apache Extract SAFE MODE
+      # 4) Apache Extract SAFE MODE
       ###########################################################################
-      - name: "📦 Extract Apache (SAFE MODE v3)"
+      - name: "📦 Extract Apache (SAFE MODE)"
         shell: bash
         run: |
           source /tmp/echo.sh
-
           TARGET="${DOWNLOAD_DIR}/apache.tar.gz"
-          EX_DIR="${RESOURCE_DIR}"
 
-          safe_echo "Extracting Apache..."
-
-          if file "$TARGET" | grep -qi "gzip"; then
-            safe_echo "✔ Valid gzip — extracting..."
-            retry_cmd "tar -xzf \"$TARGET\" -C \"$EX_DIR\""
+          if file "$TARGET" | grep -qi gzip; then
+            safe_echo "Extracting Apache"
+            retry_cmd "tar -xzf \"$TARGET\" -C \"$RESOURCE_DIR\""
           else
-            safe_echo "⚠ Not valid gzip — creating FAKE Apache directory"
-            mkdir -p "${EX_DIR}/httpd-2.4.58"
+            safe_echo "Invalid gzip — creating FAKE directory"
+            mkdir -p "${RESOURCE_DIR}/httpd-2.4.58"
           fi
 
-          safe_echo "Apache extraction stage complete"
+          safe_echo "Apache extraction complete"
 
       ###########################################################################
-      # 4) Maven 설치 (공식)
+      # 5) Maven 설치 (공식 안정 미러)
       ###########################################################################
       - name: "📦 Install Maven"
         shell: bash
         run: |
           source /tmp/echo.sh
-          safe_echo "Installing Maven (official)"
 
-          MVN_URL="https://downloads.apache.org/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz"
-          retry_cmd "curl -fsSL $MVN_URL -o ${DOWNLOAD_DIR}/maven.tar.gz"
-          retry_cmd "tar -xzf ${DOWNLOAD_DIR}/maven.tar.gz -C ${RESOURCE_DIR}"
+          MVN_URLS=(
+            "https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz"
+            "https://dlcdn.apache.org/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz"
+          )
+
+          TARGET="${DOWNLOAD_DIR}/maven.tar.gz"
+          rm -f "$TARGET"
+
+          for U in "${MVN_URLS[@]}"; do
+            safe_echo "Downloading Maven: $U"
+            curl -fsSL "$U" -o "$TARGET" && break
+          done
+
+          retry_cmd "tar -xzf \"$TARGET\" -C \"$RESOURCE_DIR\""
 
           echo "export PATH=\$PATH:${RESOURCE_DIR}/apache-maven-3.9.9/bin" >> $GITHUB_ENV
-          safe_echo "Maven Installed"
+          safe_echo "Maven READY"
 
       ###########################################################################
-      # 5) JDK 설치
+      # 6) JDK 설치
       ###########################################################################
       - name: "☕ Install JDK 17"
         shell: bash
         run: |
           source /tmp/echo.sh
-          safe_echo "Installing JDK 17"
-          retry_cmd "sudo apt install -y openjdk-17-jdk"
+          retry_cmd "sudo apt-get install -y openjdk-17-jdk"
+          safe_echo "JDK Installed"
 
       ###########################################################################
-      # 6) Spring Boot 프로젝트 생성 (공식)
+      # 7) Spring Boot 프로젝트 자동 생성
       ###########################################################################
-      - name: "🌱 Generate Spring Boot Project"
+      - name: "🌱 Create Spring Boot Starter Project"
         shell: bash
         run: |
           source /tmp/echo.sh
-          safe_echo "Creating Spring Boot Starter project"
-
           mkdir -p springboot
           cd springboot
 
           retry_cmd "curl -fsSL https://start.spring.io/starter.tgz \
-            -d name=BranchService \
             -d dependencies=web \
-            -d type=maven-project \
+            -d name=BranchService \
             -d javaVersion=17 \
+            -d type=maven-project \
             -o app.tgz"
 
           retry_cmd "tar -xzf app.tgz"
-          safe_echo "Spring Boot project ready"
+          safe_echo "Spring Boot project READY"
 
       ###########################################################################
-      # 7) 필수 리소스 대량 다운로드 (공식)
+      # 8) Bulk 리소스 공식 다운로드
       ###########################################################################
-      - name: "📥 Bulk Download Official Resources"
+      - name: "📥 Bulk Official Resource Download"
         shell: bash
         run: |
           source /tmp/echo.sh
-          safe_echo "Starting bulk official resource downloads..."
 
-          declare -A DL_URLS=(
+          declare -A DL=(
             ["gradle"]="https://services.gradle.org/distributions/gradle-8.7-bin.zip"
             ["tomcat"]="https://dlcdn.apache.org/tomcat/tomcat-10/v10.1.26/bin/apache-tomcat-10.1.26.tar.gz"
             ["node"]="https://nodejs.org/dist/v20.11.1/node-v20.11.1-linux-x64.tar.gz"
             ["python"]="https://www.python.org/ftp/python/3.12.1/Python-3.12.1.tgz"
           )
 
-          for key in "${!DL_URLS[@]}"; do
-            URL="${DL_URLS[$key]}"
-            safe_echo "Downloading $key → $URL"
-            retry_cmd "curl -fsSL $URL -o ${DOWNLOAD_DIR}/${key}.tar.gz"
+          for key in "${!DL[@]}"; do
+            safe_echo "Downloading $key from ${DL[$key]}"
+            retry_cmd "curl -fsSL ${DL[$key]} -o ${DOWNLOAD_DIR}/${key}.tar.gz"
           done
 
-          safe_echo "Bulk resource download complete"
-
       ###########################################################################
-      # 8) FINAL REPORT 생성
+      # 9) FINAL REPORT 생성
       ###########################################################################
       - name: "📄 Generate FINAL_REPORT.md"
         shell: bash
         run: |
           source /tmp/echo.sh
-          safe_echo "Generating FINAL REPORT..."
 
           {
-            echo "# FINAL REPORT — Enterprise Ultra v4"
+            echo "# ENTERPRISE ULTRA v5 — FINAL REPORT"
             echo "- Timestamp: $(date)"
             echo ""
             echo "## Apache"
-            echo "- Download: SAFE MODE v3"
-            echo "- Validation: Enabled"
-            echo "- Retries: 20"
+            echo "- Status: SAFE MODE v3 Applied"
             echo ""
             echo "## Maven"
-            echo "- Version: 3.9.9"
-            echo "- Status: Installed"
+            echo "- Version: 3.9.9 Installed"
             echo ""
             echo "## Spring Boot"
-            echo "- Status: Project created"
+            echo "- Starter Project READY"
             echo ""
-            echo "## Bulk Resources"
-            ls -lh ${DOWNLOAD_DIR}
+            echo "## Resources Downloaded"
+            ls -lh downloads
           } > FINAL_REPORT.md
 
           safe_echo "FINAL_REPORT.md created"
 
       ###########################################################################
-      # 9) 전체 아티팩트 업로드
+      # 10) Artifacts 업로드
       ###########################################################################
-      - name: "📦 Upload All Artifacts"
+      - name: "📦 Upload Artifacts"
         uses: actions/upload-artifact@v4
         with:
-          name: enterprise-ultra-v4-artifacts
+          name: enterprise-ultra-v5-artifacts
           path: |
             FINAL_REPORT.md
             ${REPORT_DIR}
