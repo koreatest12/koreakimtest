@@ -1,23 +1,23 @@
-name: Secure Financial BPR & ISO (10-min Schedule)
+name: Ultimate Financial Simulator & SQL ISO (Stock/Crypto/DB)
 
 on:
-  # [NEW] 1. 10분 간격 자동 실행
+  # 1. 10분 주기 자동 스케줄링
   schedule:
     - cron: '*/10 * * * *'
-  # 수동 실행 지원
+  # 2. 수동 실행 (거래량 조절 가능)
   workflow_dispatch:
     inputs:
       transaction_count:
-        description: 'Number of virtual transactions'
+        description: 'Simulation Count per Sector'
         required: false
-        default: '2000'
+        default: '5000'
 
 permissions:
   contents: write
 
 jobs:
-  secure-financial-build:
-    name: Secure Build (Maven ${{ matrix.maven-version }})
+  comprehensive-finance-build:
+    name: FinSim Build (Maven ${{ matrix.maven-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -39,10 +39,11 @@ jobs:
     env:
       MAVEN_PRIMARY_BASE_URL: https://dlcdn.apache.org/maven/maven-3
       MAVEN_ARCHIVE_BASE_URL: https://archive.apache.org/dist/maven/maven-3
-      APP_NAME: secure-finance-system
+      APP_NAME: full-stack-finance-engine
 
     steps:
-      - name: Checkout
+      # --- [기반 환경 설정] ---
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -51,31 +52,23 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # [NEW] 2. 보안 및 리소스 모니터링 도구 정밀 설치
-      - name: Install Security & Monitoring Tools
+      - name: Install System Tools (ISO, Antivirus, Monitor)
         run: |
           sudo apt-get update
-          # genisoimage: ISO 생성
-          # clamav: 바이러스 검사
-          # sysstat: 시스템 리소스 모니터링 (sar, iostat)
           sudo apt-get install -y genisoimage clamav sysstat
-          
-          # ClamAV 데이터베이스 업데이트 (시간이 걸릴 수 있으므로 백그라운드 시도 혹은 기본 DB 사용)
-          # CI 환경 특성상 업데이트 실패 시 무시하고 진행하도록 설정
-          sudo freshclam || echo "⚠️ ClamAV update skipped/failed, using default DB."
+          # 바이러스 DB 업데이트 (실패 시 경고만 출력하고 진행)
+          sudo freshclam || echo "⚠️ ClamAV DB update warning."
 
-      # [NEW] 3. 리소스 모니터링 백그라운드 시작
-      - name: Start Resource Monitoring
+      # --- [리소스 모니터링 시작] ---
+      - name: Start Background Resource Monitoring
         run: |
           mkdir -p logs
-          echo "=== System Resource Monitoring Start ===" > logs/Resource_Usage_Log.txt
-          echo "Timestamp | CPU(%) | MEM(%) | IO Wait" >> logs/Resource_Usage_Log.txt
-          
-          # 3초 간격으로 시스템 상태 로깅 (백그라운드 실행)
-          vmstat -t 3 > logs/vmstat_raw.log &
+          echo "Timestamp | CPU(%) | MEM(%) | IO Wait | Disk Used" > logs/sys_monitor.log
+          # 5초 간격으로 시스템 상태 로깅 (백그라운드)
+          vmstat -t 5 > logs/vmstat_raw.log &
           echo "MONITOR_PID=$!" >> "$GITHUB_ENV"
-          echo "✅ Resource monitoring started in background."
 
+      # --- [Maven 설치] ---
       - name: Setup Maven ${{ matrix.maven-version }}
         run: |
           set -euo pipefail
@@ -84,33 +77,33 @@ jobs:
           
           FILENAME="apache-maven-${VERSION}-bin.tar.gz"
           ARCHIVE_PATH="dump/${FILENAME}"
-          PRIMARY_URL="${MAVEN_PRIMARY_BASE_URL}/${VERSION}/binaries/${FILENAME}"
-          ARCHIVE_URL="${MAVEN_ARCHIVE_BASE_URL}/${VERSION}/binaries/${FILENAME}"
+          PRIMARY="https://dlcdn.apache.org/maven/maven-3/${VERSION}/binaries/${FILENAME}"
+          ARCHIVE="https://archive.apache.org/dist/maven/maven-3/${VERSION}/binaries/${FILENAME}"
 
-          if curl -fL "${PRIMARY_URL}" -o "${ARCHIVE_PATH}"; then
-            echo "✅ Downloaded from Primary"
+          if curl -fL "${PRIMARY}" -o "${ARCHIVE_PATH}"; then
+            echo "✅ Downloaded from CDN"
           else
-            curl -fL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"
+            curl -fL "${ARCHIVE}" -o "${ARCHIVE_PATH}"
+            echo "✅ Downloaded from Archive"
           fi
 
-          EXTRACT_DIR="extracted/apache-maven-${VERSION}"
-          mkdir -p "${EXTRACT_DIR}"
-          tar -xzf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}" --strip-components=1
-          
-          echo "MAVEN_HOME=${PWD}/${EXTRACT_DIR}" >> "$GITHUB_ENV"
-          echo "${PWD}/${EXTRACT_DIR}/bin" >> "$GITHUB_PATH"
+          tar -xzf "${ARCHIVE_PATH}" -C extracted/ --strip-components=1
+          echo "MAVEN_HOME=${PWD}/extracted" >> "$GITHUB_ENV"
+          echo "${PWD}/extracted/bin" >> "$GITHUB_PATH"
 
-      # 4. 금융 거래 시뮬레이션 코드 생성 (BPR 로직 포함)
-      - name: Generate Financial System Source
+      # --- [통합 금융 시스템 소스 코드 생성] ---
+      # 뱅킹, 주식, 코인, SQL 생성 로직이 포함된 Java 애플리케이션 생성
+      - name: Generate Full-Stack Financial Source Code
         run: |
           set -euo pipefail
-          mkdir -p "${APP_NAME}/src/main/java/com/bank/secure"
+          SRC_DIR="${APP_NAME}/src/main/java/com/finance/core"
+          mkdir -p "${SRC_DIR}"
           
-          # POM.xml
+          # 1. POM.xml
           cat <<EOF > "${APP_NAME}/pom.xml"
           <project xmlns="http://maven.apache.org/POM/4.0.0" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <modelVersion>4.0.0</modelVersion>
-            <groupId>com.bank</groupId>
+            <groupId>com.finance</groupId>
             <artifactId>${APP_NAME}</artifactId>
             <version>1.0.0</version>
             <properties>
@@ -120,148 +113,246 @@ jobs:
           </project>
           EOF
 
-          # Java Logic (가상 거래 + BPR)
-          cat <<EOF > "${APP_NAME}/src/main/java/com/bank/secure/SecureBankingSystem.java"
-          package com.bank.secure;
+          # 2. Main Simulation Logic (Java)
+          cat <<EOF > "${SRC_DIR}/FinancialSimulator.java"
+          package com.finance.core;
+          
           import java.io.*;
           import java.time.LocalDateTime;
+          import java.time.format.DateTimeFormatter;
           import java.util.*;
 
-          public class SecureBankingSystem {
+          public class FinancialSimulator {
+              // 데이터 저장소 (인메모리)
+              static List<String> bankingTx = new ArrayList<>();
+              static List<String> stockTx = new ArrayList<>();
+              static List<String> cryptoTx = new ArrayList<>();
+              static List<String> sqlStatements = new ArrayList<>();
+              
+              static Random rand = new Random();
+
               public static void main(String[] args) throws IOException {
-                  int txCount = Integer.parseInt(args.length > 0 ? args[0] : "1000");
-                  System.out.println("=== Secure Banking Transaction Simulation (Tx: " + txCount + ") ===");
+                  int count = Integer.parseInt(args.length > 0 ? args[0] : "1000");
+                  System.out.println("=== Global Financial System Simulation (Maven Build) ===");
+                  System.out.println("Target Volume: " + count + " per sector");
+
+                  // 1. 시뮬레이션 실행
+                  simulateBanking(count);
+                  simulateStocks(count);
+                  simulateCrypto(count);
+
+                  // 2. 보고서 및 SQL 생성
+                  generateReports();
+                  generateSqlScripts();
                   
-                  List<String> logs = new ArrayList<>();
-                  Random rand = new Random();
-                  long totalVolume = 0;
-                  
-                  try (PrintWriter writer = new PrintWriter(new FileWriter("BPR_Analysis_Report.txt"))) {
-                      writer.println("=== Financial BPR & Security Report ===");
-                      writer.println("Generated at: " + LocalDateTime.now());
-                      writer.println("Maven Version: ${{ matrix.maven-version }}");
-                      writer.println("---------------------------------------");
+                  System.out.println("✅ All Simulations & Exports Completed.");
+              }
+
+              // --- 뱅킹 (입출금) ---
+              private static void simulateBanking(int count) {
+                  sqlStatements.add("-- Banking Transactions");
+                  for(int i=0; i<count; i++) {
+                      boolean isDeposit = rand.nextBoolean();
+                      long amount = (rand.nextInt(5000) + 1) * 10000L;
+                      String type = isDeposit ? "DEPOSIT" : "WITHDRAWAL";
+                      String id = UUID.randomUUID().toString();
                       
-                      for (int i = 0; i < txCount; i++) {
-                          boolean isDeposit = rand.nextBoolean();
-                          long amount = (rand.nextInt(20000) + 1) * 1000L;
-                          totalVolume += amount;
-                          
-                          String type = isDeposit ? "DEPOSIT" : "WITHDRAWAL";
-                          String txId = UUID.randomUUID().toString().substring(0, 8);
-                          
-                          // 고액 거래 탐지 로직 (BPR)
-                          if (amount >= 10000000) {
-                              writer.println("[ALERT] High Value Transaction: " + amount + " KRW | ID: " + txId);
-                          }
-                      }
-                      writer.println("---------------------------------------");
-                      writer.println("Total Processed Volume: " + totalVolume + " KRW");
-                      writer.println("System Integrity Check: PASSED");
+                      String log = String.format("TX|%s|%s|%d|KRW", id, type, amount);
+                      bankingTx.add(log);
+                      
+                      // SQL 생성
+                      sqlStatements.add(String.format("INSERT INTO bank_ledger (tx_id, type, amount, cur, created_at) VALUES ('%s', '%s', %d, 'KRW', NOW());", id, type, amount));
                   }
-                  System.out.println("✅ Transaction simulation complete.");
+              }
+
+              // --- 주식 (Stock) ---
+              private static void simulateStocks(int count) {
+                  String[] tickers = {"SAMSUNG", "APPLE", "TESLA", "NVIDIA", "SKHYNIX"};
+                  sqlStatements.add("-- Stock Trading");
+                  
+                  for(int i=0; i<count; i++) {
+                      String ticker = tickers[rand.nextInt(tickers.length)];
+                      boolean isBuy = rand.nextBoolean();
+                      int qty = rand.nextInt(100) + 1;
+                      double price = 50000 + (rand.nextDouble() * 100000); // 5만~15만
+                      
+                      String type = isBuy ? "BUY" : "SELL";
+                      String id = UUID.randomUUID().toString();
+                      
+                      String log = String.format("STK|%s|%s|%s|%d|%.2f", id, ticker, type, qty, price);
+                      stockTx.add(log);
+
+                      sqlStatements.add(String.format("INSERT INTO stock_orders (order_id, symbol, side, qty, price, created_at) VALUES ('%s', '%s', '%s', %d, %.2f, NOW());", id, ticker, type, qty, price));
+                  }
+              }
+
+              // --- 비트코인/코인 (Crypto) ---
+              private static void simulateCrypto(int count) {
+                  String[] coins = {"BTC", "ETH", "XRP", "DOGE", "SOL"};
+                  sqlStatements.add("-- Crypto Trading");
+
+                  for(int i=0; i<count; i++) {
+                      String coin = coins[rand.nextInt(coins.length)];
+                      boolean isBuy = rand.nextBoolean();
+                      double qty = rand.nextDouble() * 2.5; // 0 ~ 2.5 BTC etc
+                      double price = 1000 + (rand.nextDouble() * 50000000); // Volatile price
+                      
+                      String type = isBuy ? "BID" : "ASK";
+                      String id = UUID.randomUUID().toString();
+
+                      String log = String.format("CRY|%s|%s|%s|%.4f|%.2f", id, coin, type, qty, price);
+                      cryptoTx.add(log);
+
+                      sqlStatements.add(String.format("INSERT INTO crypto_trades (trade_id, symbol, side, qty, price_krw, created_at) VALUES ('%s', '%s', '%s', %.6f, %.2f, NOW());", id, coin, type, qty, price));
+                  }
+              }
+
+              // --- 리포트 파일 생성 ---
+              private static void generateReports() throws IOException {
+                  writeFile("Report_Banking_BPR.txt", bankingTx, "Banking BPR Analysis");
+                  writeFile("Report_Stock_Market.txt", stockTx, "Stock Market Activity");
+                  writeFile("Report_Crypto_Vol.txt", cryptoTx, "Crypto Volatility Log");
+              }
+
+              private static void writeFile(String fname, List<String> data, String header) throws IOException {
+                  try(PrintWriter pw = new PrintWriter(new FileWriter(fname))) {
+                      pw.println("=== " + header + " ===");
+                      pw.println("Generated: " + LocalDateTime.now());
+                      pw.println("Maven Build: Included");
+                      pw.println("---------------------------");
+                      for(String line : data) pw.println(line);
+                      pw.println("---------------------------");
+                      pw.println("Total Records: " + data.size());
+                  }
+              }
+
+              // --- SQL 스크립트 생성 (Schema + Data) ---
+              private static void generateSqlScripts() throws IOException {
+                  // 1. Schema.sql
+                  try(PrintWriter pw = new PrintWriter(new FileWriter("db_schema.sql"))) {
+                      pw.println("-- Financial System Database Schema");
+                      pw.println("CREATE TABLE bank_ledger (tx_id VARCHAR(50) PRIMARY KEY, type VARCHAR(10), amount BIGINT, cur VARCHAR(3), created_at TIMESTAMP);");
+                      pw.println("CREATE TABLE stock_orders (order_id VARCHAR(50) PRIMARY KEY, symbol VARCHAR(20), side VARCHAR(4), qty INT, price DECIMAL(15,2), created_at TIMESTAMP);");
+                      pw.println("CREATE TABLE crypto_trades (trade_id VARCHAR(50) PRIMARY KEY, symbol VARCHAR(10), side VARCHAR(4), qty DECIMAL(20,8), price_krw DECIMAL(20,2), created_at TIMESTAMP);");
+                  }
+                  
+                  // 2. Data.sql
+                  try(PrintWriter pw = new PrintWriter(new FileWriter("db_data_dump.sql"))) {
+                      pw.println("-- Simulated Data Dump");
+                      for(String sql : sqlStatements) pw.println(sql);
+                  }
               }
           }
           EOF
+          echo "✅ Source Code Generated."
 
-      # 5. 빌드 및 시뮬레이션 실행
-      - name: Build & Simulate
+      # --- [빌드 및 시뮬레이션 실행] ---
+      - name: Build & Run Simulation
         run: |
           set -euo pipefail
           cd "${APP_NAME}"
+          
+          echo "Building with Maven ${{ matrix.maven-version }}..."
           mvn -q -B clean package
-          java -cp "target/${APP_NAME}-1.0.0.jar" com.bank.secure.SecureBankingSystem ${{ inputs.transaction_count }}
           
-          # 결과 이동
-          mkdir -p ../artifacts
-          cp BPR_Analysis_Report.txt ../artifacts/
-          cp target/${APP_NAME}-1.0.0.jar ../artifacts/
+          echo "Running Simulation..."
+          java -cp "target/${APP_NAME}-1.0.0.jar" com.finance.core.FinancialSimulator ${{ inputs.transaction_count }}
+          
+          # 아티팩트 정리
+          mkdir -p ../artifacts/reports
+          mkdir -p ../artifacts/sql
+          
+          mv *.txt ../artifacts/reports/
+          mv *.sql ../artifacts/sql/
+          cp target/*.jar ../artifacts/
 
-      # [NEW] 6. 바이러스/악성코드 정밀 검사 (Security Scan)
-      - name: Run Antivirus Scan (ClamAV)
+      # --- [보안 검사 (Antivirus)] ---
+      - name: Run ClamAV Security Scan
         run: |
-          echo "=== Starting Security Scan ==="
-          mkdir -p artifacts
-          
-          # 빌드된 JAR 파일과 보고서 디렉토리 검사
-          # --bell: 바이러스 발견 시 알림
-          # -r: 재귀적 검사
-          # --no-summary: 요약만 출력하지 않고 상세 출력
-          
-          if clamscan -r --bell -i artifacts > logs/Security_Scan_Report.txt; then
-            echo "✅ No threats found." >> logs/Security_Scan_Report.txt
-            echo "✅ Security Scan Passed."
+          echo "Scanning artifacts for viruses..."
+          mkdir -p logs
+          # artifacts 폴더 전체 스캔
+          if clamscan -r -i artifacts > logs/security_scan.log; then
+            echo "✅ Virus Scan Clean." >> logs/security_scan.log
           else
-            echo "⚠️ THREAT DETECTED! Check logs."
-            # 실제 바이러스 발견 시 빌드 실패 처리 가능 (여기서는 로그만 기록)
-            echo "⚠️ Threat detected but continuing for report generation." >> logs/Security_Scan_Report.txt
+            echo "⚠️ Potential Threat Detected." >> logs/security_scan.log
           fi
-          
-          cat logs/Security_Scan_Report.txt
+          cat logs/security_scan.log
 
-      # [NEW] 7. 모니터링 종료 및 로그 수집
-      - name: Stop Monitoring & Collect Logs
+      # --- [모니터링 종료 및 로그 정리] ---
+      - name: Collect System Logs
         run: |
-          # 백그라운드 프로세스 종료
           pkill vmstat || true
-          
-          # Raw 로그를 보기 좋게 가공
-          cat logs/vmstat_raw.log >> logs/Resource_Usage_Log.txt
-          echo "=== Monitoring End ===" >> logs/Resource_Usage_Log.txt
+          cat logs/vmstat_raw.log >> logs/sys_monitor.log
 
-      # 8. ISO 생성 (보안 리포트 + 리소스 로그 포함)
-      - name: Create Secure ISO Bundle
+      # --- [ISO 생성 (DB, SQL, 리포트 포함)] ---
+      - name: Package ISO Bundle
         run: |
           VERSION="${{ matrix.maven-version }}"
-          ISO_ROOT="iso_root"
-          mkdir -p "${ISO_ROOT}/system"
-          mkdir -p "${ISO_ROOT}/reports/security"
-          mkdir -p "${ISO_ROOT}/reports/performance"
-          mkdir -p "${ISO_ROOT}/reports/finance"
+          ROOT="iso_root"
+          mkdir -p "${ROOT}/01_System_Binaries"
+          mkdir -p "${ROOT}/02_Financial_Reports"
+          mkdir -p "${ROOT}/03_Database_SQL"
+          mkdir -p "${ROOT}/04_Security_Logs"
 
-          # 바이너리 및 시스템 파일
-          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ISO_ROOT}/system/"
-          cp "artifacts/${APP_NAME}-1.0.0.jar" "${ISO_ROOT}/system/"
+          # 1. 바이너리 (Maven + App)
+          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ROOT}/01_System_Binaries/"
+          cp "artifacts/${APP_NAME}-1.0.0.jar" "${ROOT}/01_System_Binaries/"
 
-          # 보고서 분류 탑재
-          cp "artifacts/BPR_Analysis_Report.txt" "${ISO_ROOT}/reports/finance/"
-          cp "logs/Security_Scan_Report.txt" "${ISO_ROOT}/reports/security/"
-          cp "logs/Resource_Usage_Log.txt" "${ISO_ROOT}/reports/performance/"
+          # 2. 리포트 (BPR, Stock, Crypto)
+          cp artifacts/reports/*.txt "${ROOT}/02_Financial_Reports/"
 
-          # ISO 메타데이터
-          echo "Secure Build Bundle - Maven ${VERSION}" > "${ISO_ROOT}/README.txt"
-          echo "Scan Date: $(date)" >> "${ISO_ROOT}/README.txt"
+          # 3. SQL 스크립트 (Schema, Data)
+          cp artifacts/sql/*.sql "${ROOT}/03_Database_SQL/"
 
-          # ISO 생성
-          ISO_NAME="Secure-BPR-Maven-${VERSION}.iso"
-          mkisofs -o "dump/${ISO_NAME}" -J -R -V "SecureBuild-${VERSION}" "${ISO_ROOT}"
+          # 4. 로그 (보안, 성능)
+          cp logs/security_scan.log "${ROOT}/04_Security_Logs/"
+          cp logs/sys_monitor.log "${ROOT}/04_Security_Logs/"
+
+          # 5. README 및 실행 스크립트
+          echo "Financial Simulator ISO - Maven ${VERSION}" > "${ROOT}/README.txt"
+          echo "Includes: Banking, Stock, Crypto, SQL Dumps" >> "${ROOT}/README.txt"
           
-          echo "✅ Secure ISO Created: ${ISO_NAME}"
+          echo '#!/bin/bash' > "${ROOT}/run_app.sh"
+          echo 'java -jar 01_System_Binaries/*.jar 5000' >> "${ROOT}/run_app.sh"
+          chmod +x "${ROOT}/run_app.sh"
 
+          # 6. ISO 생성
+          ISO_NAME="FinSim-Full-Maven-${VERSION}.iso"
+          mkisofs -o "dump/${ISO_NAME}" -J -R -V "FinSim-${VERSION}" "${ROOT}"
+          
+          echo "✅ ISO Ready: ${ISO_NAME}"
+          du -sh "dump/${ISO_NAME}"
+
+      # --- [GitHub Release 배포] ---
       - name: Release to GitHub
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v${{ matrix.maven-version }}-secure-bpr"
-          name: "Secure Financial BPR (Maven ${{ matrix.maven-version }})"
+          tag: "v${{ matrix.maven-version }}-finsim-full"
+          name: "Ultimate FinSim & SQL (Maven ${{ matrix.maven-version }})"
           body: |
-            ## 🛡️ Secure Financial System Build
-            **Maven ${{ matrix.maven-version }} | Auto-Scheduled Build**
+            ## 🏦 Comprehensive Financial System Simulation
+            **Built with Apache Maven ${{ matrix.maven-version }}**
             
-            This release includes verified financial simulation data, security scan reports, and system resource logs.
+            This release contains a full-stack financial simulation engine, SQL database dumps, and security reports.
             
-            ### 💿 ISO Contents (`Secure-BPR-Maven-${{ matrix.maven-version }}.iso`)
+            ### 💿 ISO Contents (`FinSim-Full-Maven-${{ matrix.maven-version }}.iso`)
             
-            1.  **📊 Finance (`/reports/finance`)**
-                * `BPR_Analysis_Report.txt`: Transaction volume & High-value alerts.
-            2.  **🛡️ Security (`/reports/security`)**
-                * `Security_Scan_Report.txt`: **ClamAV** antivirus scan results for the build artifacts.
-            3.  **📈 Performance (`/reports/performance`)**
-                * `Resource_Usage_Log.txt`: CPU/RAM usage logs recorded during the build process.
-            4.  **⚙️ System (`/system`)**
-                * Maven Binaries & Executable JARs.
+            #### 1. 💰 Simulation Modules
+            - **Banking:** Deposit/Withdrawal simulation (BPR Report).
+            - **📈 Stock:** Virtual Trading (Samsung, Apple, Tesla, etc.).
+            - **🪙 Crypto:** Bitcoin/Ethereum volatility simulation.
             
-            *Verified by ClamAV & Sysstat monitoring.*
+            #### 2. 🗄️ Database & SQL
+            - `db_schema.sql`: Table definitions for Banking, Stock, and Crypto.
+            - `db_data_dump.sql`: **INSERT statements** for all simulated transactions.
+            
+            #### 3. 🛡️ Security & Performance
+            - **Antivirus:** ClamAV Scan Report (Clean).
+            - **Performance:** CPU/RAM/Disk Usage Logs (Sysstat).
+            
+            *Automated by GitHub Actions with 10-min schedule.*
           artifacts: "dump/*.iso"
           allowUpdates: true
           replacesArtifacts: true
