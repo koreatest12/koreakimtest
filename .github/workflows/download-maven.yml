@@ -1,10 +1,10 @@
-name: Maven ISO Build & Release (All Versions)
+name: Sales Report Server & Maven ISO Build (Mass Deploy)
 
 on:
   workflow_dispatch:
     inputs:
       force_release:
-        description: 'Force recreate release if exists'
+        description: 'Force recreate release'
         required: false
         type: boolean
         default: true
@@ -13,8 +13,8 @@ permissions:
   contents: write
 
 jobs:
-  build-iso-release:
-    name: Build ISO & Release Maven ${{ matrix.maven-version }}
+  build-sales-server-iso:
+    name: Build Sales Server & ISO (Maven ${{ matrix.maven-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -36,141 +36,209 @@ jobs:
     env:
       MAVEN_PRIMARY_BASE_URL: https://dlcdn.apache.org/maven/maven-3
       MAVEN_ARCHIVE_BASE_URL: https://archive.apache.org/dist/maven/maven-3
-      TARGET_REPO: spring-projects/spring-petclinic
-      TARGET_DIR: spring-petclinic
+      SERVER_APP_NAME: sales-branch-report-server
 
     steps:
-      # 1. 기본 환경 설정 및 체크아웃
-      - name: Checkout repository
+      # 1. 기본 환경 설정
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkout Spring PetClinic (Stable Target)
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.TARGET_REPO }}
-          path: ${{ env.TARGET_DIR }}
-
-      - name: Set up Temurin JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # 2. ISO 생성 도구 설치
-      - name: Install ISO creation tools
+      - name: Install ISO Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y genisoimage
 
-      # 3. Maven 다운로드 및 검증
-      - name: Download Apache Maven
+      # 2. Maven 다운로드 및 설정
+      - name: Setup Maven ${{ matrix.maven-version }}
         run: |
           set -euo pipefail
+          VERSION="${{ matrix.maven-version }}"
           mkdir -p dump extracted
           
-          VERSION="${{ matrix.maven-version }}"
+          # 다운로드 경로 설정
           FILENAME="apache-maven-${VERSION}-bin.tar.gz"
           ARCHIVE_PATH="dump/${FILENAME}"
-          
           PRIMARY_URL="${MAVEN_PRIMARY_BASE_URL}/${VERSION}/binaries/${FILENAME}"
           ARCHIVE_URL="${MAVEN_ARCHIVE_BASE_URL}/${VERSION}/binaries/${FILENAME}"
 
-          echo "Downloading Maven ${VERSION}..."
+          # 다운로드 시도
           if curl -fL "${PRIMARY_URL}" -o "${ARCHIVE_PATH}"; then
             echo "✅ Downloaded from Primary"
           else
             echo "⚠️ Primary failed, attempting Archive..."
-            if curl -fL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"; then
-              echo "✅ Downloaded from Archive"
-            else
-              exit 1
-            fi
+            curl -fL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"
           fi
 
-      - name: Extract Maven
-        run: |
-          set -euo pipefail
-          VERSION="${{ matrix.maven-version }}"
-          ARCHIVE_PATH="dump/apache-maven-${VERSION}-bin.tar.gz"
+          # 압축 해제
           EXTRACT_DIR="extracted/apache-maven-${VERSION}"
-          
           mkdir -p "${EXTRACT_DIR}"
           tar -xzf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}" --strip-components=1
           
+          # 환경변수 등록
           echo "MAVEN_HOME=${PWD}/${EXTRACT_DIR}" >> "$GITHUB_ENV"
           echo "${PWD}/${EXTRACT_DIR}/bin" >> "$GITHUB_PATH"
 
-      # 4. Spring PetClinic 빌드 (Maven 검증용)
-      - name: Build Spring PetClinic
+      # 3. [NEW] 영업점 금액 보고서 자동화 서버 (소스 생성)
+      # 실제 코드가 없으므로, 워크플로우 실행 시 동적으로 간단한 Spring Boot 스타일의 구조를 생성합니다.
+      - name: Generate Sales Report Server Source Code
         run: |
           set -euo pipefail
-          cd ${{ env.TARGET_DIR }}
-          echo "Building PetClinic with Maven ${{ matrix.maven-version }}..."
-          mvn -q -B -DskipTests clean package
-          echo "✅ Build Success"
+          APP_DIR="${SERVER_APP_NAME}"
+          mkdir -p "${APP_DIR}/src/main/java/com/finance/report"
+          
+          # 3-1. POM.xml 생성
+          cat <<EOF > "${APP_DIR}/pom.xml"
+          <project xmlns="http://maven.apache.org/POM/4.0.0" 
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <groupId>com.finance</groupId>
+            <artifactId>${SERVER_APP_NAME}</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+            <properties>
+              <maven.compiler.source>17</maven.compiler.source>
+              <maven.compiler.target>17</maven.compiler.target>
+            </properties>
+            <dependencies>
+                <!-- 로깅 등 기본 의존성 시뮬레이션 -->
+            </dependencies>
+          </project>
+          EOF
 
-      # 5. 재패키징 (Extracted Tarball)
-      - name: Repackage Extracted Maven
+          # 3-2. Java 메인 애플리케이션 생성 (보고서 로직 시뮬레이션)
+          cat <<EOF > "${APP_DIR}/src/main/java/com/finance/report/ReportServerApp.java"
+          package com.finance.report;
+          
+          import java.time.LocalDateTime;
+          import java.util.Random;
+
+          public class ReportServerApp {
+              public static void main(String[] args) {
+                  System.out.println("=== Sales Branch Amount Report Server Starting ===");
+                  System.out.println("Maven Version: ${{ matrix.maven-version }}");
+                  System.out.println("Report Time: " + LocalDateTime.now());
+                  
+                  String[] branches = {"Seoul-Gangnam", "Busan-Haeundae", "Incheon-Airport", "Jeju-Main"};
+                  Random rand = new Random();
+                  long totalAmount = 0;
+                  
+                  System.out.println("\n--- Branch Report ---");
+                  for (String branch : branches) {
+                      long amount = rand.nextInt(100000) * 1000;
+                      totalAmount += amount;
+                      System.out.println("Branch: " + branch + " | Amount: " + amount + " KRW");
+                  }
+                  System.out.println("---------------------");
+                  System.out.println("Total Sales Amount: " + totalAmount + " KRW");
+                  System.out.println("=== Server Process Complete ===");
+              }
+          }
+          EOF
+          
+          echo "✅ Sales Report Server source code generated."
+
+      # 4. [NEW] 영업점 보고서 서버 빌드 (Maven 사용)
+      - name: Build Sales Report Server
         run: |
-          VERSION="${{ matrix.maven-version }}"
-          tar -czf "dump/apache-maven-${VERSION}-extracted.tar.gz" -C "extracted/apache-maven-${VERSION}" .
+          set -euo pipefail
+          cd "${SERVER_APP_NAME}"
+          echo "Building Sales Report Server with Maven ${{ matrix.maven-version }}..."
+          
+          # Clean Package 실행
+          mvn -q -B clean package
+          
+          # 빌드 결과 확인
+          ls -lh target/*.jar
+          echo "✅ Sales Report Server Built Successfully."
 
-      # 6. [NEW] ISO 파일 생성
-      - name: Create ISO Image
+      # 5. [NEW] ISO 메타데이터 생성 및 정보 주입
+      - name: Prepare ISO Root & Inject Metadata
         run: |
           set -euo pipefail
           VERSION="${{ matrix.maven-version }}"
           ISO_ROOT="iso_root"
-          mkdir -p "${ISO_ROOT}"
+          mkdir -p "${ISO_ROOT}/maven-bin"
+          mkdir -p "${ISO_ROOT}/sales-server"
+          mkdir -p "${ISO_ROOT}/metadata"
 
-          # ISO에 포함할 파일 복사
-          echo "Copying artifacts to ISO root..."
-          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ISO_ROOT}/"
-          cp "dump/apache-maven-${VERSION}-extracted.tar.gz" "${ISO_ROOT}/"
+          # 5-1. 아티팩트 복사
+          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ISO_ROOT}/maven-bin/"
+          cp "${SERVER_APP_NAME}/target/${SERVER_APP_NAME}-1.0.0-SNAPSHOT.jar" "${ISO_ROOT}/sales-server/"
+
+          # 5-2. 메타데이터 파일 주입 (JSON)
+          cat <<EOF > "${ISO_ROOT}/metadata/release-info.json"
+          {
+            "product": "Sales Report Server Bundle",
+            "maven_version": "${VERSION}",
+            "build_timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "build_runner": "GitHub Actions",
+            "components": [
+              "Apache Maven Binaries",
+              "Sales Branch Report Server JAR"
+            ]
+          }
+          EOF
+
+          # 5-3. 파일 매니페스트 생성 (텍스트)
+          echo "=== ISO File Manifest ===" > "${ISO_ROOT}/metadata/MANIFEST.txt"
+          find "${ISO_ROOT}" -type f -exec sha256sum {} \; >> "${ISO_ROOT}/metadata/MANIFEST.txt"
+
+          # 5-4. 영업점 서버 실행 스크립트 주입 (자동화 편의성)
+          cat <<EOF > "${ISO_ROOT}/sales-server/run_report.sh"
+          #!/bin/bash
+          java -cp ${SERVER_APP_NAME}-1.0.0-SNAPSHOT.jar com.finance.report.ReportServerApp
+          EOF
+          chmod +x "${ISO_ROOT}/sales-server/run_report.sh"
+
+          echo "✅ Metadata and Scripts injected into ISO root."
+
+      # 6. ISO 생성 및 최종 검증
+      - name: Generate Final ISO
+        run: |
+          VERSION="${{ matrix.maven-version }}"
+          ISO_NAME="SalesServer-Maven-${VERSION}.iso"
           
-          # 빌드된 Spring Boot JAR 파일 복사
-          mkdir -p "${ISO_ROOT}/spring-boot-app"
-          cp ${{ env.TARGET_DIR }}/target/*.jar "${ISO_ROOT}/spring-boot-app/" || echo "No JAR found"
-
-          # README 작성
-          echo "Apache Maven ${VERSION} ISO Bundle" > "${ISO_ROOT}/README.txt"
-          echo "Built on $(date)" >> "${ISO_ROOT}/README.txt"
-          echo "Contains: Maven Binary, Extracted Folder, and Spring PetClinic Example JAR" >> "${ISO_ROOT}/README.txt"
-
-          # ISO 생성 (mkisofs 사용)
-          ISO_FILENAME="dump/apache-maven-${VERSION}-bundle.iso"
-          mkisofs -o "${ISO_FILENAME}" -J -R -V "Maven-${VERSION}" "${ISO_ROOT}"
+          # ISO 생성
+          mkisofs -o "dump/${ISO_NAME}" -J -R -V "Maven-${VERSION}-Report" "iso_root"
           
-          echo "✅ ISO Created: ${ISO_FILENAME}"
-          ls -lh "${ISO_FILENAME}"
+          echo "✅ ISO Created: dump/${ISO_NAME}"
+          
+          # ISO 정보 요약 출력
+          echo "ISO Size:"
+          du -sh "dump/${ISO_NAME}"
 
-      # 7. 릴리즈 생성 및 파일 업로드 (ISO 포함)
+      # 7. GitHub Release 배포
       - name: Release to GitHub
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "maven-${{ matrix.maven-version }}"
-          name: "Apache Maven ${{ matrix.maven-version }} + ISO Bundle"
+          tag: "v${{ matrix.maven-version }}-sales-server"
+          name: "Sales Report Server (Maven ${{ matrix.maven-version }})"
           body: |
-            ## Apache Maven ${{ matrix.maven-version }} Released
+            ## 📊 Sales Branch Report Server + Maven ${{ matrix.maven-version }}
             
-            This release includes an **ISO image** containing the Maven binaries and a verified Spring Boot application.
+            This release includes the automated Sales Report Server built with the specific Maven version.
             
-            ### 📦 Assets
-            - **💿 ISO Image:** `apache-maven-${{ matrix.maven-version }}-bundle.iso` (Mountable image)
-            - **📦 Archive:** `apache-maven-${{ matrix.maven-version }}-bin.tar.gz`
-            - **📂 Extracted:** `apache-maven-${{ matrix.maven-version }}-extracted.tar.gz`
+            ### 💿 ISO Contents (`SalesServer-Maven-${{ matrix.maven-version }}.iso`)
+            - `/maven-bin`: Apache Maven Binaries
+            - `/sales-server`: **Sales Branch Amount Report Automation Server (JAR)**
+            - `/metadata`: Build Info & Checksums
             
-            ### ✅ Verification
-            - **Build Target:** `spring-projects/spring-petclinic`
-            - **Java Version:** JDK 17
-            - **Status:** Build Passed
+            ### 🛠 Automation Server Details
+            - **App:** `${{ env.SERVER_APP_NAME }}`
+            - **Function:** Generates mock sales data reports for branches (Seoul, Busan, etc.)
+            - **Build Tool:** Apache Maven ${{ matrix.maven-version }}
             
-            *Automated ISO generation by GitHub Actions.*
+            *Automated build by GitHub Actions.*
           artifacts: |
+            dump/SalesServer-Maven-${{ matrix.maven-version }}.iso
             dump/apache-maven-${{ matrix.maven-version }}-bin.tar.gz
-            dump/apache-maven-${{ matrix.maven-version }}-extracted.tar.gz
-            dump/apache-maven-${{ matrix.maven-version }}-bundle.iso
           allowUpdates: true
           replacesArtifacts: true
           makeLatest: ${{ matrix.maven-version == '3.9.11' }}
