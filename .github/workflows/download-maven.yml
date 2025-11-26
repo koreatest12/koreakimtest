@@ -1,4 +1,4 @@
-name: Advanced Maven Build & Release (Upgrade + Mass Deploy)
+name: Advanced Maven Build & Release (Fixed & Stable)
 
 on:
   workflow_dispatch:
@@ -10,14 +10,14 @@ on:
         default: true
 
 permissions:
-  contents: write  # GitHub Release 생성을 위한 필수 권한
+  contents: write
 
 jobs:
   manage-maven-release:
     name: Build & Release Maven ${{ matrix.maven-version }}
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # 하나의 버전이 실패해도 나머지는 계속 진행
+      fail-fast: false
       matrix:
         maven-version:
           - '3.9.0'
@@ -36,28 +36,28 @@ jobs:
     env:
       MAVEN_PRIMARY_BASE_URL: https://dlcdn.apache.org/maven/maven-3
       MAVEN_ARCHIVE_BASE_URL: https://archive.apache.org/dist/maven/maven-3
-      TARGET_REPO: jeffli1993/springboot-learning-example
+      # [FIX] 401 에러가 발생하는 옛날 프로젝트 대신, Spring 공식 PetClinic으로 교체하여 빌드 안정성 확보
+      TARGET_REPO: spring-projects/spring-petclinic
+      TARGET_DIR: spring-petclinic
 
     steps:
-      # 1. 기본 저장소 체크아웃
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. [FIX] 빌드할 Spring Boot 예제 프로젝트 클론 (이 단계가 없으면 빌드 실패함)
-      - name: Checkout SpringBoot Learning Example
+      # [FIX] 타겟 프로젝트 클론 (Spring PetClinic)
+      - name: Checkout Spring Boot Project (PetClinic)
         uses: actions/checkout@v4
         with:
           repository: ${{ env.TARGET_REPO }}
-          path: springboot-learning-example
+          path: ${{ env.TARGET_DIR }}
 
-      # 3. JDK 설정 (Spring Boot 빌드용)
+      # PetClinic은 최신 Java 17을 공식 지원하므로 호환성이 완벽합니다.
       - name: Set up Temurin JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # 4. 캐싱 설정
       - name: Cache Maven repository
         uses: actions/cache@v4
         with:
@@ -66,13 +66,11 @@ jobs:
           restore-keys: |
             maven-repo-${{ runner.os }}-
 
-      # 5. 작업 디렉토리 준비
       - name: Prepare directories
         run: |
           mkdir -p dump
           mkdir -p extracted
 
-      # 6. Maven 다운로드 (CDN -> Archive 순차 시도)
       - name: Download Apache Maven
         run: |
           set -euo pipefail
@@ -97,7 +95,6 @@ jobs:
             fi
           fi
 
-      # 7. Checksum 검증
       - name: Verify Checksum
         run: |
           set -euo pipefail
@@ -121,7 +118,6 @@ jobs:
           echo "${EXPECTED_HASH}  ${ARCHIVE_PATH}" | sha512sum -c -
           echo "✅ Checksum verified."
 
-      # 8. 압축 해제 및 환경변수 설정
       - name: Extract and Set Environment
         run: |
           set -euo pipefail
@@ -132,11 +128,9 @@ jobs:
           mkdir -p "${EXTRACT_DIR}"
           tar -xzf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}" --strip-components=1
           
-          # GITHUB_ENV에 경로 추가 (이후 스텝에서 mvn 명령어 사용 가능)
           echo "MAVEN_HOME=${PWD}/${EXTRACT_DIR}" >> "$GITHUB_ENV"
           echo "${PWD}/${EXTRACT_DIR}/bin" >> "$GITHUB_PATH"
 
-      # 9. Maven 버전 확인 및 Smoke Test
       - name: Maven Version & Smoke Test
         run: |
           mvn -version
@@ -154,21 +148,19 @@ jobs:
           mvn -q -B package
           echo "✅ Simple smoke test passed."
 
-      # 10. 실제 타겟 프로젝트(Spring Boot Example) 빌드
-      # [UPGRADE] 클론된 디렉토리로 이동하여 실행
-      - name: Build Spring Boot Learning Example
+      # [FIX] 안정적인 Spring PetClinic 빌드 (Tests Skip으로 속도 향상)
+      - name: Build Spring PetClinic
         run: |
           set -euo pipefail
           echo "Building ${{ env.TARGET_REPO }} with Maven ${{ matrix.maven-version }}"
           
-          cd springboot-learning-example
+          cd ${{ env.TARGET_DIR }}
           
-          # 테스트는 스킵하되, 전체 모듈 패키징 수행
+          # 공식 저장소(Maven Central)를 사용하므로 401 에러가 발생하지 않음
           mvn -q -B -DskipTests clean package
           
-          echo "✅ Spring Boot Build Complete."
+          echo "✅ Spring PetClinic Build Complete."
 
-      # 11. 재패키징 (Extracted 버전)
       - name: Repackage Extracted Version
         run: |
           VERSION="${{ matrix.maven-version }}"
@@ -178,7 +170,6 @@ jobs:
           tar -czf "${REPACK_NAME}" -C "${EXTRACT_DIR}" .
           echo "✅ Repackaged to ${REPACK_NAME}"
 
-      # 12. Artifact 업로드 (Github Actions 저장소용)
       - name: Upload Workflow Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -186,8 +177,6 @@ jobs:
           path: dump/*.tar.gz
           retention-days: 3
 
-      # 13. GitHub Release 생성 및 출시 (Upgrade Feature)
-      # 가장 최신 버전인 경우 'latest' 태그를 붙이도록 설정 가능 (여기서는 모든 버전을 릴리즈)
       - name: Release to GitHub
         uses: ncipollo/release-action@v1
         with:
@@ -197,19 +186,21 @@ jobs:
           body: |
             ## Apache Maven ${{ matrix.maven-version }}
             
-            This release contains:
-            - **Original Binary:** `apache-maven-${{ matrix.maven-version }}-bin.tar.gz`
-            - **Extracted Bundle:** `apache-maven-${{ matrix.maven-version }}-extracted.tar.gz`
+            This release contains verified Maven binaries.
             
-            ### Build Verification
+            ### Build Verification Status
             - **JDK:** Temurin 17
-            - **Smoke Test:** Passed
-            - **Integration Build:** `${{ env.TARGET_REPO }}` (All modules packaged)
+            - **Smoke Test:** Passed (Archetype generation)
+            - **Integration Build:** Passed (`spring-projects/spring-petclinic`)
+            
+            **Files:**
+            - `apache-maven-${{ matrix.maven-version }}-bin.tar.gz` (Original)
+            - `apache-maven-${{ matrix.maven-version }}-extracted.tar.gz` (Repackaged)
             
             *Automated release by GitHub Actions.*
           artifacts: "dump/*.tar.gz"
           allowUpdates: true
           replacesArtifacts: true
-          makeLatest: ${{ matrix.maven-version == '3.9.11' }} # 3.9.11 버전만 최신(Latest)으로 표시
+          makeLatest: ${{ matrix.maven-version == '3.9.11' }}
           draft: false
           prerelease: false
