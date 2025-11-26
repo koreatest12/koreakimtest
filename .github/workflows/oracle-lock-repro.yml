@@ -1,10 +1,8 @@
-name: Service Auto-Updater (Dependabot-like)
+name: Service Auto-Updater (Fixed)
 
 on:
-  # 1. 매일 자정 자동 점검 (상시 수행)
   schedule:
     - cron: '0 0 * * *'
-  # 2. 수동 실행
   workflow_dispatch:
 
 permissions:
@@ -12,132 +10,52 @@ permissions:
   pull-requests: write
 
 jobs:
-  check-and-update-services:
-    name: Check & Update Services
+  check-and-update:
+    name: Check & Update
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
+      # [FIX] 타겟 파일 확인 로직 추가
+      - name: Verify Target Workflow Exists
+        id: verify_file
+        run: |
+          TARGET_FILE=".github/workflows/maven-korea-massive-iso.yml"
+          if [ -f "$TARGET_FILE" ]; then
+            echo "✅ Target file found: $TARGET_FILE"
+            echo "file_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "⚠️ Target file NOT found at $TARGET_FILE"
+            echo "Listing workflows directory for debugging:"
+            ls -R .github/workflows || echo "No workflows dir found"
+            echo "file_exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # --- [1. Maven 버전 모니터링 및 업데이트] ---
-      - name: Check for New Maven Versions
+      - name: Check Maven Version
+        if: steps.verify_file.outputs.file_exists == 'true'
         id: check-maven
         run: |
-          echo "🔍 Checking Apache Maven Metadata..."
-          
-          # Apache 공식 사이트에서 최신 3.x 버전 리스트 가져오기
-          # (HTML 파싱하여 버전 숫자만 추출)
+          TARGET_FILE=".github/workflows/maven-korea-massive-iso.yml"
           LATEST_MAVEN=$(curl -s https://dlcdn.apache.org/maven/maven-3/ | grep -o 'href="3\.[0-9]\+\.[0-9]\+/"' | cut -d'"' -f2 | tr -d '/' | sort -V | tail -n 1)
           
-          echo "Latest Maven Version on Server: $LATEST_MAVEN"
-          
-          # 타겟 워크플로우 파일 (가장 최근에 만든 massive-iso 파일 대상)
-          TARGET_FILE=".github/workflows/maven-korea-massive-iso.yml"
-          
           if grep -q "$LATEST_MAVEN" "$TARGET_FILE"; then
-            echo "✅ Workflow is already using the latest Maven ($LATEST_MAVEN)."
-            echo "update_maven=false" >> "$GITHUB_OUTPUT"
+            echo "✅ Maven is up to date ($LATEST_MAVEN)"
           else
-            echo "⚠️ New Maven version found! ($LATEST_MAVEN)"
-            echo "update_maven=true" >> "$GITHUB_OUTPUT"
-            echo "latest_maven=$LATEST_MAVEN" >> "$GITHUB_OUTPUT"
-            
-            # 워크플로우 파일의 matrix 부분에 새 버전 추가 (sed 사용)
-            # 마지막 버전 밑에 새 버전 추가하는 로직
+            echo "⚠️ New Maven version: $LATEST_MAVEN"
+            # 마지막 버전을 찾아 그 뒤에 새 버전 추가
             sed -i "/- '3.9.11'/a \          - '$LATEST_MAVEN'" "$TARGET_FILE"
-            echo "✅ Added Maven $LATEST_MAVEN to workflow matrix."
+            echo "update_needed=true" >> "$GITHUB_OUTPUT"
+            echo "latest_version=$LATEST_MAVEN" >> "$GITHUB_OUTPUT"
           fi
 
-      # --- [2. Java 라이브러리 종속성 업데이트 (Virtual Dependabot)] ---
-      - name: Check & Update Java Dependencies
-        id: check-libs
-        run: |
-          TARGET_FILE=".github/workflows/maven-korea-massive-iso.yml"
-          
-          # 워크플로우 파일 내에 하드코딩된 버전 추출 (예: commons-lang3)
-          CURRENT_LANG3=$(grep -oP "commons-lang3</artifactId>\s+<version>\K[0-9\.]+" "$TARGET_FILE" || echo "0.0.0")
-          
-          echo "Current Commons-Lang3: $CURRENT_LANG3"
-          
-          # 가상 POM 생성하여 최신 버전 확인
-          cat <<EOF > temp_check_pom.xml
-          <project>
-            <modelVersion>4.0.0</modelVersion>
-            <groupId>check</groupId>
-            <artifactId>check</artifactId>
-            <version>1.0</version>
-            <dependencies>
-              <dependency>
-                <groupId>org.apache.commons</groupId>
-                <artifactId>commons-lang3</artifactId>
-                <version>$CURRENT_LANG3</version>
-              </dependency>
-            </dependencies>
-          </project>
-          EOF
-          
-          # Maven Versions Plugin 실행
-          LATEST_LANG3=$(mvn versions:display-dependency-updates -f temp_check_pom.xml | grep "commons-lang3" | grep -oP "\-> \K[0-9\.]+" | tail -n 1 || echo "")
-          
-          if [ ! -z "$LATEST_LANG3" ] && [ "$LATEST_LANG3" != "$CURRENT_LANG3" ]; then
-             echo "⚠️ Update found for Commons-Lang3: $CURRENT_LANG3 -> $LATEST_LANG3"
-             
-             # 파일 내 버전 교체
-             sed -i "s|<version>$CURRENT_LANG3</version>|<version>$LATEST_LANG3</version>|g" "$TARGET_FILE"
-             echo "update_libs=true" >> "$GITHUB_OUTPUT"
-          else
-             echo "✅ Libraries are up to date."
-             echo "update_libs=false" >> "$GITHUB_OUTPUT"
-          fi
-          
-          rm temp_check_pom.xml
-
-      # --- [3. 시스템 보안 도구(ClamAV) 버전 리포팅] ---
-      - name: Check Security Tool Updates
-        run: |
-          echo "🔍 Checking ClamAV & System Tools..."
-          sudo apt-get update > /dev/null
-          
-          # 설치 가능한 최신 버전 확인
-          INSTALLED_CLAM=$(clamscan --version | cut -d' ' -f2 | cut -d'/' -f1)
-          LATEST_CLAM=$(apt-cache policy clamav | grep "Candidate:" | awk '{print $2}')
-          
-          echo "Current ClamAV: $INSTALLED_CLAM"
-          echo "Available ClamAV: $LATEST_CLAM"
-          
-          if [ "$INSTALLED_CLAM" != "$LATEST_CLAM" ]; then
-             echo "::notice::New ClamAV version available in repo: $LATEST_CLAM (Will be installed on next run)"
-          fi
-
-      # --- [4. 변경 사항이 있을 경우 PR 생성] ---
-      - name: Create Pull Request
-        if: steps.check-maven.outputs.update_maven == 'true' || steps.check-libs.outputs.update_libs == 'true'
+      - name: Create PR
+        if: steps.check-maven.outputs.update_needed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore(deps): update maven and libraries"
-          committer: GitHub Actions <actions@github.com>
-          author: Dependabot-Like <actions@github.com>
-          branch: auto-update-dependencies
-          delete-branch: true
-          title: "⬆️ Auto-Update: Maven & Java Dependencies"
-          body: |
-            ## 🤖 Service Auto-Updater Report
-            
-            This PR updates the workflow versions to the latest available.
-            
-            ### 📦 Updates
-            - **Maven Version:** ${{ steps.check-maven.outputs.latest_maven }} (New version added to Matrix)
-            - **Java Libraries:** Updated to latest stable versions on Maven Central.
-            
-            *Generated automatically by the Service Auto-Updater workflow.*
-          labels: |
-            dependencies
-            automated-pr
+          commit-message: "chore: update maven to ${{ steps.check-maven.outputs.latest_version }}"
+          title: "⬆️ Auto-Update: Maven ${{ steps.check-maven.outputs.latest_version }}"
+          body: "Automated update for massive generation workflow."
+          branch: auto-update-maven
