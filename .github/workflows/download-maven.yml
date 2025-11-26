@@ -1,4 +1,4 @@
-name: Korea Finance Security & MD ISO (Fixed ClamAV)
+name: Korea Finance Massive Data & Security ISO
 
 on:
   schedule:
@@ -10,7 +10,7 @@ on:
         required: false
         default: '50000'
       transaction_count:
-        description: 'Tx per Sector'
+        description: 'Transactions'
         required: false
         default: '3000'
 
@@ -18,8 +18,8 @@ permissions:
   contents: write
 
 jobs:
-  korea-fixed-build:
-    name: Build & Sec Report (Maven ${{ matrix.maven-version }})
+  korea-massive-build:
+    name: Massive Data Build (Maven ${{ matrix.maven-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -44,7 +44,7 @@ jobs:
       APP_NAME: korea-fin-engine
 
     steps:
-      # --- [1. 환경 설정 및 도구 설치] ---
+      # --- [1. 환경 설정] ---
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -54,33 +54,37 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      # [FIX] ClamAV Lock 에러 해결 로직 적용
-      - name: Install Tools & Fix ClamAV Lock
+      # --- [2. 도구 설치 및 ClamAV 설정 (경고 완화)] ---
+      - name: Install Tools & Configure ClamAV
         run: |
           sudo apt-get update
-          sudo apt-get install -y genisoimage clamav clamav-daemon sysstat
+          sudo apt-get install -y genisoimage clamav clamav-daemon sysstat tree
           
-          echo "🛑 Stopping conflicting ClamAV daemon..."
+          echo "🛑 Stopping conflicting ClamAV daemon to release lock..."
           sudo systemctl stop clamav-freshclam || true
+          
+          echo "🔧 Creating missing socket directories to suppress warnings..."
+          sudo mkdir -p /var/run/clamav
+          sudo chown clamav:clamav /var/run/clamav
+          sudo chmod 755 /var/run/clamav
           
           echo "🔧 Fixing log permissions..."
           sudo touch /var/log/clamav/freshclam.log
           sudo chown -R clamav:clamav /var/log/clamav
-          sudo chmod 755 /var/log/clamav
           
-          echo "🔄 Running manual Freshclam update..."
-          # 업데이트 실패해도 빌드는 계속 진행하도록 처리 (|| true)
-          sudo freshclam || echo "⚠️ Freshclam update warning (Network/Mirror issue). Using default DB."
+          echo "🔄 Running Freshclam update..."
+          # 업데이트 후 clamd 연결 실패 경고는 CLI 모드에서 정상이므로 || true로 넘어감
+          sudo freshclam || echo "⚠️ Update finished with warnings (Expected)."
 
-      # --- [2. 리소스 모니터링 시작] ---
-      - name: Start Resource Monitoring
+      # --- [3. 리소스 모니터링] ---
+      - name: Start Monitoring
         run: |
           mkdir -p logs
           echo "| Timestamp | CPU% | MEM% | IO Wait |" > logs/sys_monitor.md
           echo "|---|---|---|---|" >> logs/sys_monitor.md
           vmstat -t 5 | awk '{print "| " $18 " " $19 " | " $13 " | " $4 " | " $16 " |"}' >> logs/vmstat_raw.log &
 
-      # --- [3. Maven 설치] ---
+      # --- [4. Maven 설치] ---
       - name: Setup Maven ${{ matrix.maven-version }}
         run: |
           set -euo pipefail
@@ -93,7 +97,7 @@ jobs:
           ARCHIVE="https://archive.apache.org/dist/maven/maven-3/${VERSION}/binaries/${FILENAME}"
 
           if curl -fL "${PRIMARY}" -o "${ARCHIVE_PATH}"; then
-            echo "✅ Maven Downloaded"
+            echo "✅ Downloaded Maven"
           else
             curl -fL "${ARCHIVE}" -o "${ARCHIVE_PATH}"
           fi
@@ -102,14 +106,51 @@ jobs:
           echo "MAVEN_HOME=${PWD}/extracted" >> "$GITHUB_ENV"
           echo "${PWD}/extracted/bin" >> "$GITHUB_PATH"
 
-      # --- [4. 대한민국 금융 시뮬레이터 생성 (MD 엔진 포함)] ---
+      # --- [5. 대량 파일 및 디렉토리 생성 (Massive Generation)] ---
+      - name: Generate Massive File Structure
+        run: |
+          set -euo pipefail
+          MASSIVE_ROOT="massive_storage/legacy_archives"
+          mkdir -p "${MASSIVE_ROOT}"
+          
+          echo "🚀 Starting Massive File Generation..."
+          echo "Generating Years > Branches > Depts > Logs..."
+          
+          # 3년치 데이터 (2022~2024)
+          for year in {2022..2024}; do
+            # 각 연도별 10개 지점
+            for branch in {001..010}; do
+               # 각 지점별 5개 부서
+               for dept in "Loan" "Forex" "Deposit" "VIP" "Audit"; do
+                  DIR_PATH="${MASSIVE_ROOT}/${year}/Branch_${branch}/${dept}"
+                  mkdir -p "${DIR_PATH}"
+                  
+                  # 각 폴더에 20개의 더미 로그 파일 생성
+                  for file_num in {1..20}; do
+                     echo "Encrypted Transaction Log - ${year} - ${branch} - ${dept} - ${file_num}" > "${DIR_PATH}/tx_log_${file_num}.dat"
+                  done
+               done
+            done
+          done
+          
+          # 파일 개수 확인
+          FILE_COUNT=$(find massive_storage -type f | wc -l)
+          DIR_COUNT=$(find massive_storage -type d | wc -l)
+          
+          echo "✅ Massive Generation Complete."
+          echo "Total Files Created: ${FILE_COUNT}"
+          echo "Total Directories: ${DIR_COUNT}"
+          
+          # 구조 요약 파일 생성
+          tree massive_storage -L 3 > massive_structure_summary.txt
+
+      # --- [6. 시뮬레이터 소스 생성] ---
       - name: Generate Simulator Source
         run: |
           set -euo pipefail
           SRC_DIR="${APP_NAME}/src/main/java/com/korea/sim"
           mkdir -p "${SRC_DIR}"
           
-          # POM.xml (보안 의존성 포함)
           cat <<EOF > "${APP_NAME}/pom.xml"
           <project xmlns="http://maven.apache.org/POM/4.0.0" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <modelVersion>4.0.0</modelVersion>
@@ -126,189 +167,134 @@ jobs:
                     <artifactId>commons-lang3</artifactId>
                     <version>3.12.0</version>
                 </dependency>
-                <dependency>
-                    <groupId>com.fasterxml.jackson.core</groupId>
-                    <artifactId>jackson-databind</artifactId>
-                    <version>2.13.0</version>
-                </dependency>
             </dependencies>
           </project>
           EOF
 
-          # Java Code (인구/금융 시뮬레이션 + MD 리포트 생성)
           cat <<EOF > "${SRC_DIR}/KoreaSimApp.java"
           package com.korea.sim;
           import java.io.*;
           import java.text.DecimalFormat;
           import java.time.LocalDateTime;
-          import java.util.*;
 
           public class KoreaSimApp {
-              static final long POPULATION = 51_750_000L;
-              static Random rand = new Random();
-              static DecimalFormat df = new DecimalFormat("#,###");
-
               public static void main(String[] args) throws IOException {
-                  int custCount = Integer.parseInt(args.length > 0 ? args[0] : "50000");
-                  int txCount = Integer.parseInt(args.length > 1 ? args[1] : "3000");
-                  
-                  System.out.println("=== KOREA FINANCE SIMULATION (FIXED BUILD) ===");
-                  
-                  // 1. Markdown 리포트 생성
-                  generateMdReports(custCount, txCount);
-                  
-                  // 2. SQL 데이터 생성 (간략화)
-                  generateSql(custCount);
+                  System.out.println("=== KOREA FINANCE MASSIVE SIMULATION ===");
+                  generateReport();
               }
-
-              private static void generateMdReports(int custCount, int txCount) throws IOException {
-                  // Executive Summary
-                  try(PrintWriter pw = new PrintWriter(new FileWriter("Report_00_Executive_Summary.md"))) {
-                      pw.println("# 🇰🇷 Executive Summary: Korea Finance System");
-                      pw.println("**Build Date:** " + LocalDateTime.now() + "  ");
-                      pw.println("**Status:** ✅ System Stable  ");
-                      pw.println("");
-                      pw.println("## 📊 Key Indicators");
-                      pw.println("| Indicator | Value | Note |");
-                      pw.println("|---|---|---|");
-                      pw.println("| **Total Population** | " + df.format(POPULATION) + " | 2024 Est. |");
-                      pw.println("| **Active Users** | " + df.format(custCount) + " | Simulated |");
-                      pw.println("| **Daily Transactions** | " + df.format(txCount * 3) + " | Bank/Stock/Crypto |");
-                  }
-                  
-                  // Financial Sector Report
-                  try(PrintWriter pw = new PrintWriter(new FileWriter("Report_02_Finance_Analysis.md"))) {
-                      pw.println("# 💰 Financial Sector Analysis");
-                      pw.println("## 1. Banking (Deposit/Withdrawal)");
-                      pw.println("- **Avg Transaction:** " + df.format(rand.nextInt(50)*10000) + " KRW");
-                      pw.println("- **Stability:** High");
-                      pw.println("");
-                      pw.println("## 2. Stock Market (KOSPI/KOSDAQ)");
-                      pw.println("- **Active Traders:** " + df.format(custCount * 0.3));
-                      pw.println("- **Top Vol:** Samsung Elec, SK Hynix");
-                      pw.println("");
-                      pw.println("## 3. Crypto Assets");
-                      pw.println("- **Volatility Index:** High");
-                      pw.println("- **Top Assets:** BTC, ETH, XRP");
-                  }
-              }
-
-              private static void generateSql(int count) throws IOException {
-                  try(PrintWriter pw = new PrintWriter(new FileWriter("korea_customers.sql"))) {
-                      pw.println("-- Active Customer Dump");
-                      pw.println("INSERT INTO customers (id, name, region) VALUES");
-                      pw.println("('CUST_001', 'Kim Min-su', 'Seoul'),");
-                      pw.println("('CUST_002', 'Lee Ji-eun', 'Gyeonggi');");
-                      pw.println("-- ... (Truncated for simulation speed)");
+              private static void generateReport() throws IOException {
+                  try(PrintWriter pw = new PrintWriter(new FileWriter("Report_Executive.md"))) {
+                      pw.println("# 🇰🇷 Massive System Report");
+                      pw.println("- **Build Time:** " + LocalDateTime.now());
+                      pw.println("- **Data Status:** Massive Archives Generated");
                   }
               }
           }
           EOF
 
-      # --- [5. 빌드 및 실행] ---
-      - name: Build & Simulate
+      # --- [7. 빌드] ---
+      - name: Build
         run: |
-          set -euo pipefail
           cd "${APP_NAME}"
           mvn -q -B clean package
-          java -cp "target/${APP_NAME}-1.0.0.jar" com.korea.sim.KoreaSimApp ${{ inputs.active_customer_count }} ${{ inputs.transaction_count }}
-          
-          # 아티팩트 정리
-          mkdir -p ../artifacts/reports
-          mv Report_*.md ../artifacts/reports/
-          cp *.sql ../artifacts/reports/
-          cp target/*.jar ../artifacts/
+          cp target/*.jar ../
 
-      # --- [6. 종속성 및 보안 분석 (Security Submission)] ---
-      - name: Dependency & Security Submission
+      # --- [8. 종속성 및 보안 분석 (대량 파일 포함)] ---
+      - name: Security & Dependency Analysis
         run: |
-          set -euo pipefail
+          # Dependency Tree
           cd "${APP_NAME}"
+          mvn -q dependency:tree -DoutputFile=../dep_tree.txt
+          cd ..
           
-          # Dependency Tree 추출
-          mvn -q dependency:tree -DoutputFile=dep_tree.txt
-          
-          # 보안 리포트 생성
-          echo "# 🛡️ Security Audit & Dependency Report" > ../artifacts/reports/Report_03_Security_Audit.md
-          echo "**Scan Timestamp:** $(date)" >> ../artifacts/reports/Report_03_Security_Audit.md
-          echo "" >> ../artifacts/reports/Report_03_Security_Audit.md
-          
-          echo "## 📦 Software Bill of Materials (SBOM)" >> ../artifacts/reports/Report_03_Security_Audit.md
-          echo '```' >> ../artifacts/reports/Report_03_Security_Audit.md
-          cat dep_tree.txt >> ../artifacts/reports/Report_03_Security_Audit.md
-          echo '```' >> ../artifacts/reports/Report_03_Security_Audit.md
+          # 보안 리포트 작성
+          echo "# 🛡️ Security Audit Report" > Report_Security.md
+          echo "## 📦 SBOM (Dependencies)" >> Report_Security.md
+          echo '```' >> Report_Security.md
+          cat dep_tree.txt >> Report_Security.md
+          echo '```' >> Report_Security.md
 
-      # --- [7. 바이러스 스캔 통합] ---
-      - name: ClamAV Scan Integration
+      # --- [9. 바이러스 스캔 (대량 파일 대상)] ---
+      - name: Massive ClamAV Scan
         run: |
-          echo "## 🦠 Antivirus Scan Results (ClamAV)" >> artifacts/reports/Report_03_Security_Audit.md
-          echo "Scanning artifacts directory..."
-          echo '```' >> artifacts/reports/Report_03_Security_Audit.md
+          echo "## 🦠 Massive Files ClamAV Scan" >> Report_Security.md
+          echo "Target: Artifacts + Massive Storage Directory" >> Report_Security.md
+          echo '```' >> Report_Security.md
           
-          # clamscan 실행 (에러 발생 시에도 로그는 기록되도록 처리)
-          if clamscan -r -i artifacts > logs/clamav_scan.log; then
-             echo "✅ Status: CLEAN (No threats found)" >> artifacts/reports/Report_03_Security_Audit.md
+          # 아티팩트 및 대량 생성된 폴더 전체 스캔
+          # -r: 재귀, -i: 감염만 출력 (너무 많으므로), --bell: 알림
+          if clamscan -r -i massive_storage "${APP_NAME}" *.jar > logs/clamav_massive.log; then
+             echo "✅ All Massive Files: CLEAN" >> Report_Security.md
           else
-             echo "⚠️ Status: THREAT DETECTED or WARNING" >> artifacts/reports/Report_03_Security_Audit.md
+             echo "⚠️ THREAT DETECTED" >> Report_Security.md
           fi
           
-          cat logs/clamav_scan.log >> artifacts/reports/Report_03_Security_Audit.md
-          echo '```' >> artifacts/reports/Report_03_Security_Audit.md
+          # 로그 요약 추가
+          tail -n 10 logs/clamav_massive.log >> Report_Security.md
+          echo '```' >> Report_Security.md
+          
+          echo "✅ Massive Scan Completed."
 
-      # --- [8. 리소스 로그 마무리기] ---
-      - name: Finalize Resource Log
+      # --- [10. 리소스 로그 종료] ---
+      - name: Finalize Logs
         run: |
           pkill vmstat || true
-          
-          echo "# ⚙️ System Resource Logs" > artifacts/reports/Report_04_System_Resources.md
-          cat logs/sys_monitor.md >> artifacts/reports/Report_04_System_Resources.md
-          cat logs/vmstat_raw.log | awk '{print "| " $0 " |"}' >> artifacts/reports/Report_04_System_Resources.md
+          echo "# ⚙️ System Resource Logs" > Report_Resources.md
+          cat logs/sys_monitor.md >> Report_Resources.md
+          cat logs/vmstat_raw.log | awk '{print "| " $0 " |"}' >> Report_Resources.md
 
-      # --- [9. ISO 패키징] ---
-      - name: Package ISO
+      # --- [11. ISO 패키징 (대량 데이터 포함)] ---
+      - name: Package Massive ISO
         run: |
           VERSION="${{ matrix.maven-version }}"
           ROOT="iso_root"
-          mkdir -p "${ROOT}/00_Executive_Reports"
+          mkdir -p "${ROOT}/00_Reports"
           mkdir -p "${ROOT}/01_Binaries"
-          mkdir -p "${ROOT}/02_Security_Logs"
+          mkdir -p "${ROOT}/02_Massive_Archives"
+          mkdir -p "${ROOT}/03_Logs"
           
-          # Markdown 보고서를 최상위에도 복사
-          cp artifacts/reports/Report_00_*.md "${ROOT}/"
+          # 보고서 복사
+          cp Report_*.md "${ROOT}/"
+          cp Report_*.md "${ROOT}/00_Reports/"
+          cp massive_structure_summary.txt "${ROOT}/00_Reports/"
           
-          # 폴더별 정리
-          cp artifacts/reports/*.md "${ROOT}/00_Executive_Reports/"
-          cp artifacts/reports/*.sql "${ROOT}/00_Executive_Reports/"
+          # 바이너리 복사
           cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ROOT}/01_Binaries/"
-          cp "artifacts/${APP_NAME}-1.0.0.jar" "${ROOT}/01_Binaries/"
-          cp logs/clamav_scan.log "${ROOT}/02_Security_Logs/"
+          cp *.jar "${ROOT}/01_Binaries/"
+          
+          # 대량 파일 아카이빙 (그대로 넣으면 ISO 생성이 너무 느릴 수 있으므로 tar로 묶어서 ISO에 탑재)
+          # 대량 파일 및 디렉토리 그대로 반영 요청에 따라 폴더 구조 유지 시도
+          # (파일 개수가 많아 ISO 생성 시간이 걸릴 수 있음)
+          echo "📦 Moving Massive Data to ISO Root..."
+          cp -r massive_storage/* "${ROOT}/02_Massive_Archives/"
+          
+          # 로그
+          cp logs/*.log "${ROOT}/03_Logs/"
           
           # ISO 생성
-          mkisofs -o "dump/Korea-Fixed-Sec-${VERSION}.iso" -J -R -V "KOR-SEC-${VERSION}" "${ROOT}"
+          echo "Generating ISO..."
+          mkisofs -o "dump/Korea-Massive-Sec-${VERSION}.iso" -J -R -V "MASSIVE-${VERSION}" "${ROOT}"
           
-          echo "✅ ISO Created Successfully"
+          echo "✅ ISO Created."
+          du -sh "dump/Korea-Massive-Sec-${VERSION}.iso"
 
-      # --- [10. 릴리즈 배포] ---
+      # --- [12. 릴리즈] ---
       - name: Release to GitHub
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v${{ matrix.maven-version }}-fixed-sec"
-          name: "Korea Fin Security & MD (Fixed ClamAV) - ${{ matrix.maven-version }}"
+          tag: "v${{ matrix.maven-version }}-massive-iso"
+          name: "Massive Data & Security (Maven ${{ matrix.maven-version }})"
           body: |
-            ## 🇰🇷 Korea Finance Security & MD Reports (Fixed)
-            **Maven ${{ matrix.maven-version }} | ClamAV Lock Fixed**
+            ## 🇰🇷 Massive Data & Security ISO
+            **Maven ${{ matrix.maven-version }} | ClamAV Scanned**
             
-            This release fixes the `freshclam` lock error and provides full security reporting.
+            This release contains a simulated **Massive Legacy Archive** with thousands of generated files and directories.
             
-            ### 🛠️ Fix Details
-            - Stopped `clamav-freshclam` daemon before update.
-            - Fixed permissions for `/var/log/clamav`.
-            
-            ### 📄 Reports (Markdown)
-            - **Executive Summary:** Overview of 51.7M Population & Transactions.
-            - **Security Audit:** Dependency Tree (SBOM) + ClamAV Scan.
-            - **System Resources:** CPU/Memory usage during simulation.
+            ### 📂 ISO Contents
+            - **Massive Archives:** `/02_Massive_Archives` (Year > Branch > Dept Structure)
+            - **Security Report:** ClamAV scan results for all generated files.
+            - **Resource Log:** CPU/RAM usage during massive file generation.
             
             *Automated by GitHub Actions.*
           artifacts: "dump/*.iso"
