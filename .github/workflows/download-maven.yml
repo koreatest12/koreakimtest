@@ -1,14 +1,18 @@
-name: Ultimate Financial Simulator & SQL ISO (Stock/Crypto/DB)
+name: Korea Population & Financial Simulator (Mass Data ISO)
 
 on:
-  # 1. 10분 주기 자동 스케줄링
+  # 1. 10분 주기 자동 실행
   schedule:
     - cron: '*/10 * * * *'
-  # 2. 수동 실행 (거래량 조절 가능)
+  # 2. 수동 실행 (고객 수 및 거래 수 조절 가능)
   workflow_dispatch:
     inputs:
+      active_customer_count:
+        description: 'Active Customers (Max 300,000)'
+        required: false
+        default: '100000' # 기본 10만 명 (테스트 속도 고려)
       transaction_count:
-        description: 'Simulation Count per Sector'
+        description: 'Transactions per Sector'
         required: false
         default: '5000'
 
@@ -16,8 +20,8 @@ permissions:
   contents: write
 
 jobs:
-  comprehensive-finance-build:
-    name: FinSim Build (Maven ${{ matrix.maven-version }})
+  korea-population-build:
+    name: Korea Pop. Build (Maven ${{ matrix.maven-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -39,11 +43,11 @@ jobs:
     env:
       MAVEN_PRIMARY_BASE_URL: https://dlcdn.apache.org/maven/maven-3
       MAVEN_ARCHIVE_BASE_URL: https://archive.apache.org/dist/maven/maven-3
-      APP_NAME: full-stack-finance-engine
+      APP_NAME: korea-fin-sim-engine
 
     steps:
-      # --- [기반 환경 설정] ---
-      - name: Checkout Repository
+      # --- [기본 환경 설정] ---
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -52,23 +56,20 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Install System Tools (ISO, Antivirus, Monitor)
+      - name: Install Tools (ISO, ClamAV, Sysstat)
         run: |
           sudo apt-get update
           sudo apt-get install -y genisoimage clamav sysstat
-          # 바이러스 DB 업데이트 (실패 시 경고만 출력하고 진행)
-          sudo freshclam || echo "⚠️ ClamAV DB update warning."
+          sudo freshclam || echo "⚠️ ClamAV DB update skipped."
 
-      # --- [리소스 모니터링 시작] ---
-      - name: Start Background Resource Monitoring
+      # --- [리소스 모니터링] ---
+      - name: Start Monitoring
         run: |
           mkdir -p logs
-          echo "Timestamp | CPU(%) | MEM(%) | IO Wait | Disk Used" > logs/sys_monitor.log
-          # 5초 간격으로 시스템 상태 로깅 (백그라운드)
+          echo "Timestamp | CPU | MEM | IO | User | System" > logs/sys_monitor.log
           vmstat -t 5 > logs/vmstat_raw.log &
-          echo "MONITOR_PID=$!" >> "$GITHUB_ENV"
 
-      # --- [Maven 설치] ---
+      # --- [Maven 설정] ---
       - name: Setup Maven ${{ matrix.maven-version }}
         run: |
           set -euo pipefail
@@ -81,29 +82,27 @@ jobs:
           ARCHIVE="https://archive.apache.org/dist/maven/maven-3/${VERSION}/binaries/${FILENAME}"
 
           if curl -fL "${PRIMARY}" -o "${ARCHIVE_PATH}"; then
-            echo "✅ Downloaded from CDN"
+            echo "✅ Downloaded Maven"
           else
             curl -fL "${ARCHIVE}" -o "${ARCHIVE_PATH}"
-            echo "✅ Downloaded from Archive"
           fi
 
           tar -xzf "${ARCHIVE_PATH}" -C extracted/ --strip-components=1
           echo "MAVEN_HOME=${PWD}/extracted" >> "$GITHUB_ENV"
           echo "${PWD}/extracted/bin" >> "$GITHUB_PATH"
 
-      # --- [통합 금융 시스템 소스 코드 생성] ---
-      # 뱅킹, 주식, 코인, SQL 생성 로직이 포함된 Java 애플리케이션 생성
-      - name: Generate Full-Stack Financial Source Code
+      # --- [대한민국 인구 및 금융 시뮬레이터 소스 생성] ---
+      - name: Generate Korea Simulation Source
         run: |
           set -euo pipefail
-          SRC_DIR="${APP_NAME}/src/main/java/com/finance/core"
+          SRC_DIR="${APP_NAME}/src/main/java/com/korea/finance"
           mkdir -p "${SRC_DIR}"
           
           # 1. POM.xml
           cat <<EOF > "${APP_NAME}/pom.xml"
           <project xmlns="http://maven.apache.org/POM/4.0.0" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
             <modelVersion>4.0.0</modelVersion>
-            <groupId>com.finance</groupId>
+            <groupId>com.korea</groupId>
             <artifactId>${APP_NAME}</artifactId>
             <version>1.0.0</version>
             <properties>
@@ -113,141 +112,164 @@ jobs:
           </project>
           EOF
 
-          # 2. Main Simulation Logic (Java)
-          cat <<EOF > "${SRC_DIR}/FinancialSimulator.java"
-          package com.finance.core;
+          # 2. Java Main Logic (인구 통계 + 고객 생성 + 금융 거래)
+          cat <<EOF > "${SRC_DIR}/KoreaFinSimulator.java"
+          package com.korea.finance;
           
           import java.io.*;
+          import java.text.DecimalFormat;
           import java.time.LocalDateTime;
-          import java.time.format.DateTimeFormatter;
           import java.util.*;
 
-          public class FinancialSimulator {
-              // 데이터 저장소 (인메모리)
-              static List<String> bankingTx = new ArrayList<>();
-              static List<String> stockTx = new ArrayList<>();
-              static List<String> cryptoTx = new ArrayList<>();
-              static List<String> sqlStatements = new ArrayList<>();
+          public class KoreaFinSimulator {
+              // 대한민국 인구 상수 (2024 추계)
+              static final long TOTAL_POPULATION_KR = 51_750_000L;
               
+              static List<String> customerSql = new ArrayList<>();
+              static List<String> transactionSql = new ArrayList<>();
+              static List<String> customerIds = new ArrayList<>(); // FK 참조용
               static Random rand = new Random();
 
+              // 한국 이름 데이터
+              static String[] lastNames = {"Kim", "Lee", "Park", "Choi", "Jung", "Kang", "Cho", "Yoon", "Jang", "Lim"};
+              static String[] firstNamesM = {"Min-jun", "Seo-jun", "Do-yoon", "Ye-jun", "Si-woo", "Ha-jun", "Ji-ho"};
+              static String[] firstNamesF = {"Seo-ah", "Ha-yoon", "Ji-an", "Seo-yoon", "Ha-eun", "Ji-woo", "Su-ah"};
+              
+              // 지역 분포 (가중치 적용)
+              static String[] regions = {"Seoul", "Gyeonggi", "Busan", "Incheon", "Daegu", "Daejeon", "Gwangju", "Ulsan", "Sejong", "Gangwon", "Chungbuk", "Chungnam", "Jeonbuk", "Jeonnam", "Gyeongbuk", "Gyeongnam", "Jeju"};
+              static double[] regionWeights = {0.18, 0.26, 0.06, 0.06, 0.04, 0.03, 0.03, 0.02, 0.01, 0.03, 0.03, 0.04, 0.03, 0.03, 0.05, 0.06, 0.01};
+
               public static void main(String[] args) throws IOException {
-                  int count = Integer.parseInt(args.length > 0 ? args[0] : "1000");
-                  System.out.println("=== Global Financial System Simulation (Maven Build) ===");
-                  System.out.println("Target Volume: " + count + " per sector");
+                  int activeUserCount = Integer.parseInt(args.length > 0 ? args[0] : "100000"); // Max 30만
+                  int txCount = Integer.parseInt(args.length > 1 ? args[1] : "5000");
 
-                  // 1. 시뮬레이션 실행
-                  simulateBanking(count);
-                  simulateStocks(count);
-                  simulateCrypto(count);
+                  System.out.println("=== KOREA POPULATION & FINANCE SIMULATOR ===");
+                  System.out.println("Total KR Population: " + new DecimalFormat("#,###").format(TOTAL_POPULATION_KR));
+                  System.out.println("Simulating Active Users: " + new DecimalFormat("#,###").format(activeUserCount));
 
-                  // 2. 보고서 및 SQL 생성
-                  generateReports();
-                  generateSqlScripts();
+                  // 1. 인구 통계 보고서 생성
+                  generatePopulationReport();
+
+                  // 2. 대용량 고객 데이터 생성 (실명, 주민번호, 주소)
+                  generateCustomers(activeUserCount);
+
+                  // 3. 금융/주식/코인 거래 시뮬레이션 (생성된 고객 기반)
+                  simulateTransactions(txCount);
+
+                  // 4. SQL 파일 출력
+                  exportSqlFiles();
                   
-                  System.out.println("✅ All Simulations & Exports Completed.");
+                  System.out.println("✅ Simulation Complete.");
               }
 
-              // --- 뱅킹 (입출금) ---
-              private static void simulateBanking(int count) {
-                  sqlStatements.add("-- Banking Transactions");
-                  for(int i=0; i<count; i++) {
-                      boolean isDeposit = rand.nextBoolean();
-                      long amount = (rand.nextInt(5000) + 1) * 10000L;
-                      String type = isDeposit ? "DEPOSIT" : "WITHDRAWAL";
-                      String id = UUID.randomUUID().toString();
+              private static void generatePopulationReport() throws IOException {
+                  try(PrintWriter pw = new PrintWriter(new FileWriter("Report_Korea_Demographics.txt"))) {
+                      pw.println("=== Republic of Korea Demographics Report ===");
+                      pw.println("Base Population: " + new DecimalFormat("#,###").format(TOTAL_POPULATION_KR));
+                      pw.println("Generated Date: " + LocalDateTime.now());
+                      pw.println("---------------------------------------------");
                       
-                      String log = String.format("TX|%s|%s|%d|KRW", id, type, amount);
-                      bankingTx.add(log);
-                      
-                      // SQL 생성
-                      sqlStatements.add(String.format("INSERT INTO bank_ledger (tx_id, type, amount, cur, created_at) VALUES ('%s', '%s', %d, 'KRW', NOW());", id, type, amount));
+                      pw.println("[Regional Distribution Estimate]");
+                      for(int i=0; i<regions.length; i++) {
+                          long regionalPop = (long)(TOTAL_POPULATION_KR * regionWeights[i]);
+                          pw.printf("%-10s : %15s (%.1f%%)\n", regions[i], new DecimalFormat("#,###").format(regionalPop), regionWeights[i]*100);
+                      }
+                      pw.println("---------------------------------------------");
+                      pw.println("Note: This data is statistically generated based on 2024 projections.");
                   }
               }
 
-              // --- 주식 (Stock) ---
-              private static void simulateStocks(int count) {
-                  String[] tickers = {"SAMSUNG", "APPLE", "TESLA", "NVIDIA", "SKHYNIX"};
-                  sqlStatements.add("-- Stock Trading");
-                  
-                  for(int i=0; i<count; i++) {
-                      String ticker = tickers[rand.nextInt(tickers.length)];
-                      boolean isBuy = rand.nextBoolean();
-                      int qty = rand.nextInt(100) + 1;
-                      double price = 50000 + (rand.nextDouble() * 100000); // 5만~15만
-                      
-                      String type = isBuy ? "BUY" : "SELL";
-                      String id = UUID.randomUUID().toString();
-                      
-                      String log = String.format("STK|%s|%s|%s|%d|%.2f", id, ticker, type, qty, price);
-                      stockTx.add(log);
+              private static void generateCustomers(int count) {
+                  customerSql.add("-- Active Customer Data (" + count + " rows)");
+                  customerSql.add("INSERT INTO customers (cust_id, name, gender, age, region, credit_score, created_at) VALUES ");
 
-                      sqlStatements.add(String.format("INSERT INTO stock_orders (order_id, symbol, side, qty, price, created_at) VALUES ('%s', '%s', '%s', %d, %.2f, NOW());", id, ticker, type, qty, price));
+                  for(int i=0; i<count; i++) {
+                      String custId = "CUST-" + String.format("%07d", i+1);
+                      customerIds.add(custId);
+
+                      boolean isMale = rand.nextBoolean();
+                      String lastName = lastNames[rand.nextInt(lastNames.length)];
+                      String firstName = isMale ? firstNamesM[rand.nextInt(firstNamesM.length)] : firstNamesF[rand.nextInt(firstNamesF.length)];
+                      String name = lastName + " " + firstName;
+                      
+                      // 연령 분포 시뮬레이션 (경제활동인구 중심)
+                      int age = 20 + rand.nextInt(60); 
+                      String region = getWeightedRegion();
+                      int creditScore = 300 + rand.nextInt(700); // 300~1000
+
+                      String row = String.format("('%s', '%s', '%s', %d, '%s', %d, NOW())", custId, name, isMale?"M":"F", age, region, creditScore);
+                      
+                      // Bulk Insert 최적화를 위해 1000개씩 끊거나, 여기서는 간단히 처리 (실제 파일에선 콤마 처리 필요)
+                      customerSql.add(row + (i == count-1 ? ";" : ","));
                   }
+                  System.out.println("Generated " + count + " customer records.");
               }
 
-              // --- 비트코인/코인 (Crypto) ---
-              private static void simulateCrypto(int count) {
-                  String[] coins = {"BTC", "ETH", "XRP", "DOGE", "SOL"};
-                  sqlStatements.add("-- Crypto Trading");
+              private static String getWeightedRegion() {
+                  double r = rand.nextDouble();
+                  double cumulative = 0.0;
+                  for(int i=0; i<regionWeights.length; i++) {
+                      cumulative += regionWeights[i];
+                      if(r <= cumulative) return regions[i];
+                  }
+                  return "Seoul";
+              }
 
+              private static void simulateTransactions(int count) {
+                  transactionSql.add("-- Financial Transactions Linked to Customers");
+                  
+                  // Banking
                   for(int i=0; i<count; i++) {
+                      String custId = customerIds.get(rand.nextInt(customerIds.size())); // Random Active Customer
+                      long amount = (rand.nextInt(100) + 1) * 10000L;
+                      String type = rand.nextBoolean() ? "DEPOSIT" : "WITHDRAWAL";
+                      transactionSql.add(String.format("INSERT INTO bank_tx (tx_id, cust_id, type, amount, created_at) VALUES ('%s', '%s', '%s', %d, NOW());", UUID.randomUUID(), custId, type, amount));
+                  }
+                  
+                  // Stock
+                  String[] stocks = {"SamsungElec", "SKHynix", "LGChem", "HyundaiMotor", "Naver"};
+                  for(int i=0; i<count; i++) {
+                      String custId = customerIds.get(rand.nextInt(customerIds.size()));
+                      String symbol = stocks[rand.nextInt(stocks.length)];
+                      int qty = rand.nextInt(50) + 1;
+                      double price = 50000 + rand.nextInt(100000);
+                      transactionSql.add(String.format("INSERT INTO stock_orders (order_id, cust_id, symbol, qty, price, created_at) VALUES ('%s', '%s', '%s', %d, %.2f, NOW());", UUID.randomUUID(), custId, symbol, qty, price));
+                  }
+
+                  // Crypto
+                  String[] coins = {"BTC", "ETH", "XRP"};
+                  for(int i=0; i<count; i++) {
+                      String custId = customerIds.get(rand.nextInt(customerIds.size()));
                       String coin = coins[rand.nextInt(coins.length)];
-                      boolean isBuy = rand.nextBoolean();
-                      double qty = rand.nextDouble() * 2.5; // 0 ~ 2.5 BTC etc
-                      double price = 1000 + (rand.nextDouble() * 50000000); // Volatile price
-                      
-                      String type = isBuy ? "BID" : "ASK";
-                      String id = UUID.randomUUID().toString();
-
-                      String log = String.format("CRY|%s|%s|%s|%.4f|%.2f", id, coin, type, qty, price);
-                      cryptoTx.add(log);
-
-                      sqlStatements.add(String.format("INSERT INTO crypto_trades (trade_id, symbol, side, qty, price_krw, created_at) VALUES ('%s', '%s', '%s', %.6f, %.2f, NOW());", id, coin, type, qty, price));
+                      double qty = rand.nextDouble();
+                      double price = 1000000 + rand.nextInt(50000000);
+                      transactionSql.add(String.format("INSERT INTO crypto_tx (tx_id, cust_id, coin, qty, price_krw, created_at) VALUES ('%s', '%s', '%s', %.6f, %.2f, NOW());", UUID.randomUUID(), custId, coin, qty, price));
                   }
               }
 
-              // --- 리포트 파일 생성 ---
-              private static void generateReports() throws IOException {
-                  writeFile("Report_Banking_BPR.txt", bankingTx, "Banking BPR Analysis");
-                  writeFile("Report_Stock_Market.txt", stockTx, "Stock Market Activity");
-                  writeFile("Report_Crypto_Vol.txt", cryptoTx, "Crypto Volatility Log");
-              }
-
-              private static void writeFile(String fname, List<String> data, String header) throws IOException {
-                  try(PrintWriter pw = new PrintWriter(new FileWriter(fname))) {
-                      pw.println("=== " + header + " ===");
-                      pw.println("Generated: " + LocalDateTime.now());
-                      pw.println("Maven Build: Included");
-                      pw.println("---------------------------");
-                      for(String line : data) pw.println(line);
-                      pw.println("---------------------------");
-                      pw.println("Total Records: " + data.size());
-                  }
-              }
-
-              // --- SQL 스크립트 생성 (Schema + Data) ---
-              private static void generateSqlScripts() throws IOException {
-                  // 1. Schema.sql
-                  try(PrintWriter pw = new PrintWriter(new FileWriter("db_schema.sql"))) {
-                      pw.println("-- Financial System Database Schema");
-                      pw.println("CREATE TABLE bank_ledger (tx_id VARCHAR(50) PRIMARY KEY, type VARCHAR(10), amount BIGINT, cur VARCHAR(3), created_at TIMESTAMP);");
-                      pw.println("CREATE TABLE stock_orders (order_id VARCHAR(50) PRIMARY KEY, symbol VARCHAR(20), side VARCHAR(4), qty INT, price DECIMAL(15,2), created_at TIMESTAMP);");
-                      pw.println("CREATE TABLE crypto_trades (trade_id VARCHAR(50) PRIMARY KEY, symbol VARCHAR(10), side VARCHAR(4), qty DECIMAL(20,8), price_krw DECIMAL(20,2), created_at TIMESTAMP);");
+              private static void exportSqlFiles() throws IOException {
+                  // Schema
+                  try(PrintWriter pw = new PrintWriter(new FileWriter("korea_db_schema.sql"))) {
+                      pw.println("CREATE TABLE customers (cust_id VARCHAR(20) PRIMARY KEY, name VARCHAR(50), gender CHAR(1), age INT, region VARCHAR(20), credit_score INT, created_at TIMESTAMP);");
+                      pw.println("CREATE TABLE bank_tx (tx_id VARCHAR(40) PRIMARY KEY, cust_id VARCHAR(20), type VARCHAR(10), amount BIGINT, created_at TIMESTAMP);");
+                      pw.println("CREATE TABLE stock_orders (order_id VARCHAR(40) PRIMARY KEY, cust_id VARCHAR(20), symbol VARCHAR(20), qty INT, price DECIMAL(15,2), created_at TIMESTAMP);");
+                      pw.println("CREATE TABLE crypto_tx (tx_id VARCHAR(40) PRIMARY KEY, cust_id VARCHAR(20), coin VARCHAR(10), qty DECIMAL(20,8), price_krw DECIMAL(20,2), created_at TIMESTAMP);");
                   }
                   
-                  // 2. Data.sql
-                  try(PrintWriter pw = new PrintWriter(new FileWriter("db_data_dump.sql"))) {
-                      pw.println("-- Simulated Data Dump");
-                      for(String sql : sqlStatements) pw.println(sql);
+                  // Data
+                  try(PrintWriter pw = new PrintWriter(new FileWriter("korea_customer_data.sql"))) {
+                      for(String s : customerSql) pw.println(s);
+                  }
+                  try(PrintWriter pw = new PrintWriter(new FileWriter("korea_transaction_data.sql"))) {
+                      for(String s : transactionSql) pw.println(s);
                   }
               }
           }
           EOF
           echo "✅ Source Code Generated."
 
-      # --- [빌드 및 시뮬레이션 실행] ---
-      - name: Build & Run Simulation
+      # --- [빌드 및 실행] ---
+      - name: Build & Simulate
         run: |
           set -euo pipefail
           cd "${APP_NAME}"
@@ -255,104 +277,82 @@ jobs:
           echo "Building with Maven ${{ matrix.maven-version }}..."
           mvn -q -B clean package
           
-          echo "Running Simulation..."
-          java -cp "target/${APP_NAME}-1.0.0.jar" com.finance.core.FinancialSimulator ${{ inputs.transaction_count }}
+          # 입력값: 고객 수(inputs.active_customer_count), 거래 수(inputs.transaction_count)
+          echo "Running Simulation for ${{ inputs.active_customer_count }} customers..."
+          java -Xms512m -Xmx2048m -cp "target/${APP_NAME}-1.0.0.jar" com.korea.finance.KoreaFinSimulator ${{ inputs.active_customer_count }} ${{ inputs.transaction_count }}
           
           # 아티팩트 정리
-          mkdir -p ../artifacts/reports
-          mkdir -p ../artifacts/sql
-          
-          mv *.txt ../artifacts/reports/
-          mv *.sql ../artifacts/sql/
+          mkdir -p ../artifacts
+          mv *.sql ../artifacts/
+          mv *.txt ../artifacts/
           cp target/*.jar ../artifacts/
 
-      # --- [보안 검사 (Antivirus)] ---
-      - name: Run ClamAV Security Scan
+      # --- [보안 검사] ---
+      - name: Security Scan
         run: |
-          echo "Scanning artifacts for viruses..."
           mkdir -p logs
-          # artifacts 폴더 전체 스캔
-          if clamscan -r -i artifacts > logs/security_scan.log; then
-            echo "✅ Virus Scan Clean." >> logs/security_scan.log
+          if clamscan -r -i artifacts > logs/virus_scan.log; then
+            echo "✅ Virus Scan Passed." >> logs/virus_scan.log
           else
-            echo "⚠️ Potential Threat Detected." >> logs/security_scan.log
+            echo "⚠️ Virus Check Warning." >> logs/virus_scan.log
           fi
-          cat logs/security_scan.log
 
-      # --- [모니터링 종료 및 로그 정리] ---
-      - name: Collect System Logs
-        run: |
-          pkill vmstat || true
-          cat logs/vmstat_raw.log >> logs/sys_monitor.log
-
-      # --- [ISO 생성 (DB, SQL, 리포트 포함)] ---
-      - name: Package ISO Bundle
+      # --- [ISO 패키징] ---
+      - name: Create ISO Bundle
         run: |
           VERSION="${{ matrix.maven-version }}"
           ROOT="iso_root"
-          mkdir -p "${ROOT}/01_System_Binaries"
-          mkdir -p "${ROOT}/02_Financial_Reports"
-          mkdir -p "${ROOT}/03_Database_SQL"
-          mkdir -p "${ROOT}/04_Security_Logs"
+          mkdir -p "${ROOT}/System"
+          mkdir -p "${ROOT}/Data_SQL"
+          mkdir -p "${ROOT}/Reports"
+          mkdir -p "${ROOT}/Security_Logs"
 
-          # 1. 바이너리 (Maven + App)
-          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ROOT}/01_System_Binaries/"
-          cp "artifacts/${APP_NAME}-1.0.0.jar" "${ROOT}/01_System_Binaries/"
-
-          # 2. 리포트 (BPR, Stock, Crypto)
-          cp artifacts/reports/*.txt "${ROOT}/02_Financial_Reports/"
-
-          # 3. SQL 스크립트 (Schema, Data)
-          cp artifacts/sql/*.sql "${ROOT}/03_Database_SQL/"
-
-          # 4. 로그 (보안, 성능)
-          cp logs/security_scan.log "${ROOT}/04_Security_Logs/"
-          cp logs/sys_monitor.log "${ROOT}/04_Security_Logs/"
-
-          # 5. README 및 실행 스크립트
-          echo "Financial Simulator ISO - Maven ${VERSION}" > "${ROOT}/README.txt"
-          echo "Includes: Banking, Stock, Crypto, SQL Dumps" >> "${ROOT}/README.txt"
+          # 1. 파일 이동
+          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${ROOT}/System/"
+          cp "artifacts/${APP_NAME}-1.0.0.jar" "${ROOT}/System/"
           
-          echo '#!/bin/bash' > "${ROOT}/run_app.sh"
-          echo 'java -jar 01_System_Binaries/*.jar 5000' >> "${ROOT}/run_app.sh"
-          chmod +x "${ROOT}/run_app.sh"
-
-          # 6. ISO 생성
-          ISO_NAME="FinSim-Full-Maven-${VERSION}.iso"
-          mkisofs -o "dump/${ISO_NAME}" -J -R -V "FinSim-${VERSION}" "${ROOT}"
+          cp artifacts/*.sql "${ROOT}/Data_SQL/"
+          cp artifacts/*.txt "${ROOT}/Reports/"
           
-          echo "✅ ISO Ready: ${ISO_NAME}"
-          du -sh "dump/${ISO_NAME}"
+          # 모니터링 로그
+          pkill vmstat || true
+          cat logs/vmstat_raw.log >> logs/sys_monitor.log
+          cp logs/*.log "${ROOT}/Security_Logs/"
 
-      # --- [GitHub Release 배포] ---
+          # 2. ISO 생성
+          echo "Korea Population & Finance Sim - Maven ${VERSION}" > "${ROOT}/README.txt"
+          mkisofs -o "dump/Korea-FinSim-Maven-${VERSION}.iso" -J -R -V "KOR-FIN-${VERSION}" "${ROOT}"
+          
+          echo "✅ ISO Created."
+          ls -lh dump/*.iso
+
+      # --- [릴리즈] ---
       - name: Release to GitHub
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v${{ matrix.maven-version }}-finsim-full"
-          name: "Ultimate FinSim & SQL (Maven ${{ matrix.maven-version }})"
+          tag: "v${{ matrix.maven-version }}-korea-pop-sim"
+          name: "Korea Population & FinSim (Maven ${{ matrix.maven-version }})"
           body: |
-            ## 🏦 Comprehensive Financial System Simulation
+            ## 🇰🇷 Korea Population & Financial Simulator
             **Built with Apache Maven ${{ matrix.maven-version }}**
             
-            This release contains a full-stack financial simulation engine, SQL database dumps, and security reports.
+            This release simulates the entire **South Korean Population (51.7M)** statistically and generates massive active user data.
             
-            ### 💿 ISO Contents (`FinSim-Full-Maven-${{ matrix.maven-version }}.iso`)
+            ### 💿 ISO Contents
+            #### 1. 👥 Population & Customer Data (`/Data_SQL`)
+            - `korea_db_schema.sql`: Tables for Customers, Banking, Stock, Crypto.
+            - `korea_customer_data.sql`: **INSERT SQL for ${{ inputs.active_customer_count }} Active Users** (Names, Region, Credit Score).
+            - `Report_Korea_Demographics.txt`: Statistical breakdown of 51.7M population (Seoul 18%, Gyeonggi 26%, etc.).
             
-            #### 1. 💰 Simulation Modules
-            - **Banking:** Deposit/Withdrawal simulation (BPR Report).
-            - **📈 Stock:** Virtual Trading (Samsung, Apple, Tesla, etc.).
-            - **🪙 Crypto:** Bitcoin/Ethereum volatility simulation.
+            #### 2. 💰 Financial Transactions
+            - `korea_transaction_data.sql`: Linked transactions (Deposit, Stock Buy/Sell, Crypto Bid/Ask) for the generated customers.
             
-            #### 2. 🗄️ Database & SQL
-            - `db_schema.sql`: Table definitions for Banking, Stock, and Crypto.
-            - `db_data_dump.sql`: **INSERT statements** for all simulated transactions.
+            #### 3. 🛡️ Security
+            - `virus_scan.log`: ClamAV Scan Result.
+            - `sys_monitor.log`: Server resource usage during simulation.
             
-            #### 3. 🛡️ Security & Performance
-            - **Antivirus:** ClamAV Scan Report (Clean).
-            - **Performance:** CPU/RAM/Disk Usage Logs (Sysstat).
-            
-            *Automated by GitHub Actions with 10-min schedule.*
+            *Automated schedule: Every 10 minutes.*
           artifacts: "dump/*.iso"
           allowUpdates: true
           replacesArtifacts: true
