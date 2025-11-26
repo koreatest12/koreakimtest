@@ -1,18 +1,23 @@
-name: Download, Verify, Install & Release Apache Maven (3.9.0 ~ 3.9.11) + Spring Boot Examples Build
+name: Advanced Maven Build & Release (Upgrade + Mass Deploy)
 
 on:
   workflow_dispatch:
+    inputs:
+      force_release:
+        description: 'Force recreate release if exists'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
-  contents: write  # GitHub Release 생성/수정 위해 필요
+  contents: write  # GitHub Release 생성을 위한 필수 권한
 
 jobs:
-  fetch-maven:
+  manage-maven-release:
+    name: Build & Release Maven ${{ matrix.maven-version }}
     runs-on: ubuntu-latest
-
-    # ✅ 3.9.0 ~ 3.9.11 전체 버전 처리 (필요시 여기 리스트만 추가/수정)
     strategy:
-      fail-fast: false
+      fail-fast: false # 하나의 버전이 실패해도 나머지는 계속 진행
       matrix:
         maven-version:
           - '3.9.0'
@@ -29,23 +34,30 @@ jobs:
           - '3.9.11'
 
     env:
-      # 1순위: 공식 CDN
       MAVEN_PRIMARY_BASE_URL: https://dlcdn.apache.org/maven/maven-3
-      # 2순위: 아카이브 (옛 버전용, 404 시 폴백)
       MAVEN_ARCHIVE_BASE_URL: https://archive.apache.org/dist/maven/maven-3
+      TARGET_REPO: jeffli1993/springboot-learning-example
 
     steps:
+      # 1. 기본 저장소 체크아웃
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ✅ JDK(Temurin 17) 설치: Maven + Spring Boot 빌드 환경
+      # 2. [FIX] 빌드할 Spring Boot 예제 프로젝트 클론 (이 단계가 없으면 빌드 실패함)
+      - name: Checkout SpringBoot Learning Example
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          path: springboot-learning-example
+
+      # 3. JDK 설정 (Spring Boot 빌드용)
       - name: Set up Temurin JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
-      # ✅ Maven 로컬 캐시 (속도 향상)
+      # 4. 캐싱 설정
       - name: Cache Maven repository
         uses: actions/cache@v4
         with:
@@ -54,203 +66,150 @@ jobs:
           restore-keys: |
             maven-repo-${{ runner.os }}-
 
+      # 5. 작업 디렉토리 준비
       - name: Prepare directories
         run: |
-          set -euo pipefail
           mkdir -p dump
           mkdir -p extracted
 
-      - name: Set Maven version output
-        id: maven
+      # 6. Maven 다운로드 (CDN -> Archive 순차 시도)
+      - name: Download Apache Maven
         run: |
           set -euo pipefail
           VERSION="${{ matrix.maven-version }}"
-          echo "Selected Maven version: ${VERSION}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          FILENAME="apache-maven-${VERSION}-bin.tar.gz"
+          ARCHIVE_PATH="dump/${FILENAME}"
+          
+          PRIMARY_URL="${MAVEN_PRIMARY_BASE_URL}/${VERSION}/binaries/${FILENAME}"
+          ARCHIVE_URL="${MAVEN_ARCHIVE_BASE_URL}/${VERSION}/binaries/${FILENAME}"
 
-      # ✅ tar.gz 다운로드 (1차: CDN → 실패 시 2차: archive)
-      - name: Download Apache Maven archive (primary + archive fallback)
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.maven.outputs.version }}"
-          PRIMARY_URL="${MAVEN_PRIMARY_BASE_URL}/${VERSION}/binaries/apache-maven-${VERSION}-bin.tar.gz"
-          ARCHIVE_URL="${MAVEN_ARCHIVE_BASE_URL}/${VERSION}/binaries/apache-maven-${VERSION}-bin.tar.gz"
-          ARCHIVE_PATH="dump/apache-maven-${VERSION}-bin.tar.gz"
-
-          echo "Trying primary URL: ${PRIMARY_URL}"
-
+          echo "Downloading Maven ${VERSION}..."
+          
           if curl -fL "${PRIMARY_URL}" -o "${ARCHIVE_PATH}"; then
-            echo "✅ Downloaded from primary: ${PRIMARY_URL}"
+            echo "✅ Downloaded from Primary CDN"
           else
-            echo "⚠️ Primary URL failed, trying archive URL: ${ARCHIVE_URL}"
-            curl -fL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"
-            echo "✅ Downloaded from archive: ${ARCHIVE_URL}"
+            echo "⚠️ Primary failed, attempting Archive..."
+            if curl -fL "${ARCHIVE_URL}" -o "${ARCHIVE_PATH}"; then
+              echo "✅ Downloaded from Archive"
+            else
+              echo "❌ Failed to download Maven ${VERSION}"
+              exit 1
+            fi
           fi
 
-      # ✅ SHA-512 체크섬 검증
-      - name: Verify SHA-512 checksum
+      # 7. Checksum 검증
+      - name: Verify Checksum
         run: |
           set -euo pipefail
+          VERSION="${{ matrix.maven-version }}"
+          FILENAME="apache-maven-${VERSION}-bin.tar.gz"
+          SHA_FILENAME="${FILENAME}.sha512"
+          ARCHIVE_PATH="dump/${FILENAME}"
+          SHA_PATH="dump/${SHA_FILENAME}"
+          
+          PRIMARY_SHA="${MAVEN_PRIMARY_BASE_URL}/${VERSION}/binaries/${SHA_FILENAME}"
+          ARCHIVE_SHA="${MAVEN_ARCHIVE_BASE_URL}/${VERSION}/binaries/${SHA_FILENAME}"
 
-          VERSION="${{ steps.maven.outputs.version }}"
-          ARCHIVE_PATH="dump/apache-maven-${VERSION}-bin.tar.gz"
-          PRIMARY_SHA_URL="${MAVEN_PRIMARY_BASE_URL}/${VERSION}/binaries/apache-maven-${VERSION}-bin.tar.gz.sha512"
-          ARCHIVE_SHA_URL="${MAVEN_ARCHIVE_BASE_URL}/${VERSION}/binaries/apache-maven-${VERSION}-bin.tar.gz.sha512"
-          SHA_FILE="dump/apache-maven-${VERSION}-bin.tar.gz.sha512"
-
-          echo "Trying primary SHA512 URL: ${PRIMARY_SHA_URL}"
-
-          if curl -fL "${PRIMARY_SHA_URL}" -o "${SHA_FILE}"; then
-            echo "✅ Primary SHA512 downloaded: ${PRIMARY_SHA_URL}"
+          if curl -fL "${PRIMARY_SHA}" -o "${SHA_PATH}"; then
+             echo "✅ SHA512 downloaded from Primary"
           else
-            echo "⚠️ Primary SHA512 failed, trying archive SHA512 URL: ${ARCHIVE_SHA_URL}"
-            curl -fL "${ARCHIVE_SHA_URL}" -o "${SHA_FILE}"
-            echo "✅ Archive SHA512 downloaded: ${ARCHIVE_SHA_URL}"
+             curl -fL "${ARCHIVE_SHA}" -o "${SHA_PATH}"
+             echo "✅ SHA512 downloaded from Archive"
           fi
 
-          HASH_VALUE=$(cut -d ' ' -f1 "${SHA_FILE}")
-          echo "${HASH_VALUE}  ${ARCHIVE_PATH}" | sha512sum -c -
-          echo "✅ SHA-512 checksum verified."
+          EXPECTED_HASH=$(cut -d ' ' -f1 "${SHA_PATH}")
+          echo "${EXPECTED_HASH}  ${ARCHIVE_PATH}" | sha512sum -c -
+          echo "✅ Checksum verified."
 
-      # ✅ Maven 압축 해제
-      - name: Extract Apache Maven archive
+      # 8. 압축 해제 및 환경변수 설정
+      - name: Extract and Set Environment
         run: |
           set -euo pipefail
-
-          VERSION="${{ steps.maven.outputs.version }}"
+          VERSION="${{ matrix.maven-version }}"
           ARCHIVE_PATH="dump/apache-maven-${VERSION}-bin.tar.gz"
           EXTRACT_DIR="extracted/apache-maven-${VERSION}"
-
-          echo "Extracting ${ARCHIVE_PATH} to ${EXTRACT_DIR}"
-
+          
           mkdir -p "${EXTRACT_DIR}"
           tar -xzf "${ARCHIVE_PATH}" -C "${EXTRACT_DIR}" --strip-components=1
+          
+          # GITHUB_ENV에 경로 추가 (이후 스텝에서 mvn 명령어 사용 가능)
+          echo "MAVEN_HOME=${PWD}/${EXTRACT_DIR}" >> "$GITHUB_ENV"
+          echo "${PWD}/${EXTRACT_DIR}/bin" >> "$GITHUB_PATH"
 
-          echo "✅ Extracted to ${EXTRACT_DIR}"
-
-      # ✅ MAVEN_HOME & PATH 설정 → mvn 사용 가능
-      - name: Set MAVEN_HOME and PATH
+      # 9. Maven 버전 확인 및 Smoke Test
+      - name: Maven Version & Smoke Test
         run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.maven.outputs.version }}"
-          MAVEN_DIR="$PWD/extracted/apache-maven-${VERSION}"
-
-          echo "MAVEN_HOME=${MAVEN_DIR}" >> "$GITHUB_ENV"
-          echo "${MAVEN_DIR}/bin" >> "$GITHUB_PATH"
-
-          echo "MAVEN_HOME set to ${MAVEN_DIR}"
-          echo "PATH will include ${MAVEN_DIR}/bin"
-
-      # ✅ Maven 설치 확인
-      - name: Check Maven version
-        run: |
-          set -euo pipefail
           mvn -version
-
-      # ✅ Maven 스모크 테스트 (quickstart 생성 + package)
-      - name: Run Maven smoke test (archetype + package)
-        run: |
-          set -euo pipefail
-
+          
           mkdir -p maven-smoke-test
           cd maven-smoke-test
-
           mvn -q -B archetype:generate \
             -DarchetypeArtifactId=maven-archetype-quickstart \
-            -DgroupId=com.example \
+            -DgroupId=com.smoke \
             -DartifactId=test-app \
-            -Dpackage=com.example.app \
+            -Dpackage=com.smoke.app \
             -Dversion=1.0.0
-
+          
           cd test-app
           mvn -q -B package
+          echo "✅ Simple smoke test passed."
 
-          echo "✅ Maven smoke test: project generated and packaged successfully."
-
-      # ✅ springboot-learning-example 전체 모듈 빌드 (Web / WebFlux / JPA / MyBatis / ES / Dubbo 등)
-      # 외부 인프라 의존성 때문에 테스트는 기본 skip
-      - name: Build springboot-learning-example (all modules, skip tests)
+      # 10. 실제 타겟 프로젝트(Spring Boot Example) 빌드
+      # [UPGRADE] 클론된 디렉토리로 이동하여 실행
+      - name: Build Spring Boot Learning Example
         run: |
           set -euo pipefail
-          echo "Building jeffli1993/springboot-learning-example with Maven ${MAVEN_HOME}"
-          echo "Modules include: core Spring Boot, WebFlux, Data JPA, MyBatis, Elasticsearch, HBase, Redis, Dubbo, etc."
+          echo "Building ${{ env.TARGET_REPO }} with Maven ${{ matrix.maven-version }}"
+          
+          cd springboot-learning-example
+          
+          # 테스트는 스킵하되, 전체 모듈 패키징 수행
           mvn -q -B -DskipTests clean package
-          echo "✅ Spring Boot learning examples build finished (skipTests)."
+          
+          echo "✅ Spring Boot Build Complete."
 
-      # ✅ 압축 해제본을 다시 tar.gz로 패키징 (릴리즈 자산용)
-      - name: Package extracted Maven directory as tar.gz (for release asset)
+      # 11. 재패키징 (Extracted 버전)
+      - name: Repackage Extracted Version
         run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.maven.outputs.version }}"
+          VERSION="${{ matrix.maven-version }}"
           EXTRACT_DIR="extracted/apache-maven-${VERSION}"
-          EXTRACTED_TAR="dump/apache-maven-${VERSION}-extracted.tar.gz"
+          REPACK_NAME="dump/apache-maven-${VERSION}-extracted.tar.gz"
+          
+          tar -czf "${REPACK_NAME}" -C "${EXTRACT_DIR}" .
+          echo "✅ Repackaged to ${REPACK_NAME}"
 
-          echo "Packaging extracted directory: ${EXTRACT_DIR} -> ${EXTRACTED_TAR}"
-          tar -czf "${EXTRACTED_TAR}" -C "${EXTRACT_DIR}" .
-          echo "✅ Packaged extracted directory."
-
-      # ✅ .github/workflows 디렉토리에도 Maven 아티팩트 추가 복사/적재
-      - name: Copy Maven artifacts into .github/workflows directory
-        run: |
-          set -euo pipefail
-
-          VERSION="${{ steps.maven.outputs.version }}"
-          WF_DIR=".github/workflows/maven-${VERSION}"
-
-          echo "Copying Maven artifacts to ${WF_DIR}"
-
-          mkdir -p "${WF_DIR}"
-
-          cp "dump/apache-maven-${VERSION}-bin.tar.gz" "${WF_DIR}/"
-          cp "dump/apache-maven-${VERSION}-extracted.tar.gz" "${WF_DIR}/"
-
-          echo "✅ Copied Maven artifacts into ${WF_DIR}"
-
-      # ✅ 디렉토리 목록 확인 (로그용)
-      - name: List dump, extracted and .github/workflows contents
-        run: |
-          echo "=== dump ==="
-          ls -lh dump || true
-          echo "=== extracted ==="
-          ls -lh extracted || true
-          echo "=== .github/workflows ==="
-          ls -lh .github/workflows || true
-
-      # ✅ Maven 관련 아티팩트 워크플로우 아티팩트로 업로드
-      - name: Upload Maven artifacts as workflow artifacts
+      # 12. Artifact 업로드 (Github Actions 저장소용)
+      - name: Upload Workflow Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: apache-maven-${{ steps.maven.outputs.version }}-artifacts
-          path: |
-            dump/apache-maven-${{ steps.maven.outputs.version }}-bin.tar.gz
-            dump/apache-maven-${{ steps.maven.outputs.version }}-extracted.tar.gz
-          retention-days: 7
+          name: maven-${{ matrix.maven-version }}-bundle
+          path: dump/*.tar.gz
+          retention-days: 3
 
-      # ✅ 각 Maven 버전별 GitHub Release 생성/업데이트 (출시 기능)
-      - name: Create / Update GitHub Release for Maven ${{ steps.maven.outputs.version }}
+      # 13. GitHub Release 생성 및 출시 (Upgrade Feature)
+      # 가장 최신 버전인 경우 'latest' 태그를 붙이도록 설정 가능 (여기서는 모든 버전을 릴리즈)
+      - name: Release to GitHub
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "maven-${{ steps.maven.outputs.version }}"
-          name: "Apache Maven ${{ steps.maven.outputs.version }}"
+          tag: "maven-${{ matrix.maven-version }}"
+          name: "Apache Maven ${{ matrix.maven-version }} Build"
           body: |
-            Automated GitHub Release for Apache Maven ${{ steps.maven.outputs.version }}.
-
-            Includes:
-            - Maven binary archive: apache-maven-${{ steps.maven.outputs.version }}-bin.tar.gz
-            - Maven extracted tar: apache-maven-${{ steps.maven.outputs.version }}-extracted.tar.gz
-
-            springboot-learning-example (Spring Boot core, WebFlux, Data JPA, MyBatis, Elasticsearch, HBase, Redis, Dubbo, etc.)
-            has been built successfully with this Maven version (tests skipped by default for infrastructure-heavy modules).
-
-            This release was generated by a GitHub Actions workflow.
+            ## Apache Maven ${{ matrix.maven-version }}
+            
+            This release contains:
+            - **Original Binary:** `apache-maven-${{ matrix.maven-version }}-bin.tar.gz`
+            - **Extracted Bundle:** `apache-maven-${{ matrix.maven-version }}-extracted.tar.gz`
+            
+            ### Build Verification
+            - **JDK:** Temurin 17
+            - **Smoke Test:** Passed
+            - **Integration Build:** `${{ env.TARGET_REPO }}` (All modules packaged)
+            
+            *Automated release by GitHub Actions.*
+          artifacts: "dump/*.tar.gz"
+          allowUpdates: true
+          replacesArtifacts: true
+          makeLatest: ${{ matrix.maven-version == '3.9.11' }} # 3.9.11 버전만 최신(Latest)으로 표시
           draft: false
           prerelease: false
-          allowUpdates: true
-          artifacts: |
-            dump/apache-maven-${{ steps.maven.outputs.version }}-bin.tar.gz
-            dump/apache-maven-${{ steps.maven.outputs.version }}-extracted.tar.gz
-          artifactContentType: application/gzip
