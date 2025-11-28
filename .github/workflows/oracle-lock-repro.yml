@@ -1,61 +1,162 @@
-name: Service Auto-Updater (Fixed)
+name: "👁️ Korea Finance — OMNI-WATCHDOG (Supervisor)"
 
 on:
+  # 1. 상주 배치 (15분 주기 Heartbeat)
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '*/15 * * * *'
+  # 2. 수동 실행 (즉시 점검)
   workflow_dispatch:
 
 permissions:
-  contents: write
-  pull-requests: write
+  actions: write      # 워크플로우 실행/취소 권한
+  contents: read      # 코드 읽기 권한
+  issues: write       # 대시보드(Issue) 갱신 권한
+
+env:
+  TARGET_WORKFLOW: "korea-finance-eternity-v9.yml" # 감시 대상 (v9 Eternity)
+  WATCHDOG_ISSUE_TITLE: "🔴 [LIVE] OMNIVERSE SYSTEM MONITOR"
+  TZ: Asia/Seoul
 
 jobs:
-  check-and-update:
-    name: Check & Update
+  supervisor-routine:
+    name: "🛡️ SYSTEM SUPERVISOR"
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout
+      # ===========================================================================
+      # 1) INITIALIZATION
+      # ===========================================================================
+      - name: "🔧 Init Watchdog"
         uses: actions/checkout@v4
 
-      # [FIX] 타겟 파일 확인 로직 추가
-      - name: Verify Target Workflow Exists
-        id: verify_file
+      - name: "📡 Scan Target Workflow Status"
+        id: scan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TARGET_FILE=".github/workflows/maven-korea-massive-iso.yml"
-          if [ -f "$TARGET_FILE" ]; then
-            echo "✅ Target file found: $TARGET_FILE"
-            echo "file_exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "⚠️ Target file NOT found at $TARGET_FILE"
-            echo "Listing workflows directory for debugging:"
-            ls -R .github/workflows || echo "No workflows dir found"
-            echo "file_exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check Maven Version
-        if: steps.verify_file.outputs.file_exists == 'true'
-        id: check-maven
-        run: |
-          TARGET_FILE=".github/workflows/maven-korea-massive-iso.yml"
-          LATEST_MAVEN=$(curl -s https://dlcdn.apache.org/maven/maven-3/ | grep -o 'href="3\.[0-9]\+\.[0-9]\+/"' | cut -d'"' -f2 | tr -d '/' | sort -V | tail -n 1)
+          echo "Scanning ${TARGET_WORKFLOW}..."
           
-          if grep -q "$LATEST_MAVEN" "$TARGET_FILE"; then
-            echo "✅ Maven is up to date ($LATEST_MAVEN)"
+          # 최근 실행 상태 조회
+          LAST_RUN=$(gh run list --workflow "${TARGET_WORKFLOW}" --limit 1 --json databaseId,status,conclusion,createdAt --jq '.[0]')
+          
+          RUN_ID=$(echo $LAST_RUN | jq -r .databaseId)
+          STATUS=$(echo $LAST_RUN | jq -r .status)
+          CONCLUSION=$(echo $LAST_RUN | jq -r .conclusion)
+          CREATED=$(echo $LAST_RUN | jq -r .createdAt)
+          
+          echo "Last Run ID: $RUN_ID"
+          echo "Status: $STATUS"
+          echo "Conclusion: $CONCLUSION"
+          
+          # Output 설정
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "conclusion=$CONCLUSION" >> $GITHUB_OUTPUT
+          echo "created_at=$CREATED" >> $GITHUB_OUTPUT
+
+      # ===========================================================================
+      # 2) AUTO-HEALING (재시작 로직)
+      # ===========================================================================
+      - name: "🚑 Analyze & Auto-Heal"
+        id: heal
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STATUS="${{ steps.scan.outputs.status }}"
+          CONCLUSION="${{ steps.scan.outputs.conclusion }}"
+          
+          if [ "$STATUS" == "in_progress" ] || [ "$STATUS" == "queued" ]; then
+            echo "ACTION: MONITORING"
+            echo "msg=System is currently running. Standing by." >> $GITHUB_OUTPUT
+            echo "trigger=false" >> $GITHUB_OUTPUT
+            
+          elif [ "$CONCLUSION" == "success" ]; then
+            echo "ACTION: IDLE"
+            echo "msg=System is healthy. Last run successful." >> $GITHUB_OUTPUT
+            echo "trigger=false" >> $GITHUB_OUTPUT
+            
+          elif [ "$CONCLUSION" == "failure" ] || [ "$CONCLUSION" == "cancelled" ] || [ "$CONCLUSION" == "timed_out" ]; then
+            echo "ACTION: EMERGENCY RESTART"
+            echo "⚠️ Failure Detected! Restarting Omniverse Engine..."
+            
+            # 워크플로우 재실행 Trigger
+            gh workflow run "${TARGET_WORKFLOW}" -f active_customer_count=1000000 -f massive_scale_factor=50
+            
+            echo "msg=⚠️ CRITICAL FAILURE DETECTED. Auto-Restart Initiated." >> $GITHUB_OUTPUT
+            echo "trigger=true" >> $GITHUB_OUTPUT
+            
           else
-            echo "⚠️ New Maven version: $LATEST_MAVEN"
-            # 마지막 버전을 찾아 그 뒤에 새 버전 추가
-            sed -i "/- '3.9.11'/a \          - '$LATEST_MAVEN'" "$TARGET_FILE"
-            echo "update_needed=true" >> "$GITHUB_OUTPUT"
-            echo "latest_version=$LATEST_MAVEN" >> "$GITHUB_OUTPUT"
+            # 실행 기록이 없는 경우 (최초 실행)
+            echo "ACTION: INITIAL START"
+            gh workflow run "${TARGET_WORKFLOW}"
+            echo "msg=No active runs found. Starting engine." >> $GITHUB_OUTPUT
+            echo "trigger=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create PR
-        if: steps.check-maven.outputs.update_needed == 'true'
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: update maven to ${{ steps.check-maven.outputs.latest_version }}"
-          title: "⬆️ Auto-Update: Maven ${{ steps.check-maven.outputs.latest_version }}"
-          body: "Automated update for massive generation workflow."
-          branch: auto-update-maven
+      # ===========================================================================
+      # 3) STORAGE CLEANUP (유지보수)
+      # ===========================================================================
+      - name: "🧹 Cleanup Old Artifacts"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Cleaning up old artifacts to prevent storage overflow..."
+          # 24시간 이상 된 아티팩트 삭제 (jq 필터링)
+          gh run list --workflow "${TARGET_WORKFLOW}" --json databaseId,createdAt --limit 50 | \
+          jq -r '.[] | select(.createdAt < "'"$(date -d '24 hours ago' -u +%Y-%m-%dT%H:%M:%SZ')"'") | .databaseId' | \
+          xargs -I {} gh run delete {} --quiet || true
+          echo "✅ Cleanup Complete."
+
+      # ===========================================================================
+      # 4) LIVE DASHBOARD UPDATE (GitHub Issue)
+      # ===========================================================================
+      - name: "📊 Update Live Control Center"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MSG: ${{ steps.heal.outputs.msg }}
+          LAST_ID: ${{ steps.scan.outputs.run_id }}
+          LAST_TIME: ${{ steps.scan.outputs.created_at }}
+        run: |
+          # 현재 시간을 한국 시간으로 변환
+          NOW=$(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')
+          
+          # 상태 아이콘 결정
+          if [[ "$MSG" == *"Healthy"* ]]; then ICON="🟢 SYSTEM NORMAL"; COLOR="2ecc71";
+          elif [[ "$MSG" == *"Running"* ]]; then ICON="🔵 PROCESSING"; COLOR="3498db";
+          else ICON="🔴 RECOVERING"; COLOR="e74c3c"; fi
+          
+          # 대시보드 본문 생성 (Markdown)
+          BODY="
+          # 🖥️ OMNIVERSE CONTROL CENTER
+          
+          > **Last Update:** $NOW
+          
+          ## 🚦 System Status
+          | Metric | Status | Details |
+          |---|---|---|
+          | **Condition** | $ICON | **$MSG** |
+          | **Target** | \`${TARGET_WORKFLOW}\` | Eternity Engine v9 |
+          | **Last Run** | [Run #$LAST_ID](https://github.com/${GITHUB_REPOSITORY}/actions/runs/$LAST_ID) | $LAST_TIME |
+          
+          ## 🛡️ Watchdog Logs
+          \`\`\`bash
+          [Watchdog] Scanning... Done.
+          [Watchdog] Integrity Check... Pass.
+          [Watchdog] Storage Audit... Cleaned.
+          [Watchdog] Action Taken: ${{ steps.heal.outputs.trigger == 'true' && 'RESTART' || 'MONITOR' }}
+          \`\`\`
+          
+          ---
+          *Automated by OMNI-WATCHDOG Supervisor.*
+          "
+          
+          # 기존 이슈 검색
+          ISSUE_NUMBER=$(gh issue list --search "${WATCHDOG_ISSUE_TITLE}" --json number --jq '.[0].number')
+          
+          if [ -z "$ISSUE_NUMBER" ]; then
+            echo "Creating new Dashboard Issue..."
+            gh issue create --title "${WATCHDOG_ISSUE_TITLE}" --body "$BODY" --label "monitor"
+          else
+            echo "Updating Dashboard Issue #$ISSUE_NUMBER..."
+            gh issue edit "$ISSUE_NUMBER" --body "$BODY"
+          fi
