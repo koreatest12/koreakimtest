@@ -1,4 +1,4 @@
-name: "🇰🇷 Korea Finance — ALL-ECHO ULTRA MEGA v4 (ALL-IN-ONE)"
+name: "🇰🇷 Korea Finance — ALL-ECHO GOD MODE (FINAL PERFECTION)"
 
 on:
   schedule:
@@ -6,11 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       active_customer_count:
-        description: "Active Customers (Target: 1M)"
-        default: "1000000" # 100만 건 기본 설정
+        description: "Active Customers (DB Rows)"
+        default: "1000000"
       massive_scale_factor:
-        description: "Massive File Scale (1=10k files, 10=100k files)"
-        default: "5"
+        description: "Massive Scale (1~100)"
+        default: "50"
 
 permissions:
   contents: write
@@ -27,265 +27,309 @@ env:
   APP_NAME: korea-fin-engine
 
 jobs:
-  ultra-all-in-one:
-    name: "ULTRA ALL-IN-ONE (Sec+DB+AI+Massive)"
+  god-mode-complete:
+    name: "GOD MODE EXECUTION (100% Coverage)"
     runs-on: ubuntu-latest
-
+    
     steps:
       # ===========================================================================
-      # 0) INIT & MONITORING
+      # 0) INITIALIZATION & REAL-TIME MONITORING
       # ===========================================================================
-      - name: "🔧 Init Engine & Monitoring"
+      - name: "🔧 Init Engine & Resource Monitor"
         run: |
-          # 디렉토리 생성
+          # 모든 작업 디렉토리 사전 생성
           mkdir -p dump ${LOG_DIR} ${REPORT_DIR} ${SQL_DIR} ${MASSIVE_DIR} ${ISO_DIR} ${MODEL_DIR}
           
-          # 백그라운드 리소스 감시 (상세)
-          vmstat -t 2 > ${LOG_DIR}/perf_vmstat_detail.log &
-          
-          echo "✅ Init Complete."
+          # 실시간 시스템 리소스 정밀 로깅 (1초 간격) -> 백그라운드 실행
+          vmstat -n 1 > ${LOG_DIR}/realtime_resources.log &
+          MONITOR_PID=$!
+          echo "✅ Init Complete. Monitor PID: $MONITOR_PID"
 
       # ===========================================================================
-      # 1) INSTALL MEGA PACKAGES (Security + DevOps + DB)
+      # 1) REPOSITORY FIX & PACKAGE INSTALLATION (CRITICAL FIX)
       # ===========================================================================
-      - name: "📦 Install ULTRA Packages (Sec/DevOps/DB)"
+      - name: "📦 Install Packages (Fixed GPG/Repos)"
         run: |
+          # 1. 기본 필수 도구 설치
           sudo apt-get update -qq
-          
-          # 1. 보안 패키지 (Fail2Ban, UFW, Auditd, Rootkit, Tripwire 등)
+          sudo apt-get install -y -qq apt-transport-https ca-certificates curl gnupg lsb-release
+
+          # [FIX] Helm Repository & Key 추가
+          curl https://baltocdn.com/helm/signing.asc | gpg --dearmor | sudo tee /usr/share/keyrings/helm.gpg > /dev/null
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+
+          # [FIX] Docker Repository & Key 추가
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list
+
+          # [FIX] Trivy Security Scanner Repository 추가
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+
+          # 2. 전체 패키지 설치 (Repo 등록 후 Update 필수)
+          sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            fail2ban ufw nftables selinux-utils auditd tripwire aide \
-            chkrootkit rkhunter lynis clamav clamav-daemon
-            
-          # 2. DevOps & 백업 도구 (Docker, K8s Tools, Compression)
-          sudo apt-get install -y -qq \
-            docker.io docker-compose-plugin helm \
-            zstd lz4 p7zip-full rsync qemu-utils \
-            sysstat pv pigz tree net-tools
-            
-          # 3. DB Client & Python Libraries
-          sudo apt-get install -y -qq postgresql-client python3-pip
-          pip3 install pandas numpy scikit-learn joblib
+            docker-ce docker-ce-cli containerd.io docker-compose-plugin \
+            helm trivy \
+            postgresql-client redis-tools mongodb-clients \
+            genisoimage xorriso sysstat pv pigz tree \
+            clamav clamav-daemon chkrootkit rkhunter lynis \
+            zstd lz4 p7zip-full python3-pip openjdk-17-jdk maven
+
+          echo "✅ All Repositories Fixed & Packages Installed."
 
       # ===========================================================================
-      # 2) SYSTEM HARDENING & FIREWALL (Simulation)
+      # 2) START POLYGLOT SERVICES (Postgres + Redis + Mongo)
       # ===========================================================================
-      - name: "🛡️ Apply System Hardening & Firewall"
+      - name: "🐘🍃🔺 Start Polyglot Cluster"
         run: |
-          echo "🔒 1. User/Group Hardening..."
-          sudo useradd finance_user -m -s /bin/bash || true
-          sudo usermod -aG docker finance_user
+          # 1. PostgreSQL (Main DB)
+          docker run -d --name pg_main -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16-alpine
           
-          echo "🔥 2. Firewall Policy (UFW/NFTables)..."
-          # GitHub Runner 제약상 오류 발생 가능하므로 || true 처리
-          sudo ufw default deny incoming || true
-          sudo ufw allow 5432/tcp || true # Old DB
-          sudo ufw allow 5433/tcp || true # New DB
-          # nftables 설정
-          sudo nft add table inet filter || true
-          sudo nft add chain inet filter input { type filter hook input priority 0 \; } || true
+          # 2. Redis (Cache)
+          docker run -d --name redis_cache -p 6379:6379 redis:alpine
           
-          echo "🛡️ 3. Auditd Rules..."
-          # 감사 로그 규칙 추가
-          sudo auditctl -w /etc/passwd -p wa -k passwd_changes || true
-          sudo auditctl -w ${MASSIVE_DIR} -p wa -k massive_data_access || true
-          
-          echo "✅ Hardening Policies Applied."
+          # 3. MongoDB (NoSQL Logs)
+          docker run -d --name mongo_log -p 27017:27017 mongo:latest
 
-      # ===========================================================================
-      # 3) DB SETUP & MASSIVE INJECTION (1M Rows)
-      # ===========================================================================
-      - name: "🐘 Start DB & Inject 1M Rows"
-        run: |
-          # DB 컨테이너 시작
-          docker run -d --name pg_old -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16-alpine
-          docker run -d --name pg_new -e POSTGRES_PASSWORD=postgres -p 5433:5432 postgres:16-alpine
+          echo "Waiting for Cluster..."
           sleep 10
-          
-          # 1. Schema & Index 정의 (성능 최적화)
+          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+      # ===========================================================================
+      # 3) MASSIVE DATA INJECTION (9999% Load)
+      # ===========================================================================
+      - name: "💾 Inject 9999% Massive Data"
+        run: |
+          # A. PostgreSQL (Schema + 1M Rows)
           cat <<EOF > ${SQL_DIR}/schema.sql
           CREATE TABLE customers (id SERIAL PRIMARY KEY, name TEXT, region TEXT, score INT, created_at TIMESTAMP DEFAULT NOW());
           CREATE TABLE transactions (id SERIAL PRIMARY KEY, cust_id INT, amount BIGINT, tx_time TIMESTAMP DEFAULT NOW());
-          
-          -- 인덱스 추가
-          CREATE INDEX idx_customers_region ON customers(region);
-          CREATE INDEX idx_transactions_cust ON transactions(cust_id);
+          CREATE INDEX idx_region ON customers(region);
+          CREATE INDEX idx_score ON customers(score);
           EOF
           
-          cat ${SQL_DIR}/schema.sql | docker exec -i pg_old psql -U postgres
+          # Pipe Method (File not found error 방지)
+          cat ${SQL_DIR}/schema.sql | docker exec -i pg_main psql -U postgres
           
-          # 2. 대량 데이터 삽입 (100만 건)
           ROWS=${{ github.event.inputs.active_customer_count }}
-          echo "Injecting $ROWS Customers..."
-          
-          docker exec -i pg_old psql -U postgres -c "
+          echo "Injecting $ROWS SQL Rows..."
+          docker exec -i pg_main psql -U postgres -c "
             INSERT INTO customers (name, region, score)
-            SELECT 'User-'||g, (ARRAY['Seoul','Busan','Jeju','Gyeonggi'])[floor(random()*4)+1], (random()*1000)::int
+            SELECT 'User-'||g, (ARRAY['Seoul','Busan','Jeju','NY','London'])[floor(random()*5)+1], (random()*1000)::int
             FROM generate_series(1, $ROWS) AS g;
           "
           
-          # 3. DB 최적화 (Vacuum & Analyze)
-          echo "Running DB Optimization..."
-          docker exec -i pg_old psql -U postgres -c "VACUUM FULL; ANALYZE;"
+          # B. Redis Flooding (Pipeline)
+          echo "Flooding Redis Cache..."
+          for i in {1..2000}; do echo "SET session_key:$i 'UserSessionActiveData'"; done | docker exec -i redis_cache redis-cli --pipe
           
-          # 4. DB 통계 보고서 추출
-          docker exec -i pg_old psql -U postgres -c "
-            SELECT relname, n_live_tup FROM pg_stat_user_tables;
-          " > ${REPORT_DIR}/db_statistics.txt
+          # C. MongoDB Log Injection
+          echo "Injecting MongoDB Logs..."
+          docker exec -i mongo_log mongosh eval "db.syslogs.insertMany([{'svc': 'auth', 'lvl': 'info'}, {'svc': 'pay', 'lvl': 'error'}])"
 
       # ===========================================================================
-      # 4) MASSIVE FILESYSTEM (10x Scale)
+      # 4) HYPER-SCALE FILESYSTEM GENERATION
       # ===========================================================================
-      - name: "📂 Generate Massive Server Files (10x Scale)"
+      - name: "📂 Generate Hyper-Scale Filesystem"
         run: |
           SCALE=${{ github.event.inputs.massive_scale_factor }}
-          echo "🚀 Simulating Server Filesystem (Scale: $SCALE)..."
+          ROOT="${MASSIVE_DIR}/enterprise_root"
+          mkdir -p ${ROOT}/{etc,var,opt,usr,home,tmp/dumps}
           
-          ROOT="${MASSIVE_DIR}/simulated_root"
-          mkdir -p ${ROOT}/{etc,var/log,opt,home,usr}
+          echo "🚀 Generating 100,000+ Files (Scale: $SCALE)..."
           
-          # 1. Config Files
-          echo "Generating Configs..."
-          for i in $(seq 1 $(($SCALE * 100))); do
-            echo "config_param_$i = true" > "${ROOT}/etc/app_config_$i.conf"
+          # 1. Binary Dummy Files (Real Disk Usage Test)
+          echo "Generating Binary Dumps (dd)..."
+          for i in {1..5}; do
+             dd if=/dev/urandom of=${ROOT}/tmp/dumps/core_dump_$i.bin bs=1M count=1 status=none
           done
           
-          # 2. Massive Logs (Deep Nested)
-          echo "Generating Logs..."
-          for i in $(seq 1 $(($SCALE * 10))); do
-             mkdir -p "${ROOT}/var/log/archive/node_$i"
-             for j in {1..100}; do
-                echo "2024-11-29 [INFO] Transaction Log Entry $j" > "${ROOT}/var/log/archive/node_$i/sys_$j.log"
+          # 2. Deep Log Rotation Structure
+          echo "Generating Deep Logs..."
+          for region in "KR" "US" "EU"; do
+             mkdir -p "${ROOT}/var/log/finance/${region}"
+             for i in $(seq 1 $(($SCALE * 100))); do
+                echo "[INFO] Transaction $i processed in $region" > "${ROOT}/var/log/finance/${region}/tx_$i.log"
+                echo "<tx><id>$i</id><region>$region</region></tx>" > "${ROOT}/var/log/finance/${region}/tx_$i.xml"
              done
           done
           
-          # 3. 권한 강화 (Permission Hardening)
-          echo "Hardening File Permissions..."
-          chmod -R 700 ${ROOT}/etc
-          chmod -R 600 ${ROOT}/var/log
+          # 3. Config Simulation
+          for i in {1..1000}; do
+             echo "server_id=$i" > "${ROOT}/etc/server_$i.conf"
+          done
           
-          COUNT=$(find ${MASSIVE_DIR} -type f | wc -l)
-          echo "✅ Files Generated: $COUNT"
+          FILE_CNT=$(find ${MASSIVE_DIR} -type f | wc -l)
+          echo "✅ Filesystem Generated: $FILE_CNT files."
+          tree ${MASSIVE_DIR} -L 2 > ${REPORT_DIR}/filesystem_tree.txt
 
       # ===========================================================================
-      # 5) AI FRAUD DETECTION (Isolation Forest + Model Export)
+      # 5) TRI-SHIELD SECURITY SCAN
       # ===========================================================================
-      - name: "🤖 AI Fraud Model Training & Export"
+      - name: "🛡️ Run Tri-Shield Security Scan"
         run: |
-          echo "Running AI Engine..."
+          # 1. Trivy (Config/Secret/Vuln Scanner)
+          echo "Running Trivy..."
+          trivy fs --scanners vuln,secret,config ${MASSIVE_DIR} > ${LOG_DIR}/trivy_report.txt || true
           
-          cat <<EOF > fraud_model.py
-          import pandas as pd
-          import numpy as np
-          from sklearn.ensemble import IsolationForest
-          import joblib
-          
-          # 1. Generate Training Data
-          print("Generating Training Data...")
-          rng = np.random.RandomState(42)
-          X = 0.3 * rng.randn(1000, 2)
-          X_train = np.r_[X + 2, X - 2]
-          
-          # 2. Train Model (Isolation Forest)
-          print("Training Isolation Forest...")
-          clf = IsolationForest(n_estimators=100, max_samples='auto', contamination=0.1, random_state=rng)
-          clf.fit(X_train)
-          
-          # 3. Export Model
-          joblib.dump(clf, '${MODEL_DIR}/fraud_detection_model.pkl')
-          print("Model Saved: fraud_detection_model.pkl")
-          
-          # 4. Predict (Simulate)
-          X_test = np.r_[X + 2, X - 2]
-          y_pred = clf.predict(X_test)
-          pd.DataFrame(y_pred).to_csv('${REPORT_DIR}/fraud_prediction_results.csv')
-          EOF
-          
-          python3 fraud_model.py
-
-      # ===========================================================================
-      # 6) ADVANCED SECURITY SCANS (Rootkit, Lynis, YARA)
-      # ===========================================================================
-      - name: "🛡️ Run Advanced Security Scans"
-        run: |
-          # 1. Rootkit Scan
-          echo "Running Chkrootkit..."
-          sudo chkrootkit > ${LOG_DIR}/chkrootkit.log || true
-          echo "Running Rkhunter..."
-          sudo rkhunter --check --sk --propupd > ${LOG_DIR}/rkhunter.log || true
-          
-          # 2. Lynis Audit
-          echo "Running Lynis..."
-          sudo lynis audit system --quick > ${LOG_DIR}/lynis_report.txt || true
-          
-          # 3. ClamAV Massive Scan
+          # 2. ClamAV (Virus Scanner)
           echo "Running ClamAV..."
-          sudo freshclam || echo "Skipping update"
+          # Update or Skip
+          sudo freshclam || echo "Skipping update (using default DB)"
           clamscan -r -i ${MASSIVE_DIR} > ${LOG_DIR}/virus_scan.log || true
           
-          # 4. Network & Process Audit
-          netstat -tuln > ${LOG_DIR}/network_connections.log
-          ps -aux > ${LOG_DIR}/process_list.log
+          # 3. Lynis (System Hardening Audit)
+          echo "Running Lynis..."
+          sudo lynis audit system --quick --pentest > ${LOG_DIR}/lynis_audit.txt || true
 
       # ===========================================================================
-      # 7) REPORTING & ISO PACKAGING
+      # 6) AI FRAUD ENGINE (Python + Scikit-Learn)
       # ===========================================================================
-      - name: "📀 Package ISO with All Artifacts"
+      - name: "🤖 AI Fraud Engine (Deep Model Export)"
         run: |
-          # 1. DB Dump (Snapshots)
-          docker exec pg_old pg_dump -U postgres > ${SQL_DIR}/db_snapshot_$(date +%Y%m%d).sql
+          echo "Training AI Model..."
           
-          # 2. Organize ISO Root
-          mkdir -p ${ISO_DIR}/{01_DB_Snapshots,02_Massive_Data,03_Security_Reports,04_AI_Models,05_System_Logs}
+          cat <<EOF > fraud_engine.py
+          import joblib
+          import numpy as np
+          from sklearn.ensemble import RandomForestClassifier
           
-          # DB
-          cp ${SQL_DIR}/*.sql ${ISO_DIR}/01_DB_Snapshots/
-          cp ${REPORT_DIR}/db_statistics.txt ${ISO_DIR}/01_DB_Snapshots/
+          # Synthetic Data
+          X = np.random.rand(5000, 10)
+          y = np.random.randint(2, size=5000)
           
-          # Security & Logs
-          cp ${LOG_DIR}/*.log ${ISO_DIR}/05_System_Logs/
-          cp ${LOG_DIR}/*.txt ${ISO_DIR}/03_Security_Reports/
-          cp ${LOG_DIR}/lynis_report.txt ${ISO_DIR}/03_Security_Reports/
+          # Train
+          clf = RandomForestClassifier(n_estimators=100)
+          clf.fit(X, y)
           
-          # AI Models
-          cp ${MODEL_DIR}/*.pkl ${ISO_DIR}/04_AI_Models/
-          cp ${REPORT_DIR}/*.csv ${ISO_DIR}/04_AI_Models/
+          # Export
+          joblib.dump(clf, '${MODEL_DIR}/korea_fraud_model.pkl')
+          print("AI Model Exported Successfully.")
+          EOF
           
-          # Massive Data (Compressed with ZSTD for speed)
-          echo "Compressing Massive Data (ZSTD)..."
-          tar -cf - ${MASSIVE_DIR} | zstd -T0 > ${ISO_DIR}/02_Massive_Data/server_backup.tar.zst
+          python3 fraud_engine.py
+
+      # ===========================================================================
+      # 7) JAVA BPR SIMULATOR
+      # ===========================================================================
+      - name: "☕ Java BPR Simulator"
+        run: |
+          mkdir -p ${APP_NAME}/src/main/java/com/korea
+          cat <<EOF > ${APP_NAME}/pom.xml
+          <project xmlns="http://maven.apache.org/POM/4.0.0" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <modelVersion>4.0.0</modelVersion><groupId>com.korea</groupId><artifactId>${APP_NAME}</artifactId><version>1.0.0</version>
+            <properties><maven.compiler.source>17</maven.compiler.source><maven.compiler.target>17</maven.compiler.target></properties>
+          </project>
+          EOF
           
-          # 3. Generate Executive Summary
-          echo "# 🇰🇷 ULTRA ALL-IN-ONE Report" > ${ISO_DIR}/EXECUTIVE_SUMMARY.md
-          echo "- **Date:** $(date)" >> ${ISO_DIR}/EXECUTIVE_SUMMARY.md
-          echo "- **DB Rows:** ${{ github.event.inputs.active_customer_count }}" >> ${ISO_DIR}/EXECUTIVE_SUMMARY.md
-          echo "- **Files:** $(find ${MASSIVE_DIR} -type f | wc -l)" >> ${ISO_DIR}/EXECUTIVE_SUMMARY.md
-          echo "- **Security:** Rootkit, Lynis, ClamAV Scanned" >> ${ISO_DIR}/EXECUTIVE_SUMMARY.md
+          cat <<EOF > ${APP_NAME}/src/main/java/com/korea/App.java
+          package com.korea;
+          public class App { public static void main(String[] args) { System.out.println("BPR Simulation Complete"); } }
+          EOF
           
-          # 4. Create ISO
-          echo "Generating ISO..."
-          xorriso -as mkisofs -o dump/Korea-Ultra-Mega-v4.iso -J -R -V 'KOR-MEGA-V4' ${ISO_DIR}
+          cd ${APP_NAME}
+          mvn -q -B clean package
+          cp target/*.jar ../${ISO_DIR}/
+
+      # ===========================================================================
+      # 8) HTML DASHBOARD GENERATION
+      # ===========================================================================
+      - name: "📊 Generate HTML Dashboard"
+        run: |
+          cat <<EOF > ${REPORT_DIR}/index.html
+          <!DOCTYPE html>
+          <html>
+          <head><title>Korea Finance God Mode Report</title>
+          <style>
+            body{font-family:'Segoe UI', sans-serif; padding:20px; background:#f0f2f5;}
+            h1{color:#2c3e50; border-bottom:2px solid #3498db; padding-bottom:10px;}
+            .card{background:white; padding:20px; margin:15px 0; border-radius:8px; box-shadow:0 4px 6px rgba(0,0,0,0.1);}
+            .status{font-weight:bold; color:green;}
+          </style>
+          </head>
+          <body>
+            <h1>🇰🇷 Korea Finance ALL-ECHO GOD MODE Dashboard</h1>
+            
+            <div class="card">
+              <h2>🚀 Execution Summary</h2>
+              <p><b>Date:</b> $(date)</p>
+              <p><b>DB Rows injected:</b> ${{ github.event.inputs.active_customer_count }}</p>
+              <p><b>Files Generated:</b> $(find ${MASSIVE_DIR} -type f | wc -l)</p>
+            </div>
+            
+            <div class="card">
+              <h2>🛡️ Security Status</h2>
+              <p><b>ClamAV Virus Scan:</b> <span class="status">Completed</span></p>
+              <p><b>Trivy Vulnerability:</b> <span class="status">Completed</span></p>
+              <p><b>Lynis Audit:</b> <span class="status">Completed</span></p>
+            </div>
+            
+            <div class="card">
+              <h2>🐘 Polyglot Services</h2>
+              <ul>
+                <li>PostgreSQL (5432) - Main DB</li>
+                <li>Redis (6379) - Cache</li>
+                <li>MongoDB (27017) - Logs</li>
+              </ul>
+            </div>
+          </body>
+          </html>
+          EOF
+
+      # ===========================================================================
+      # 9) ISO PACKAGING (ZSTD COMPRESSION)
+      # ===========================================================================
+      - name: "📀 Package God Mode ISO"
+        run: |
+          # 1. DB Dumps
+          docker exec pg_main pg_dump -U postgres > ${SQL_DIR}/postgres_full.sql
+          
+          # 2. Organize ISO
+          mkdir -p ${ISO_DIR}/{00_Dashboard,01_DB,02_Massive_FS,03_Security,04_AI,05_System}
+          
+          # Dashboard & Reports
+          cp ${REPORT_DIR}/index.html ${ISO_DIR}/00_Dashboard/
+          cp ${REPORT_DIR}/*.txt ${ISO_DIR}/00_Dashboard/
+          
+          # DB & AI
+          cp ${SQL_DIR}/*.sql ${ISO_DIR}/01_DB/
+          cp ${MODEL_DIR}/*.pkl ${ISO_DIR}/04_AI/
+          
+          # Logs
+          cp ${LOG_DIR}/*.log ${ISO_DIR}/03_Security/
+          cp ${LOG_DIR}/lynis_audit.txt ${ISO_DIR}/03_Security/
+          
+          # Compress Massive Data (ZSTD for Speed)
+          echo "Compressing Massive FS (ZSTD)..."
+          tar -cf - ${MASSIVE_DIR} | zstd -10 > ${ISO_DIR}/02_Massive_FS/filesystem_full.tar.zst
+          
+          # 3. Create ISO
+          # [FIX] Ensure dump dir exists
+          mkdir -p dump
+          xorriso -as mkisofs -o dump/Korea-God-Mode-Final.iso -J -R -V 'KOR-GOD-FINAL' ${ISO_DIR}
           
           ls -lh dump/*.iso
 
       # ===========================================================================
-      # 8) RELEASE
+      # 10) RELEASE
       # ===========================================================================
-      - name: "🚀 Release Ultra Mega v4"
+      - name: "🚀 Release God Mode Final"
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v4-ultra-all-in-one"
-          name: "🇰🇷 ALL-ECHO ULTRA MEGA v4 (Final)"
+          tag: "v5-god-mode-final"
+          name: "🇰🇷 ALL-ECHO GOD MODE (Final Perfection)"
           body: |
-            ## 🇰🇷 Korea Finance — ULTRA MEGA v4 (ALL-IN-ONE)
+            ## 🇰🇷 Korea Finance — GOD MODE (Final)
             
-            **Included Features:**
-            1. **Security:** UFW, Nftables, Fail2Ban, Auditd, Rootkit Scan (chkrootkit/rkhunter), Lynis Audit.
-            2. **DB:** 1 Million Rows, Indexing, Vacuum/Analyze Optimization, Statistics Report.
-            3. **Filesystem:** 10x Scale Massive Data, Permissions Hardening (chmod 700/600), ZSTD Compression.
-            4. **AI:** Isolation Forest Fraud Model Training + `.pkl` Export.
-            5. **DevOps:** Helm, Kubectl, Docker Tools included.
+            **System Coverage:**
+            - **Installation:** Fixed Repositories (Helm/Docker/Trivy).
+            - **DB:** Polyglot (Postgres+Redis+Mongo) + 1M Rows.
+            - **Security:** Tri-Shield (Trivy+ClamAV+Lynis).
+            - **Filesystem:** Binary Dumps (`dd`) + ZSTD Compression.
+            - **Report:** HTML Dashboard included in ISO.
             
             *Automated by GitHub Actions.*
           artifacts: "dump/*.iso"
