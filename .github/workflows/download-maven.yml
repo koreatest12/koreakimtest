@@ -1,4 +1,4 @@
-name: "🇰🇷 Korea Finance — ALL-ECHO GOD MODE v6 (FAIL-SAFE FINAL)"
+name: "🇰🇷 Korea Finance — ALL-ECHO GOD MODE v8 (ZERO-ERROR)"
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       active_customer_count:
-        description: "Active Customers (DB Rows)"
+        description: "Active Customers (Target: 1M)"
         default: "1000000"
       massive_scale_factor:
         description: "Massive Scale (1~100)"
@@ -27,8 +27,8 @@ env:
   APP_NAME: korea-fin-engine
 
 jobs:
-  god-mode-failsafe:
-    name: "GOD MODE v6 (Fail-Safe Install)"
+  god-mode-v8:
+    name: "GOD MODE v8 (Zero-Error Install)"
     runs-on: ubuntu-latest
     
     steps:
@@ -42,145 +42,144 @@ jobs:
           echo "✅ Init Complete."
 
       # ===========================================================================
-      # 1) FAIL-SAFE INSTALLATION (No External Apt Repos)
+      # 1) SPLIT INSTALLATION (CRITICAL FIX)
       # ===========================================================================
-      - name: "📦 Install Tools (Binary Method)"
+      - name: "📦 Phase 1: Base System Tools"
         run: |
-          # 1. Update & Install Standard Packages (Ubuntu Mirror - Highly Stable)
           sudo apt-get update -qq
-          sudo apt-get install -y -qq \
+          # 충돌 방지를 위해 --no-install-recommends 사용
+          sudo apt-get install -y -qq --no-install-recommends \
             curl wget git unzip tar gzip \
-            docker.io \
+            sysstat pv pigz tree zstd lz4 p7zip-full
+
+      - name: "📦 Phase 2: Database & Dev Tools"
+        run: |
+          # Java/Maven/Python/DB Client 분리 설치
+          sudo apt-get install -y -qq --no-install-recommends \
             postgresql-client \
-            genisoimage xorriso sysstat pv pigz tree \
+            python3-pip openjdk-17-jdk maven
+
+      - name: "📦 Phase 3: Security Tools (ClamAV/Lynis)"
+        run: |
+          # 보안 툴 별도 설치 (가장 충돌이 잦음)
+          sudo apt-get install -y -qq --no-install-recommends \
             clamav clamav-daemon chkrootkit rkhunter lynis \
-            zstd lz4 p7zip-full python3-pip openjdk-17-jdk maven
+            genisoimage xorriso
 
-          echo "✅ Standard Packages Installed."
-
-          # 2. Helm Binary Install (Bypass flaky repositories)
-          echo "⬇️ Installing Helm via Binary..."
+      # ===========================================================================
+      # 2) BINARY DIRECT INSTALL (FAIL-SAFE)
+      # ===========================================================================
+      - name: "⬇️ Install Standalone Binaries (No Apt)"
+        run: |
+          # 1. Helm (Binary)
+          echo "Installing Helm..."
           curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
           chmod 700 get_helm.sh
-          ./get_helm.sh
-          echo "✅ Helm Installed: $(helm version --short)"
-
-          # 3. Trivy Binary Install (Bypass flaky repositories)
-          echo "⬇️ Installing Trivy via Binary..."
-          TRIVY_VERSION=$(curl -s "https://api.github.com/repos/aquasecurity/trivy/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
-          wget --no-verbose "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
-          sudo dpkg -i trivy_${TRIVY_VERSION}_Linux-64bit.deb
-          echo "✅ Trivy Installed."
+          ./get_helm.sh --no-sudo
+          
+          # 2. Trivy (Binary)
+          echo "Installing Trivy..."
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          
+          echo "✅ All Binaries Installed Successfully."
 
       # ===========================================================================
-      # 2) START POLYGLOT SERVICES
+      # 3) START POLYGLOT SERVICES
       # ===========================================================================
       - name: "🐘🍃🔺 Start Polyglot Cluster"
         run: |
-          # Postgres
           docker run -d --name pg_main -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16-alpine
-          # Redis
           docker run -d --name redis_cache -p 6379:6379 redis:alpine
-          # MongoDB
           docker run -d --name mongo_log -p 27017:27017 mongo:latest
-
-          echo "Waiting for services..."
+          
+          echo "Waiting for DB..."
           sleep 10
-          docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+          docker ps
 
       # ===========================================================================
-      # 3) MASSIVE DATA INJECTION (Docker Exec Method)
+      # 4) WEALTH INJECTION (100M KRW Deposit)
       # ===========================================================================
-      - name: "💾 Inject 9999% Massive Data"
+      - name: "💰 Inject 100M KRW to All Customers"
         run: |
-          # A. PostgreSQL Injection
-          echo "Defining Schema..."
+          # Schema
           cat <<EOF > ${SQL_DIR}/schema.sql
           CREATE TABLE customers (id SERIAL PRIMARY KEY, name TEXT, region TEXT, score INT);
-          CREATE TABLE transactions (id SERIAL PRIMARY KEY, cust_id INT, amount BIGINT, tx_time TIMESTAMP DEFAULT NOW());
-          CREATE INDEX idx_region ON customers(region);
+          CREATE TABLE accounts (id SERIAL PRIMARY KEY, cust_id INT REFERENCES customers(id), acc_num TEXT, balance BIGINT);
+          CREATE INDEX idx_acc_bal ON accounts(balance);
           EOF
           
-          # Use Pipe to avoid file mount issues
           cat ${SQL_DIR}/schema.sql | docker exec -i pg_main psql -U postgres
-          
+
           ROWS=${{ github.event.inputs.active_customer_count }}
-          echo "Injecting $ROWS Customers..."
+          echo "👥 Generating $ROWS Customers..."
+          
+          # Bulk Insert Customers
           docker exec -i pg_main psql -U postgres -c "
             INSERT INTO customers (name, region, score)
-            SELECT 'User-'||g, (ARRAY['Seoul','Busan','Jeju','NY','London'])[floor(random()*5)+1], (random()*1000)::int
+            SELECT 'User-'||g, (ARRAY['Seoul','Busan','Jeju','NY'])[floor(random()*4)+1], (random()*1000)::int
             FROM generate_series(1, $ROWS) AS g;
           "
 
-          # B. Redis Injection (No redis-tools needed on host)
-          echo "Flooding Redis..."
-          # Docker 내부의 redis-cli 사용
-          docker exec -i redis_cache redis-cli SET "status:maintenance" "false"
-          for i in {1..100}; do echo "SET user:$i 'Active'"; done | docker exec -i redis_cache redis-cli --pipe
-
-          # C. MongoDB Injection (No mongodb-clients needed on host)
-          echo "Injecting MongoDB..."
-          # Docker 내부의 mongosh 사용
-          docker exec -i mongo_log mongosh eval "db.logs.insertMany([{'svc':'auth','status':'ok'}, {'svc':'pay','status':'fail'}])"
+          echo "💰 Depositing 100,000,000 KRW..."
+          # Bulk Insert Accounts with 100M Balance
+          docker exec -i pg_main psql -U postgres -c "
+            INSERT INTO accounts (cust_id, acc_num, balance)
+            SELECT id, 'KR-BANK-'||lpad(id::text, 8, '0'), 100000000
+            FROM customers;
+          "
+          
+          # Calculate Total Wealth
+          TOTAL=$(docker exec -i pg_main psql -U postgres -t -c "SELECT to_char(SUM(balance), 'FM999,999,999,999,999') FROM accounts;")
+          echo "TOTAL_WEALTH=$TOTAL" >> $GITHUB_ENV
+          echo "✅ Total National Wealth: $TOTAL KRW"
 
       # ===========================================================================
-      # 4) HYPER-SCALE FILESYSTEM GENERATION
+      # 5) HYPER-SCALE FILESYSTEM GENERATION
       # ===========================================================================
-      - name: "📂 Generate Hyper-Scale Filesystem"
+      - name: "📂 Generate Massive Files"
         run: |
           SCALE=${{ github.event.inputs.massive_scale_factor }}
-          ROOT="${MASSIVE_DIR}/enterprise_root"
-          mkdir -p ${ROOT}/{etc,var,opt,usr,home,tmp/dumps}
+          ROOT="${MASSIVE_DIR}/fs_root"
+          mkdir -p ${ROOT}/{etc,var/log,opt,usr}
           
           echo "🚀 Generating Files (Scale: $SCALE)..."
           
-          # 1. Binary Dumps (dd)
-          for i in {1..5}; do
-             dd if=/dev/urandom of=${ROOT}/tmp/dumps/dump_$i.bin bs=1M count=1 status=none
+          # Binary Dumps
+          for i in {1..3}; do
+             dd if=/dev/urandom of=${ROOT}/core_$i.bin bs=1M count=1 status=none
           done
           
-          # 2. Log Simulation
-          for region in "KR" "US"; do
-             mkdir -p "${ROOT}/var/log/fin/${region}"
-             for i in $(seq 1 $(($SCALE * 50))); do
-                echo "Log $i" > "${ROOT}/var/log/fin/${region}/tx_$i.log"
-             done
+          # Deep Log Rotation
+          for i in $(seq 1 $(($SCALE * 50))); do
+             echo "[DEPOSIT] 100M KRW Success" > "${ROOT}/var/log/tx_$i.log"
           done
           
-          # 3. Configs
-          for i in {1..500}; do echo "id=$i" > "${ROOT}/etc/srv_$i.conf"; done
-          
-          COUNT=$(find ${MASSIVE_DIR} -type f | wc -l)
-          echo "✅ Generated $COUNT files."
+          FILE_CNT=$(find ${MASSIVE_DIR} -type f | wc -l)
+          echo "✅ Generated $FILE_CNT files."
           tree ${MASSIVE_DIR} -L 2 > ${REPORT_DIR}/fs_tree.txt
 
       # ===========================================================================
-      # 5) SECURITY SCANS
+      # 6) SECURITY SCANS
       # ===========================================================================
       - name: "🛡️ Run Security Scans"
         run: |
-          # 1. Trivy (Installed via Binary)
           echo "Running Trivy..."
           trivy fs --scanners vuln,secret,config ${MASSIVE_DIR} > ${LOG_DIR}/trivy.txt || true
           
-          # 2. ClamAV
           echo "Running ClamAV..."
-          # Update lock fix
           sudo systemctl stop clamav-freshclam || true
-          sudo freshclam || echo "Freshclam skipped"
+          sudo freshclam || echo "Skipped"
           clamscan -r -i ${MASSIVE_DIR} > ${LOG_DIR}/virus.log || true
           
-          # 3. Lynis
           echo "Running Lynis..."
           sudo lynis audit system --quick > ${LOG_DIR}/lynis.txt || true
 
       # ===========================================================================
-      # 6) AI FRAUD ENGINE
+      # 7) AI FRAUD ENGINE
       # ===========================================================================
-      - name: "🤖 AI Model Training"
+      - name: "🤖 AI Fraud Model"
         run: |
           pip3 install joblib scikit-learn
-          
           cat <<EOF > train.py
           import joblib
           import numpy as np
@@ -189,31 +188,40 @@ jobs:
           clf = IsolationForest().fit(X)
           joblib.dump(clf, '${MODEL_DIR}/fraud.pkl')
           EOF
-          
           python3 train.py
-          echo "AI Model Exported."
 
       # ===========================================================================
-      # 7) HTML DASHBOARD
+      # 8) HTML DASHBOARD
       # ===========================================================================
       - name: "📊 Generate Dashboard"
         run: |
           cat <<EOF > ${REPORT_DIR}/index.html
-          <!DOCTYPE html><html><body>
-          <h1>Korea Finance v6 Dashboard</h1>
-          <p>Date: $(date)</p>
-          <p>DB Rows: ${{ github.event.inputs.active_customer_count }}</p>
-          <p>Files: $(find ${MASSIVE_DIR} -type f | wc -l)</p>
-          <p>Security: Scanned</p>
+          <!DOCTYPE html><html><head><style>
+          body{font-family:sans-serif;background:#eee;padding:20px;}
+          .card{background:#fff;padding:20px;margin:10px 0;border-radius:5px;}
+          .money{color:#27ae60;font-weight:bold;font-size:1.5em;}
+          </style></head><body>
+          <h1>🇰🇷 ALL-ECHO v8 Dashboard</h1>
+          <div class="card">
+            <h2>💰 National Wealth Status</h2>
+            <p>User Count: ${{ github.event.inputs.active_customer_count }}</p>
+            <p>Deposit/User: 100,000,000 KRW</p>
+            <p>Total Assets: <span class="money">${{ env.TOTAL_WEALTH }} KRW</span></p>
+          </div>
+          <div class="card">
+             <h2>🛡️ System Health</h2>
+             <p>Files: $(find ${MASSIVE_DIR} -type f | wc -l)</p>
+             <p>Security: Tri-Shield Active</p>
+          </div>
           </body></html>
           EOF
 
       # ===========================================================================
-      # 8) ISO PACKAGING
+      # 9) ISO PACKAGING
       # ===========================================================================
       - name: "📀 Package ISO"
         run: |
-          # DB Dumps
+          # DB Dump
           docker exec pg_main pg_dump -U postgres > ${SQL_DIR}/pg.sql
           
           # Layout
@@ -223,36 +231,35 @@ jobs:
           cp ${MODEL_DIR}/* ${ISO_DIR}/04_AI/
           cp ${LOG_DIR}/* ${ISO_DIR}/03_Sec/
           
-          # Compress Massive Data
+          # Compress Data
           tar -cf - ${MASSIVE_DIR} | zstd -T0 > ${ISO_DIR}/02_FS/data.tar.zst
           
           # ISO
           mkdir -p dump
-          xorriso -as mkisofs -o dump/Korea-God-v6.iso -J -R -V 'KOR-V6' ${ISO_DIR}
+          xorriso -as mkisofs -o dump/Korea-God-v8-ZeroError.iso -J -R -V 'KOR-V8' ${ISO_DIR}
           
           ls -lh dump/*.iso
 
       # ===========================================================================
-      # 9) RELEASE
+      # 10) RELEASE
       # ===========================================================================
-      - name: "🚀 Release v6"
+      - name: "🚀 Release v8"
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v6-god-mode-failsafe"
-          name: "🇰🇷 ALL-ECHO GOD MODE v6 (Fail-Safe)"
+          tag: "v8-god-mode-zero-error"
+          name: "🇰🇷 ALL-ECHO GOD MODE v8 (Zero Error)"
           body: |
-            ## 🇰🇷 GOD MODE v6 (Zero-Error Edition)
+            ## 🇰🇷 GOD MODE v8 (Zero-Error Edition)
             
-            **Fixes Applied:**
-            - ✅ **Install:** Switched from flaky APT repos to **Direct Binary Downloads** for Helm/Trivy.
-            - ✅ **Mongo/Redis:** Used **Docker Exec** instead of installing missing host clients.
-            - ✅ **DB:** Polyglot (PG/Redis/Mongo) Cluster Active.
+            **Critical Fixes:**
+            - ✅ **Split Install:** Separated Apt steps to avoid `pkgProblemResolver` errors.
+            - ✅ **Direct Binary:** Helm/Trivy installed via Curl (No Repo Dependency).
+            - ✅ **Zero Conflict:** `--no-install-recommends` applied globally.
             
-            **Features:**
-            - 9999% Massive Data Injection.
-            - Tri-Shield Security Scan.
-            - HTML Dashboard.
+            **Financial Features:**
+            - 💰 **100 Million KRW** Deposit per User.
+            - 📊 **Total Wealth Calculation** in Dashboard.
             
             *Automated by GitHub Actions.*
           artifacts: "dump/*.iso"
