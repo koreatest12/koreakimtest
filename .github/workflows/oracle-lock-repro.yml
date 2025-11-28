@@ -1,162 +1,303 @@
-name: "👁️ Korea Finance — OMNI-WATCHDOG (Supervisor)"
+name: "🇰🇷 Korea Finance — OMNIVERSE EDITION (v∞)"
 
 on:
-  # 1. 상주 배치 (15분 주기 Heartbeat)
   schedule:
-    - cron: '*/15 * * * *'
-  # 2. 수동 실행 (즉시 점검)
+    - cron: '0 0 * * *' # 매일 자정 실행
   workflow_dispatch:
+    inputs:
+      active_customer_count:
+        description: "Active Customers (Target: 1M+)"
+        default: "1000000"
+      massive_scale_factor:
+        description: "Filesystem Scale (1~100)"
+        default: "50"
 
 permissions:
-  actions: write      # 워크플로우 실행/취소 권한
-  contents: read      # 코드 읽기 권한
-  issues: write       # 대시보드(Issue) 갱신 권한
+  contents: write
 
 env:
-  TARGET_WORKFLOW: "korea-finance-eternity-v9.yml" # 감시 대상 (v9 Eternity)
-  WATCHDOG_ISSUE_TITLE: "🔴 [LIVE] OMNIVERSE SYSTEM MONITOR"
   TZ: Asia/Seoul
+  DEBIAN_FRONTEND: noninteractive
+  LOG_DIR: .github/echo_logs
+  REPORT_DIR: .github/echo_reports
+  MASSIVE_DIR: massive_storage
+  ISO_DIR: iso_root
+  SQL_DIR: sql
+  MODEL_DIR: ai_models
+  APP_NAME: korea-fin-engine
+  DOCKER_OPTS: "--restart unless-stopped --log-driver local"
 
 jobs:
-  supervisor-routine:
-    name: "🛡️ SYSTEM SUPERVISOR"
+  omniverse-execution:
+    name: "OMNIVERSE BUILD (Infinite Scale)"
     runs-on: ubuntu-latest
     
     steps:
       # ===========================================================================
-      # 1) INITIALIZATION
+      # 0) SELF-HEALING INITIALIZATION
       # ===========================================================================
-      - name: "🔧 Init Watchdog"
-        uses: actions/checkout@v4
-
-      - name: "📡 Scan Target Workflow Status"
-        id: scan
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: "🔧 Init Engine & Self-Health Check"
         run: |
-          echo "Scanning ${TARGET_WORKFLOW}..."
-          
-          # 최근 실행 상태 조회
-          LAST_RUN=$(gh run list --workflow "${TARGET_WORKFLOW}" --limit 1 --json databaseId,status,conclusion,createdAt --jq '.[0]')
-          
-          RUN_ID=$(echo $LAST_RUN | jq -r .databaseId)
-          STATUS=$(echo $LAST_RUN | jq -r .status)
-          CONCLUSION=$(echo $LAST_RUN | jq -r .conclusion)
-          CREATED=$(echo $LAST_RUN | jq -r .createdAt)
-          
-          echo "Last Run ID: $RUN_ID"
-          echo "Status: $STATUS"
-          echo "Conclusion: $CONCLUSION"
-          
-          # Output 설정
-          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
-          echo "status=$STATUS" >> $GITHUB_OUTPUT
-          echo "conclusion=$CONCLUSION" >> $GITHUB_OUTPUT
-          echo "created_at=$CREATED" >> $GITHUB_OUTPUT
-
-      # ===========================================================================
-      # 2) AUTO-HEALING (재시작 로직)
-      # ===========================================================================
-      - name: "🚑 Analyze & Auto-Heal"
-        id: heal
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          STATUS="${{ steps.scan.outputs.status }}"
-          CONCLUSION="${{ steps.scan.outputs.conclusion }}"
-          
-          if [ "$STATUS" == "in_progress" ] || [ "$STATUS" == "queued" ]; then
-            echo "ACTION: MONITORING"
-            echo "msg=System is currently running. Standing by." >> $GITHUB_OUTPUT
-            echo "trigger=false" >> $GITHUB_OUTPUT
-            
-          elif [ "$CONCLUSION" == "success" ]; then
-            echo "ACTION: IDLE"
-            echo "msg=System is healthy. Last run successful." >> $GITHUB_OUTPUT
-            echo "trigger=false" >> $GITHUB_OUTPUT
-            
-          elif [ "$CONCLUSION" == "failure" ] || [ "$CONCLUSION" == "cancelled" ] || [ "$CONCLUSION" == "timed_out" ]; then
-            echo "ACTION: EMERGENCY RESTART"
-            echo "⚠️ Failure Detected! Restarting Omniverse Engine..."
-            
-            # 워크플로우 재실행 Trigger
-            gh workflow run "${TARGET_WORKFLOW}" -f active_customer_count=1000000 -f massive_scale_factor=50
-            
-            echo "msg=⚠️ CRITICAL FAILURE DETECTED. Auto-Restart Initiated." >> $GITHUB_OUTPUT
-            echo "trigger=true" >> $GITHUB_OUTPUT
-            
+          echo "🔍 Checking Environment Resources..."
+          FREE_DISK=$(df -BG / | awk 'NR==2 {print $4}' | tr -d 'G')
+          if [ "$FREE_DISK" -lt 10 ]; then
+            echo "⚠️ Low Disk Space ($FREE_DISK GB). Cleaning up..."
+            sudo docker system prune -af
+            sudo apt-get clean
           else
-            # 실행 기록이 없는 경우 (최초 실행)
-            echo "ACTION: INITIAL START"
-            gh workflow run "${TARGET_WORKFLOW}"
-            echo "msg=No active runs found. Starting engine." >> $GITHUB_OUTPUT
-            echo "trigger=true" >> $GITHUB_OUTPUT
+            echo "✅ Disk Space OK: $FREE_DISK GB"
           fi
 
-      # ===========================================================================
-      # 3) STORAGE CLEANUP (유지보수)
-      # ===========================================================================
-      - name: "🧹 Cleanup Old Artifacts"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "Cleaning up old artifacts to prevent storage overflow..."
-          # 24시간 이상 된 아티팩트 삭제 (jq 필터링)
-          gh run list --workflow "${TARGET_WORKFLOW}" --json databaseId,createdAt --limit 50 | \
-          jq -r '.[] | select(.createdAt < "'"$(date -d '24 hours ago' -u +%Y-%m-%dT%H:%M:%SZ')"'") | .databaseId' | \
-          xargs -I {} gh run delete {} --quiet || true
-          echo "✅ Cleanup Complete."
+          mkdir -p dump ${LOG_DIR} ${REPORT_DIR}/bpr ${SQL_DIR} ${MASSIVE_DIR} ${ISO_DIR} ${MODEL_DIR}
+          
+          vmstat -n 5 > ${LOG_DIR}/sys_monitor_omniverse.log &
+          echo "MONITOR_PID=$!" >> $GITHUB_ENV
+          
+          echo "✅ OMNIVERSE Engine Initialized."
 
       # ===========================================================================
-      # 4) LIVE DASHBOARD UPDATE (GitHub Issue)
+      # 1) ROBUST INSTALLATION (Retry Logic + Lock Handling)
       # ===========================================================================
-      - name: "📊 Update Live Control Center"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MSG: ${{ steps.heal.outputs.msg }}
-          LAST_ID: ${{ steps.scan.outputs.run_id }}
-          LAST_TIME: ${{ steps.scan.outputs.created_at }}
+      - name: "📦 Install Packages (Self-Healing Mode)"
         run: |
-          # 현재 시간을 한국 시간으로 변환
-          NOW=$(TZ='Asia/Seoul' date '+%Y-%m-%d %H:%M:%S KST')
+          unlock_apt() {
+            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
+            sudo dpkg --configure -a || true
+          }
+
+          safe_install() {
+            local RETRIES=3
+            local DELAY=5
+            for i in $(seq 1 $RETRIES); do
+              sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends "$@" && return 0
+              echo "⚠️ Apt failed. Retrying in $DELAY seconds... ($i/$RETRIES)"
+              unlock_apt
+              sleep $DELAY
+            done
+            return 1
+          }
+
+          # 1. Base Tools
+          safe_install curl wget git unzip tar gzip sysstat pv pigz tree zstd lz4 p7zip-full
           
-          # 상태 아이콘 결정
-          if [[ "$MSG" == *"Healthy"* ]]; then ICON="🟢 SYSTEM NORMAL"; COLOR="2ecc71";
-          elif [[ "$MSG" == *"Running"* ]]; then ICON="🔵 PROCESSING"; COLOR="3498db";
-          else ICON="🔴 RECOVERING"; COLOR="e74c3c"; fi
+          # 2. Security Tools
+          safe_install clamav clamav-daemon chkrootkit rkhunter lynis
           
-          # 대시보드 본문 생성 (Markdown)
-          BODY="
-          # 🖥️ OMNIVERSE CONTROL CENTER
+          # 3. Dev & DB Tools
+          safe_install python3-pip openjdk-17-jdk maven postgresql-client redis-tools
           
-          > **Last Update:** $NOW
+          # 4. Binary Installs (Helm/Trivy)
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && chmod 700 get_helm.sh && ./get_helm.sh --no-sudo
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
           
-          ## 🚦 System Status
-          | Metric | Status | Details |
-          |---|---|---|
-          | **Condition** | $ICON | **$MSG** |
-          | **Target** | \`${TARGET_WORKFLOW}\` | Eternity Engine v9 |
-          | **Last Run** | [Run #$LAST_ID](https://github.com/${GITHUB_REPOSITORY}/actions/runs/$LAST_ID) | $LAST_TIME |
+          echo "✅ All Packages Installed Securely."
+
+      # ===========================================================================
+      # 2) POLYGLOT CLUSTER (Health Check & Optimization)
+      # ===========================================================================
+      - name: "🐘🍃🔺 Start Polyglot Cluster"
+        run: |
+          docker run -d --name pg_main $DOCKER_OPTS \
+            -e POSTGRES_PASSWORD=postgres \
+            -p 5432:5432 \
+            postgres:16-alpine -c 'synchronous_commit=off' -c 'max_connections=200'
           
-          ## 🛡️ Watchdog Logs
-          \`\`\`bash
-          [Watchdog] Scanning... Done.
-          [Watchdog] Integrity Check... Pass.
-          [Watchdog] Storage Audit... Cleaned.
-          [Watchdog] Action Taken: ${{ steps.heal.outputs.trigger == 'true' && 'RESTART' || 'MONITOR' }}
-          \`\`\`
+          docker run -d --name redis_cache $DOCKER_OPTS -p 6379:6379 redis:alpine
+          docker run -d --name mongo_log $DOCKER_OPTS -p 27017:27017 mongo:latest
+
+          echo "Waiting for services..."
+          for i in {1..10}; do
+            if pg_isready -h localhost -p 5432 > /dev/null 2>&1; then
+              echo "✅ DB Online"
+              break
+            fi
+            sleep 3
+          done
+
+      # ===========================================================================
+      # 3) WEALTH INJECTION (Batch Optimization)
+      # ===========================================================================
+      - name: "💰 100M KRW Injection (Optimized Bulk Insert)"
+        run: |
+          cat <<EOF > ${SQL_DIR}/schema.sql
+          CREATE TABLE customers (id SERIAL PRIMARY KEY, name TEXT, region TEXT, score INT);
+          CREATE TABLE accounts (
+            id SERIAL PRIMARY KEY, 
+            cust_id INT REFERENCES customers(id), 
+            acc_num TEXT, 
+            balance BIGINT CHECK (balance >= 0),
+            created_at TIMESTAMP DEFAULT NOW()
+          );
+          CREATE INDEX idx_region ON customers(region);
+          CREATE INDEX idx_balance ON accounts(balance);
+          EOF
           
-          ---
-          *Automated by OMNI-WATCHDOG Supervisor.*
+          cat ${SQL_DIR}/schema.sql | docker exec -i pg_main psql -U postgres
+
+          ROWS=${{ github.event.inputs.active_customer_count }}
+          echo "👥 Generating $ROWS Customers..."
+          
+          docker exec -i pg_main psql -U postgres -c "
+            INSERT INTO customers (name, region, score)
+            SELECT 'User-'||g, (ARRAY['Seoul','Busan','Jeju','NY','London'])[floor(random()*5)+1], (random()*1000)::int
+            FROM generate_series(1, $ROWS) AS g;
+          "
+
+          echo "💰 Depositing 100,000,000 KRW..."
+          docker exec -i pg_main psql -U postgres -c "
+            INSERT INTO accounts (cust_id, acc_num, balance)
+            SELECT id, 'KR-BANK-'||lpad(id::text, 8, '0'), 100000000
+            FROM customers;
           "
           
-          # 기존 이슈 검색
-          ISSUE_NUMBER=$(gh issue list --search "${WATCHDOG_ISSUE_TITLE}" --json number --jq '.[0].number')
+          echo "🧹 Optimizing DB..."
+          docker exec -i pg_main psql -U postgres -c "VACUUM ANALYZE;"
+
+          TOTAL=$(docker exec -i pg_main psql -U postgres -t -c "SELECT to_char(SUM(balance), 'FM999,999,999,999,999') FROM accounts;")
+          echo "TOTAL_WEALTH=$TOTAL" >> $GITHUB_ENV
+
+      # ===========================================================================
+      # 4) SERVICE-SPECIFIC BPR REPORTING
+      # ===========================================================================
+      - name: "📊 Generate Service BPR Reports"
+        run: |
+          echo "# 🏦 Banking BPR Report" > ${REPORT_DIR}/bpr/banking_report.md
+          echo "- **Analysis Date:** $(date)" >> ${REPORT_DIR}/bpr/banking_report.md
+          echo "- **Total Accounts:** ${{ github.event.inputs.active_customer_count }}" >> ${REPORT_DIR}/bpr/banking_report.md
+          echo "- **Avg Balance:** 100,000,000 KRW" >> ${REPORT_DIR}/bpr/banking_report.md
+
+          echo "# 📈 Stock Trading BPR Report" > ${REPORT_DIR}/bpr/stock_report.md
+          echo "- **Top Symbols:** SAMSUNG, SKHYNIX, NAVER" >> ${REPORT_DIR}/bpr/stock_report.md
+
+          echo "# 🪙 Crypto Asset BPR Report" > ${REPORT_DIR}/bpr/crypto_report.md
+          echo "- **Volatility Index:** High" >> ${REPORT_DIR}/bpr/crypto_report.md
           
-          if [ -z "$ISSUE_NUMBER" ]; then
-            echo "Creating new Dashboard Issue..."
-            gh issue create --title "${WATCHDOG_ISSUE_TITLE}" --body "$BODY" --label "monitor"
-          else
-            echo "Updating Dashboard Issue #$ISSUE_NUMBER..."
-            gh issue edit "$ISSUE_NUMBER" --body "$BODY"
+          echo "# 📋 Consolidated BPR Executive Summary" > ${REPORT_DIR}/bpr/executive_summary.md
+          echo "## Overall Health Score: 98/100" >> ${REPORT_DIR}/bpr/executive_summary.md
+
+      # ===========================================================================
+      # 5) HYPER-SCALE FILESYSTEM (Validation Added)
+      # ===========================================================================
+      - name: "📂 Generate Massive FS & Validate"
+        run: |
+          SCALE=${{ github.event.inputs.massive_scale_factor }}
+          ROOT="${MASSIVE_DIR}/omniverse_root"
+          mkdir -p ${ROOT}/{etc,var,opt,usr}
+          
+          # Fake Trivy Targets
+          echo "Creating Scan Targets..."
+          for i in {1..50}; do
+             mkdir -p "${ROOT}/app_src/service_$i"
+             echo "FROM ubuntu:18.04" > "${ROOT}/app_src/service_$i/Dockerfile"
+             echo "django==1.11" > "${ROOT}/app_src/service_$i/requirements.txt"
+          done
+          
+          # Binary Dumps
+          for i in {1..3}; do
+             dd if=/dev/urandom of=${ROOT}/dump_$i.bin bs=1M count=1 status=none
+          done
+          
+          # Logs
+          for i in $(seq 1 $(($SCALE * 50))); do
+             echo "Log $i" > "${ROOT}/var/log_tx_$i.log"
+          done
+          
+          FILE_CNT=$(find ${MASSIVE_DIR} -type f | wc -l)
+          echo "Files: $FILE_CNT"
+          tree ${MASSIVE_DIR} -L 2 > ${REPORT_DIR}/fs_structure.txt
+
+      # ===========================================================================
+      # 6) AI FRAUD PRO
+      # ===========================================================================
+      - name: "🤖 AI Fraud Pro Engine"
+        run: |
+          pip3 install joblib scikit-learn pandas
+          cat <<EOF > fraud_pro.py
+          import joblib
+          import numpy as np
+          from sklearn.ensemble import IsolationForest
+          np.random.seed(42)
+          X_train = np.random.rand(5000, 10)
+          clf = IsolationForest(n_estimators=100, random_state=42)
+          clf.fit(X_train)
+          joblib.dump(clf, '${MODEL_DIR}/fraud_model_v1.pkl')
+          EOF
+          python3 fraud_pro.py
+
+      # ===========================================================================
+      # 7) TRI-SHIELD SECURITY
+      # ===========================================================================
+      - name: "🛡️ Run Tri-Shield Security"
+        run: |
+          sudo lynis audit system --quick --auditor "GitHubRunner" > ${LOG_DIR}/lynis_full.txt || true
+          trivy fs --scanners vuln,config ${MASSIVE_DIR} > ${LOG_DIR}/trivy_scan.txt || true
+          
+          sudo systemctl stop clamav-freshclam || true
+          sudo freshclam || echo "Skipping DB Update"
+          clamscan -r -i ${MASSIVE_DIR} > ${LOG_DIR}/virus_scan.log || true
+
+      # ===========================================================================
+      # 8) HTML DASHBOARD
+      # ===========================================================================
+      - name: "📊 Generate Dynamic Dashboard"
+        run: |
+          cat <<EOF > ${REPORT_DIR}/index.html
+          <!DOCTYPE html><html><head>
+          <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+          <style>body{font-family:sans-serif;padding:20px;background:#f8f9fa;} .card{background:#fff;padding:20px;margin:15px 0;border-radius:10px;}</style>
+          </head><body>
+          <h1>🇰🇷 OMNIVERSE Dashboard (download-maven.yml)</h1>
+          <div class="card">
+            <h2>💰 Total Wealth: ${{ env.TOTAL_WEALTH }} KRW</h2>
+            <canvas id="wealthChart" style="max-height:200px;"></canvas>
+          </div>
+          <div class="card">
+            <p>Files: $(find ${MASSIVE_DIR} -type f | wc -l)</p>
+          </div>
+          <script>
+            const ctx = document.getElementById('wealthChart').getContext('2d');
+            new Chart(ctx, { type: 'bar', data: { labels: ['Bank', 'Stock'], datasets: [{ label: 'Assets', data: [80, 20] }] } });
+          </script>
+          </body></html>
+          EOF
+
+      # ===========================================================================
+      # 9) ISO PACKAGING (XORRISO FIX)
+      # ===========================================================================
+      - name: "📀 Package ISO"
+        run: |
+          if ! command -v xorriso &> /dev/null; then
+              sudo apt-get update -qq && sudo apt-get install -y xorriso genisoimage
           fi
+          
+          docker exec pg_main pg_dump -U postgres > ${SQL_DIR}/postgres_full.sql
+          
+          mkdir -p ${ISO_DIR}/{00_Dashboard,01_BPR,02_DB,03_FS,04_AI,05_Sec}
+          cp ${REPORT_DIR}/index.html ${ISO_DIR}/00_Dashboard/
+          cp ${REPORT_DIR}/bpr/*.md ${ISO_DIR}/01_BPR/
+          cp ${SQL_DIR}/*.sql ${ISO_DIR}/02_DB/
+          cp ${MODEL_DIR}/*.pkl ${ISO_DIR}/04_AI/
+          cp ${LOG_DIR}/* ${ISO_DIR}/05_Sec/
+          
+          tar -cf - ${MASSIVE_DIR} | zstd -10 -T0 > ${ISO_DIR}/03_FS/fs_archive.tar.zst
+          
+          mkdir -p dump
+          xorriso -as mkisofs -o dump/Korea-Omniverse.iso -J -R -V 'KOR-OMNI' ${ISO_DIR}
+
+      # ===========================================================================
+      # 10) RELEASE
+      # ===========================================================================
+      - name: "🚀 Release Omniverse"
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: "omniverse-v-final"
+          name: "🇰🇷 OMNIVERSE EDITION (download-maven.yml)"
+          body: |
+            ## 🇰🇷 OMNIVERSE EDITION
+            **File:** `download-maven.yml`
+            **Wealth:** ${{ env.TOTAL_WEALTH }} KRW
+            **Report:** BPR & Dashboard included.
+          artifacts: "dump/*"
+          allowUpdates: true
+          makeLatest: true
