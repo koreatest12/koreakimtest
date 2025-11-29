@@ -168,10 +168,6 @@ jobs:
       #   - SCALE 값만큼 Java 내부에서 Loop 실행
       #   - Syntax Error 방지를 위해 heredoc 대신 printf 사용 유지
       #################################################################
-      
-
-[Image of JDBC architecture]
-
       - name: "[echo] JDBC Smoke Container (SCALE Loop Test)"
         shell: bash
         continue-on-error: true
