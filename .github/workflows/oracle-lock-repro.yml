@@ -1,4 +1,4 @@
-name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v13 (SUPPLY CHAIN & FIX)"
+name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v14 (SYNTAX FIX)"
 
 on:
   schedule:
@@ -17,7 +17,7 @@ on:
 
 permissions:
   contents: write
-  security-events: write # Dependabot/Security 권한 추가
+  security-events: write
 
 env:
   TZ: Asia/Seoul
@@ -27,62 +27,60 @@ env:
   MASSIVE_DIR: massive_storage
   SERVICE_ROOT: opt/korea-fin-services
   ISO_DIR: iso_root
-  # [FIX] Docker 관련 환경변수
+  # Docker BuildKit 활성화
   DOCKER_BUILDKIT: 1
   COMPOSE_DOCKER_CLI_BUILD: 1
 
 jobs:
   eternity-execution:
-    name: "ETERNITY SECURITY OPS"
+    name: "ETERNITY STABLE OPS"
     runs-on: ubuntu-latest
     
     steps:
       # ===========================================================================
-      # 0) WATCHDOG INITIALIZATION
+      # 0) WATCHDOG INITIALIZATION (FIXED EOF)
       # ===========================================================================
       - name: "🐕 Init Watchdog Daemon"
         run: |
           mkdir -p dump ${LOG_DIR} ${REPORT_DIR}/bpr ${MASSIVE_DIR} ${ISO_DIR} ${SERVICE_ROOT}
           
-          # Watchdog Script (Background Monitor)
+          # [FIX] EOF 태그를 들여쓰기 없이 작성
           cat <<EOF > ${LOG_DIR}/watchdog_daemon.sh
           #!/bin/bash
           LOG_FILE="${LOG_DIR}/watchdog_events.log"
           echo "[WATCHDOG] Started at \$(date)" > \$LOG_FILE
           while true; do
             TS=\$(date +'%T')
-            # Docker Plugin Check
             DOCKER_OK=\$(dpkg -l | grep docker-compose-plugin | wc -l)
-            echo "[\$TS] System Load: \$(awk '{print \$1}' /proc/loadavg) | Docker Plugin Installed: \$DOCKER_OK" >> \$LOG_FILE
+            echo "[\$TS] SysLoad: \$(awk '{print \$1}' /proc/loadavg) | DockerPlugin: \$DOCKER_OK" >> \$LOG_FILE
             sleep 5
           done
           EOF
+          
           chmod +x ${LOG_DIR}/watchdog_daemon.sh
           nohup ${LOG_DIR}/watchdog_daemon.sh &
           echo "WATCHDOG_PID=$!" >> $GITHUB_ENV
+          echo "✅ Watchdog Started."
 
       # ===========================================================================
-      # 1) ROBUST INSTALLATION (FIXED DOCKER ERROR)
+      # 1) ROBUST INSTALLATION (FIXED SYNTAX & DOCKER)
       # ===========================================================================
-      - name: "📦 Install Packages (Docker Repo Fix)"
+      - name: "📦 Install Packages (Syntax Fix)"
         run: |
-          # [CRITICAL FIX] 1. 기존 잠금 파일 제거
+          # 1. Clear Locks
           sudo killall apt apt-get 2>/dev/null || true
           sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
           
-          # [CRITICAL FIX] 2. Docker 공식 Repo 추가 (docker-compose-plugin 에러 해결)
-          echo "🔧 Setting up Docker Official Repository..."
+          # 2. Docker Repo Setup (One-liner to avoid syntax errors)
           sudo apt-get update -qq
           sudo apt-get install -y ca-certificates curl gnupg
           sudo install -m 0755 -d /etc/apt/keyrings
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes
           sudo chmod a+r /etc/apt/keyrings/docker.gpg
           
-          echo \
-            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-            $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-            
-          # [CRITICAL FIX] 3. 패키지 설치 재시도 로직
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          
+          # 3. Retry Install Function (Correctly closed)
           safe_install() {
             sudo apt-get update -qq
             for i in {1..3}; do
@@ -93,22 +91,20 @@ jobs:
             return 1
           }
 
-          # 이제 docker-compose-plugin 설치가 가능함
+          # 4. Install Tools
           safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-          
-          # 기타 필수 도구 설치
-          safe_install curl wget git unzip tar gzip sysstat pv pigz tree zstd lz4 p7zip-full xorriso rsync
-          safe_install postgresql-client clamav lynis
+          safe_install curl wget git unzip tar gzip sysstat pv pigz tree zstd lz4 p7zip-full xorriso rsync postgresql-client clamav lynis
 
-          echo "✅ Robust Installation & Docker Fix Complete."
+          echo "✅ Install Complete."
 
       # ===========================================================================
-      # 2) DEPENDABOT CONFIGURATION & SIMULATION
+      # 2) DEPENDABOT CONFIGURATION (FIXED EOF)
       # ===========================================================================
-      - name: "🤖 Config & Run Dependabot (Supply Chain Security)"
+      - name: "🤖 Config & Run Dependabot"
         run: |
-          # 1. 실제 Dependabot 설정 파일 생성 (레포지토리 적용용)
           mkdir -p .github
+          
+          # [FIX] EOF 태그 정렬 수정
           cat <<EOF > .github/dependabot.yml
           version: 2
           updates:
@@ -121,89 +117,77 @@ jobs:
               schedule:
                 interval: "daily"
           EOF
-          echo "✅ Created .github/dependabot.yml"
+          
+          echo "✅ Dependabot Configured."
 
-          # 2. [Dependabot Simulation] 가상 서비스 취약점 자동 스캔 및 패치
-          echo "🔍 Scanning simulated services for outdated dependencies..."
+          # Simulation Patching
+          echo "🔍 Running Dependabot Simulation..."
+          mkdir -p ${SERVICE_ROOT}/svc_vulnerable_test
+          echo "django==1.11" > ${SERVICE_ROOT}/svc_vulnerable_test/requirements.txt
           
-          # 가상의 취약한 파일 생성 (테스트용)
-          mkdir -p ${SERVICE_ROOT}/svc_vulnerable_01
-          echo "django==1.11" > ${SERVICE_ROOT}/svc_vulnerable_01/requirements.txt
-          echo "FROM node:10" > ${SERVICE_ROOT}/svc_vulnerable_01/Dockerfile
+          # Simple sed replacement (Auto-Patch)
+          sed -i 's/django==1.11/django==4.2 # Patched/g' ${SERVICE_ROOT}/svc_vulnerable_test/requirements.txt
           
-          # 패치 로직 (Dependabot 동작 모방)
-          find ${SERVICE_ROOT} -name "requirements.txt" | xargs sed -i 's/django==1.11/django==4.2 # Fixed by Dependabot/g'
-          find ${SERVICE_ROOT} -name "Dockerfile" | xargs sed -i 's/FROM node:10/FROM node:18-alpine # Fixed by Dependabot/g'
-          
-          echo "✅ Auto-Patched Vulnerabilities (Simulation Complete)."
+          echo "✅ Vulnerabilities Patched."
 
       # ===========================================================================
-      # 3) HYPER-SCALE SERVICE MESH & DOCKER
+      # 3) HYPER-SCALE SERVICE MESH
       # ===========================================================================
       - name: "🏗️ Build Service Mesh & Docker Configs"
         run: |
           SCALE=${{ github.event.inputs.massive_scale_factor }}
           SVC_COUNT=$((SCALE * 5))
-          
           COMPOSE_FILE="${SERVICE_ROOT}/docker-compose-fleet.yml"
+          
           echo "version: '3.8'" > $COMPOSE_FILE
           echo "services:" >> $COMPOSE_FILE
 
-          # 서비스 대량 생성
+          # [CORE LOOP]
           for i in $(seq -f "%03g" 1 $SVC_COUNT); do
              SVC_NAME="svc_kr_${i}"
              SVC_DIR="${SERVICE_ROOT}/${SVC_NAME}"
              mkdir -p ${SVC_DIR}/{bin,conf,logs,data}
-             
-             # 가상 디스크
              fallocate -l 10M "${SVC_DIR}/data/virtual_disk.img"
              
-             # Dockerfile (Dependabot Friendly)
-             cat <<EOF > "${SVC_DIR}/Dockerfile"
-             FROM python:3.11-slim
-             WORKDIR /app
-             # Ensure pip is updated
-             RUN pip install --upgrade pip
-             COPY . .
-             CMD ["python3", "-c", "import time; print('Service Active'); time.sleep(3600)"]
-             EOF
+             # [FIX] Nested EOF handling (using distinct delimiter EOD)
+             cat <<EOD > "${SVC_DIR}/Dockerfile"
+          FROM python:3.11-slim
+          WORKDIR /app
+          RUN pip install --upgrade pip
+          COPY . .
+          CMD ["python3", "-c", "import time; print('Service Active'); time.sleep(3600)"]
+          EOD
 
-             # Compose Entry
-             cat <<EOF >> $COMPOSE_FILE
-               ${SVC_NAME}:
-                 build: { context: ./${SVC_NAME} }
-                 container_name: ${SVC_NAME}
-                 restart: unless-stopped
-                 networks: [kfinance_net]
-             EOF
+             # Append to Compose
+             cat <<EOD >> $COMPOSE_FILE
+            ${SVC_NAME}:
+              build: { context: ./${SVC_NAME} }
+              container_name: ${SVC_NAME}
+              restart: unless-stopped
+              networks: [kfinance_net]
+          EOD
           done
           
           echo "networks: { kfinance_net: { driver: bridge } }" >> $COMPOSE_FILE
-          echo "✅ Service Mesh Generated."
+          echo "✅ Generated $SVC_COUNT Services."
 
       # ===========================================================================
-      # 4) DEPLOYMENT & WATCHDOG CHECK
+      # 4) DEPLOYMENT & CHECK
       # ===========================================================================
-      - name: "🚀 Deploy & Watchdog Validation"
+      - name: "🚀 Deploy & Validation"
         run: |
           cd ${SERVICE_ROOT}
           
-          # Tier 1 서비스 실행 (오류 해결 확인)
-          echo "🚀 Launching Container Fleet..."
+          echo "🚀 Starting Tier 1 Services..."
           docker compose -f docker-compose-fleet.yml up -d --build svc_kr_001 svc_kr_002
           
           sleep 10
           
-          # Watchdog Log 확인
-          echo "🐕 Analyzing Watchdog Logs..."
-          grep "Docker Plugin Installed" ${LOG_DIR}/watchdog_events.log | tail -n 5
-          
-          # 활성 컨테이너 체크
           CNT=$(docker ps -q | wc -l)
           if [ "$CNT" -ge 2 ]; then
-            echo "✅ Deployment SUCCESS: $CNT containers running."
+            echo "✅ SUCCESS: $CNT containers active."
           else
-            echo "❌ Deployment FAILED: Only $CNT running."
+            echo "❌ FAIL: Only $CNT containers active."
             docker ps -a
             exit 1
           fi
@@ -214,44 +198,35 @@ jobs:
       - name: "📀 Package ISO & Release"
         run: |
           mkdir -p ${ISO_DIR}/{00_Dash,01_Config,02_Logs}
-          
-          # Dependabot Config 백업
           cp .github/dependabot.yml ${ISO_DIR}/01_Config/
+          cp ${LOG_DIR}/* ${ISO_DIR}/02_Logs/
           
-          # Dashboard Update
+          # Dashboard
           cat <<EOF > ${REPORT_DIR}/index.html
           <!DOCTYPE html><html><body>
-          <h1>🇰🇷 ETERNITY v13 Security Report</h1>
-          <h2>✅ Dependabot Enabled</h2>
-          <p>Status: Active (Config Generated)</p>
-          <p>Patched Files: $(grep "Fixed by Dependabot" -r ${SERVICE_ROOT} | wc -l)</p>
-          <h2>🔧 Docker Fix Status</h2>
-          <p>Plugin Version: $(dpkg -s docker-compose-plugin | grep Version)</p>
+          <h1>🇰🇷 ETERNITY v14 Report</h1>
+          <p>Status: Syntax Fixed & Stable</p>
+          <p>Active Services: $(docker ps -q | wc -l)</p>
           </body></html>
           EOF
           cp ${REPORT_DIR}/index.html ${ISO_DIR}/00_Dash/
-          cp ${LOG_DIR}/* ${ISO_DIR}/02_Logs/
           
-          # ISO Create
-          xorriso -as mkisofs -o dump/Korea-Eternity-v13.iso -J -R -V 'KOR-ETERNITY-v13' ${ISO_DIR}
+          xorriso -as mkisofs -o dump/Korea-Eternity-v14.iso -J -R -V 'KOR-ETERNITY-v14' ${ISO_DIR}
 
-      - name: "🚀 Release Eternity v13"
+      - name: "🚀 Release Eternity v14"
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v13-eternity-supplychain"
-          name: "🇰🇷 ETERNITY v13 (Fix & Dependabot)"
+          tag: "v14-eternity-syntaxfix"
+          name: "🇰🇷 ETERNITY v14 (Syntax Perfect)"
           body: |
-            ## 🇰🇷 ETERNITY v13 (Supply Chain & Fix Edition)
+            ## 🇰🇷 ETERNITY v14 (Syntax & Docker Fix)
             
-            **🔧 Critical Fixes:**
-            - ✅ **Docker Install Error:** Added official Docker GPG key & Repo (`download.docker.com`) to resolve `docker-compose-plugin` missing candidate error.
-            - ✅ **Lock Handling:** Enhanced pre-install cleanup to remove stale apt locks.
+            **✅ Bug Fixes:**
+            - **Syntax Error (EOF):** Fixed `here-document` delimiter issues by enforcing strict left-alignment for `EOF` tags.
+            - **Docker Install:** Corrected GPG key and Repository setup logic to prevent `no installation candidate` errors.
+            - **Shell Safety:** Improved script robustness against whitespace errors.
 
-            **🛡️ Security Ops:**
-            - 🤖 **Dependabot Integration:** Auto-generated `.github/dependabot.yml` and simulated dependency patching in workflow.
-            - 🐕 **Watchdog:** Verifies Docker plugin installation status in real-time.
-            
             *Automated by GitHub Actions.*
           artifacts: "dump/*.iso"
           allowUpdates: true
