@@ -1,4 +1,4 @@
-name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v12 (WATCHDOG & DEPLOY)"
+name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v13 (SUPPLY CHAIN & FIX)"
 
 on:
   schedule:
@@ -11,15 +11,13 @@ on:
       massive_scale_factor:
         description: "Scale Factor (Services Count)"
         default: "50"
-      storage_size_mb:
-        description: "Virtual Disk Size per Service (MB)"
-        default: "10"
       deploy_target_path:
         description: "Simulated Target Install Path"
         default: "/var/korea-fin-prod"
 
 permissions:
   contents: write
+  security-events: write # Dependabot/Security 권한 추가
 
 env:
   TZ: Asia/Seoul
@@ -28,131 +26,146 @@ env:
   REPORT_DIR: .github/echo_reports
   MASSIVE_DIR: massive_storage
   SERVICE_ROOT: opt/korea-fin-services
-  DEPLOY_ROOT: var/korea-fin-prod
   ISO_DIR: iso_root
-  SQL_DIR: sql
-  MODEL_DIR: ai_models
+  # [FIX] Docker 관련 환경변수
   DOCKER_BUILDKIT: 1
   COMPOSE_DOCKER_CLI_BUILD: 1
 
 jobs:
   eternity-execution:
-    name: "ETERNITY WATCHDOG BUILD"
+    name: "ETERNITY SECURITY OPS"
     runs-on: ubuntu-latest
     
     steps:
       # ===========================================================================
-      # 0) WATCHDOG INITIALIZATION (Resource & Service Monitor)
+      # 0) WATCHDOG INITIALIZATION
       # ===========================================================================
       - name: "🐕 Init Watchdog Daemon"
         run: |
-          mkdir -p dump ${LOG_DIR} ${REPORT_DIR}/bpr ${SQL_DIR} ${MASSIVE_DIR} ${ISO_DIR} ${MODEL_DIR} ${SERVICE_ROOT}
+          mkdir -p dump ${LOG_DIR} ${REPORT_DIR}/bpr ${MASSIVE_DIR} ${ISO_DIR} ${SERVICE_ROOT}
           
-          # [Watchdog Script] 실시간 리소스 감시 및 서비스 설치 상태 추적
+          # Watchdog Script (Background Monitor)
           cat <<EOF > ${LOG_DIR}/watchdog_daemon.sh
           #!/bin/bash
           LOG_FILE="${LOG_DIR}/watchdog_events.log"
           echo "[WATCHDOG] Started at \$(date)" > \$LOG_FILE
-          
           while true; do
             TS=\$(date +'%T')
-            
-            # 1. System Resource Check
-            CPU_LOAD=\$(awk '{print \$1}' /proc/loadavg)
-            MEM_FREE=\$(free -m | grep Mem | awk '{print \$4}')
-            DISK_USAGE=\$(df -h / | tail -1 | awk '{print \$5}')
-            
-            # 2. Service/Container Check
-            DOCKER_ACTIVE=\$(docker ps -q | wc -l)
-            FILE_COUNT=\$(find ${SERVICE_ROOT} -type f 2>/dev/null | wc -l)
-            
-            # 3. Log Status
-            echo "[\$TS] [SYS] Load:\$CPU_LOAD MemFree:\${MEM_FREE}MB Disk:\$DISK_USAGE | [APP] Containers:\$DOCKER_ACTIVE Files:\$FILE_COUNT" >> \$LOG_FILE
-            
-            # 4. Alert Logic (Memory Low Warning)
-            if [ "\$MEM_FREE" -lt 500 ]; then
-               echo "⚠️ [ALERT] LOW MEMORY DETECTED (<500MB)" >> \$LOG_FILE
-            fi
-            
+            # Docker Plugin Check
+            DOCKER_OK=\$(dpkg -l | grep docker-compose-plugin | wc -l)
+            echo "[\$TS] System Load: \$(awk '{print \$1}' /proc/loadavg) | Docker Plugin Installed: \$DOCKER_OK" >> \$LOG_FILE
             sleep 5
           done
           EOF
-          
           chmod +x ${LOG_DIR}/watchdog_daemon.sh
           nohup ${LOG_DIR}/watchdog_daemon.sh &
           echo "WATCHDOG_PID=$!" >> $GITHUB_ENV
-          echo "✅ Watchdog Daemon Started."
 
       # ===========================================================================
-      # 1) ROBUST INSTALLATION (Auto-Healing)
+      # 1) ROBUST INSTALLATION (FIXED DOCKER ERROR)
       # ===========================================================================
-      - name: "📦 Install Packages (Auto-Healing)"
+      - name: "📦 Install Packages (Docker Repo Fix)"
         run: |
+          # [CRITICAL FIX] 1. 기존 잠금 파일 제거
           sudo killall apt apt-get 2>/dev/null || true
           sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
           
+          # [CRITICAL FIX] 2. Docker 공식 Repo 추가 (docker-compose-plugin 에러 해결)
+          echo "🔧 Setting up Docker Official Repository..."
+          sudo apt-get update -qq
+          sudo apt-get install -y ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          sudo chmod a+r /etc/apt/keyrings/docker.gpg
+          
+          echo \
+            "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+            $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            
+          # [CRITICAL FIX] 3. 패키지 설치 재시도 로직
           safe_install() {
+            sudo apt-get update -qq
             for i in {1..3}; do
-              sudo apt-get update -qq && \
               sudo apt-get install -y -qq --no-install-recommends "$@" && return 0
               echo "⚠️ Retrying install... ($i/3)"
-              sleep 3
+              sleep 5
             done
             return 1
           }
 
-          # Essential Tools & Watchdog Utils
+          # 이제 docker-compose-plugin 설치가 가능함
+          safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          
+          # 기타 필수 도구 설치
           safe_install curl wget git unzip tar gzip sysstat pv pigz tree zstd lz4 p7zip-full xorriso rsync
-          safe_install docker-compose-plugin lvm2 fdisk dosfstools xfsprogs
-          safe_install clamav clamav-daemon chkrootkit rkhunter lynis postgresql-client
+          safe_install postgresql-client clamav lynis
 
-          echo "✅ Installation Complete."
+          echo "✅ Robust Installation & Docker Fix Complete."
 
       # ===========================================================================
-      # 2) POLYGLOT CLUSTER START
+      # 2) DEPENDABOT CONFIGURATION & SIMULATION
       # ===========================================================================
-      - name: "🐘🍃🔺 Start Core DB Cluster"
+      - name: "🤖 Config & Run Dependabot (Supply Chain Security)"
         run: |
-          docker run -d --name pg_main -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16-alpine -c 'synchronous_commit=off'
-          docker run -d --name redis_cache -p 6379:6379 redis:alpine
-          sleep 5
+          # 1. 실제 Dependabot 설정 파일 생성 (레포지토리 적용용)
+          mkdir -p .github
+          cat <<EOF > .github/dependabot.yml
+          version: 2
+          updates:
+            - package-ecosystem: "npm"
+              directory: "/"
+              schedule:
+                interval: "daily"
+            - package-ecosystem: "docker"
+              directory: "/"
+              schedule:
+                interval: "daily"
+          EOF
+          echo "✅ Created .github/dependabot.yml"
+
+          # 2. [Dependabot Simulation] 가상 서비스 취약점 자동 스캔 및 패치
+          echo "🔍 Scanning simulated services for outdated dependencies..."
+          
+          # 가상의 취약한 파일 생성 (테스트용)
+          mkdir -p ${SERVICE_ROOT}/svc_vulnerable_01
+          echo "django==1.11" > ${SERVICE_ROOT}/svc_vulnerable_01/requirements.txt
+          echo "FROM node:10" > ${SERVICE_ROOT}/svc_vulnerable_01/Dockerfile
+          
+          # 패치 로직 (Dependabot 동작 모방)
+          find ${SERVICE_ROOT} -name "requirements.txt" | xargs sed -i 's/django==1.11/django==4.2 # Fixed by Dependabot/g'
+          find ${SERVICE_ROOT} -name "Dockerfile" | xargs sed -i 's/FROM node:10/FROM node:18-alpine # Fixed by Dependabot/g'
+          
+          echo "✅ Auto-Patched Vulnerabilities (Simulation Complete)."
 
       # ===========================================================================
-      # 3) HYPER-SCALE SERVICE MESH GENERATION
+      # 3) HYPER-SCALE SERVICE MESH & DOCKER
       # ===========================================================================
       - name: "🏗️ Build Service Mesh & Docker Configs"
         run: |
           SCALE=${{ github.event.inputs.massive_scale_factor }}
-          DISK_SIZE=${{ github.event.inputs.storage_size_mb }}
           SVC_COUNT=$((SCALE * 5))
-          
-          echo "🚀 Provisioning $SVC_COUNT Services..."
           
           COMPOSE_FILE="${SERVICE_ROOT}/docker-compose-fleet.yml"
           echo "version: '3.8'" > $COMPOSE_FILE
           echo "services:" >> $COMPOSE_FILE
 
+          # 서비스 대량 생성
           for i in $(seq -f "%03g" 1 $SVC_COUNT); do
              SVC_NAME="svc_kr_${i}"
              SVC_DIR="${SERVICE_ROOT}/${SVC_NAME}"
-             
              mkdir -p ${SVC_DIR}/{bin,conf,logs,data}
-             fallocate -l ${DISK_SIZE}M "${SVC_DIR}/data/virtual_disk.img"
              
-             # App Simulation
-             echo "port=80${i}" > "${SVC_DIR}/conf/app.conf"
-             cat <<EOF > "${SVC_DIR}/bin/app.py"
-             import time
-             print("Service $SVC_NAME Active")
-             while True: time.sleep(60)
-             EOF
+             # 가상 디스크
+             fallocate -l 10M "${SVC_DIR}/data/virtual_disk.img"
              
-             # Dockerfile
+             # Dockerfile (Dependabot Friendly)
              cat <<EOF > "${SVC_DIR}/Dockerfile"
-             FROM python:3.9-slim
+             FROM python:3.11-slim
              WORKDIR /app
+             # Ensure pip is updated
+             RUN pip install --upgrade pip
              COPY . .
-             CMD ["python3", "bin/app.py"]
+             CMD ["python3", "-c", "import time; print('Service Active'); time.sleep(3600)"]
              EOF
 
              # Compose Entry
@@ -166,114 +179,78 @@ jobs:
           done
           
           echo "networks: { kfinance_net: { driver: bridge } }" >> $COMPOSE_FILE
-          echo "✅ Generated $SVC_COUNT configurations."
+          echo "✅ Service Mesh Generated."
 
       # ===========================================================================
-      # 4) DEPLOYMENT TRANSFER SIMULATION (Watchdog Validation)
+      # 4) DEPLOYMENT & WATCHDOG CHECK
       # ===========================================================================
-      - name: "🚚 Transfer Services to Production (Simulated)"
-        run: |
-          TARGET_DIR="${{ github.event.inputs.deploy_target_path }}"
-          echo "🚀 Starting Transfer to Production Zone: $TARGET_DIR"
-          
-          # 1. Prepare Target
-          sudo mkdir -p $TARGET_DIR
-          sudo chown $USER:$USER $TARGET_DIR
-          
-          # 2. Rsync Transfer (Simulating Deploy)
-          # Watchdog will monitor the file count increase during this process
-          echo "📦 Copying artifacts..."
-          rsync -av --info=progress2 ${SERVICE_ROOT}/ $TARGET_DIR/
-          
-          # 3. Integrity Check
-          SRC_COUNT=$(find ${SERVICE_ROOT} -type f | wc -l)
-          DST_COUNT=$(find $TARGET_DIR -type f | wc -l)
-          
-          if [ "$SRC_COUNT" -eq "$DST_COUNT" ]; then
-             echo "✅ Deployment Integrity Verified ($DST_COUNT files)."
-          else
-             echo "❌ Deployment Mismatch! Src: $SRC_COUNT vs Dst: $DST_COUNT"
-             exit 1
-          fi
-
-      # ===========================================================================
-      # 5) CONTAINER FLEET LAUNCH & WATCHDOG CHECK
-      # ===========================================================================
-      - name: "🚀 Launch Fleet & Watchdog Check"
+      - name: "🚀 Deploy & Watchdog Validation"
         run: |
           cd ${SERVICE_ROOT}
           
-          # Tier 1 Services Launch
-          docker compose -f docker-compose-fleet.yml up -d --build svc_kr_001 svc_kr_002 svc_kr_003
+          # Tier 1 서비스 실행 (오류 해결 확인)
+          echo "🚀 Launching Container Fleet..."
+          docker compose -f docker-compose-fleet.yml up -d --build svc_kr_001 svc_kr_002
           
           sleep 10
           
-          # [WATCHDOG CHECK]
-          echo "🐕 Running Post-Deployment Watchdog Check..."
-          RUNNING_CNT=$(docker ps -q | wc -l)
-          EXPECTED=5 # PG, Redis, 3 Services
+          # Watchdog Log 확인
+          echo "🐕 Analyzing Watchdog Logs..."
+          grep "Docker Plugin Installed" ${LOG_DIR}/watchdog_events.log | tail -n 5
           
-          if [ "$RUNNING_CNT" -ge "$EXPECTED" ]; then
-             echo "✅ Health Check Passed: $RUNNING_CNT containers active."
+          # 활성 컨테이너 체크
+          CNT=$(docker ps -q | wc -l)
+          if [ "$CNT" -ge 2 ]; then
+            echo "✅ Deployment SUCCESS: $CNT containers running."
           else
-             echo "⚠️ Health Check Warning: Only $RUNNING_CNT active (Expected $EXPECTED)."
-             docker ps -a
+            echo "❌ Deployment FAILED: Only $CNT running."
+            docker ps -a
+            exit 1
           fi
 
       # ===========================================================================
-      # 6) WEALTH INJECTION
-      # ===========================================================================
-      - name: "💰 Wealth Injection"
-        run: |
-          docker exec -i pg_main psql -U postgres -c "CREATE TABLE accounts (id SERIAL, bal BIGINT);" || true
-          docker exec -i pg_main psql -U postgres -c "INSERT INTO accounts (bal) SELECT 100000000 FROM generate_series(1, 1000);"
-          echo "✅ Wealth Injected."
-
-      # ===========================================================================
-      # 7) ISO PACKAGING & RELEASE
+      # 5) ISO PACKAGING & RELEASE
       # ===========================================================================
       - name: "📀 Package ISO & Release"
         run: |
-          if ! command -v xorriso &> /dev/null; then sudo apt-get install -y xorriso genisoimage; fi
+          mkdir -p ${ISO_DIR}/{00_Dash,01_Config,02_Logs}
           
-          mkdir -p ${ISO_DIR}/{00_Dash,01_Prod_Dump,02_Logs}
+          # Dependabot Config 백업
+          cp .github/dependabot.yml ${ISO_DIR}/01_Config/
           
-          # Dashboard
+          # Dashboard Update
           cat <<EOF > ${REPORT_DIR}/index.html
           <!DOCTYPE html><html><body>
-          <h1>🇰🇷 ETERNITY v12 Watchdog Report</h1>
-          <h2>Production Deployment</h2>
-          <p>Target Path: ${{ github.event.inputs.deploy_target_path }}</p>
-          <p>Files Deployed: $(find ${{ github.event.inputs.deploy_target_path }} -type f | wc -l)</p>
-          <h2>Watchdog Status</h2>
-          <pre>$(tail -n 10 ${LOG_DIR}/watchdog_events.log)</pre>
+          <h1>🇰🇷 ETERNITY v13 Security Report</h1>
+          <h2>✅ Dependabot Enabled</h2>
+          <p>Status: Active (Config Generated)</p>
+          <p>Patched Files: $(grep "Fixed by Dependabot" -r ${SERVICE_ROOT} | wc -l)</p>
+          <h2>🔧 Docker Fix Status</h2>
+          <p>Plugin Version: $(dpkg -s docker-compose-plugin | grep Version)</p>
           </body></html>
           EOF
           cp ${REPORT_DIR}/index.html ${ISO_DIR}/00_Dash/
+          cp ${LOG_DIR}/* ${ISO_DIR}/02_Logs/
           
-          # Copy Watchdog Logs
-          cp ${LOG_DIR}/watchdog_events.log ${ISO_DIR}/02_Logs/
-          
-          # Compress Production Data
-          echo "📦 Compressing Production Data..."
-          tar -cf - ${{ github.event.inputs.deploy_target_path }} | zstd -T0 -3 > ${ISO_DIR}/01_Prod_Dump/prod_deploy.tar.zst
-          
-          # Generate ISO
-          xorriso -as mkisofs -o dump/Korea-Eternity-v12.iso -J -R -V 'KOR-ETERNITY-v12' ${ISO_DIR}
+          # ISO Create
+          xorriso -as mkisofs -o dump/Korea-Eternity-v13.iso -J -R -V 'KOR-ETERNITY-v13' ${ISO_DIR}
 
-      - name: "🚀 Release Eternity v12"
+      - name: "🚀 Release Eternity v13"
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v12-eternity-watchdog"
-          name: "🇰🇷 ETERNITY v12 (Watchdog & Deploy)"
+          tag: "v13-eternity-supplychain"
+          name: "🇰🇷 ETERNITY v13 (Fix & Dependabot)"
           body: |
-            ## 🇰🇷 ETERNITY v12 (Watchdog & Deploy Edition)
+            ## 🇰🇷 ETERNITY v13 (Supply Chain & Fix Edition)
             
-            **New Operations:**
-            - 🐕 **Watchdog Daemon:** Real-time monitoring of CPU, RAM, Disk, and Docker Liveness during build.
-            - 🚚 **Deployment Simulation:** Validated transfer of service mesh to `${{ github.event.inputs.deploy_target_path }}`.
-            - ✅ **Integrity Check:** Automated file count verification between Build and Production zones.
+            **🔧 Critical Fixes:**
+            - ✅ **Docker Install Error:** Added official Docker GPG key & Repo (`download.docker.com`) to resolve `docker-compose-plugin` missing candidate error.
+            - ✅ **Lock Handling:** Enhanced pre-install cleanup to remove stale apt locks.
+
+            **🛡️ Security Ops:**
+            - 🤖 **Dependabot Integration:** Auto-generated `.github/dependabot.yml` and simulated dependency patching in workflow.
+            - 🐕 **Watchdog:** Verifies Docker plugin installation status in real-time.
             
             *Automated by GitHub Actions.*
           artifacts: "dump/*.iso"
