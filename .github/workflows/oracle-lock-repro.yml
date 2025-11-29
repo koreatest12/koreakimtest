@@ -1,16 +1,22 @@
-name: "🇰🇷 Korea Finance — OMNIVERSE EDITION (v∞)"
+name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v12 (WATCHDOG & DEPLOY)"
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 매일 자정 실행
+    - cron: '0 0 * * *'
   workflow_dispatch:
     inputs:
       active_customer_count:
-        description: "Active Customers (Target: 1M+)"
+        description: "Active Customers (Target: 1M)"
         default: "1000000"
       massive_scale_factor:
-        description: "Filesystem Scale (1~100)"
+        description: "Scale Factor (Services Count)"
         default: "50"
+      storage_size_mb:
+        description: "Virtual Disk Size per Service (MB)"
+        default: "10"
+      deploy_target_path:
+        description: "Simulated Target Install Path"
+        default: "/var/korea-fin-prod"
 
 permissions:
   contents: write
@@ -21,283 +27,255 @@ env:
   LOG_DIR: .github/echo_logs
   REPORT_DIR: .github/echo_reports
   MASSIVE_DIR: massive_storage
+  SERVICE_ROOT: opt/korea-fin-services
+  DEPLOY_ROOT: var/korea-fin-prod
   ISO_DIR: iso_root
   SQL_DIR: sql
   MODEL_DIR: ai_models
-  APP_NAME: korea-fin-engine
-  DOCKER_OPTS: "--restart unless-stopped --log-driver local"
+  DOCKER_BUILDKIT: 1
+  COMPOSE_DOCKER_CLI_BUILD: 1
 
 jobs:
-  omniverse-execution:
-    name: "OMNIVERSE BUILD (Infinite Scale)"
+  eternity-execution:
+    name: "ETERNITY WATCHDOG BUILD"
     runs-on: ubuntu-latest
     
     steps:
       # ===========================================================================
-      # 0) SELF-HEALING INITIALIZATION
+      # 0) WATCHDOG INITIALIZATION (Resource & Service Monitor)
       # ===========================================================================
-      - name: "🔧 Init Engine & Self-Health Check"
+      - name: "🐕 Init Watchdog Daemon"
         run: |
-          echo "🔍 Checking Environment Resources..."
-          FREE_DISK=$(df -BG / | awk 'NR==2 {print $4}' | tr -d 'G')
-          if [ "$FREE_DISK" -lt 10 ]; then
-            echo "⚠️ Low Disk Space ($FREE_DISK GB). Cleaning up..."
-            sudo docker system prune -af
-            sudo apt-get clean
-          else
-            echo "✅ Disk Space OK: $FREE_DISK GB"
-          fi
-
-          mkdir -p dump ${LOG_DIR} ${REPORT_DIR}/bpr ${SQL_DIR} ${MASSIVE_DIR} ${ISO_DIR} ${MODEL_DIR}
+          mkdir -p dump ${LOG_DIR} ${REPORT_DIR}/bpr ${SQL_DIR} ${MASSIVE_DIR} ${ISO_DIR} ${MODEL_DIR} ${SERVICE_ROOT}
           
-          vmstat -n 5 > ${LOG_DIR}/sys_monitor_omniverse.log &
-          echo "MONITOR_PID=$!" >> $GITHUB_ENV
+          # [Watchdog Script] 실시간 리소스 감시 및 서비스 설치 상태 추적
+          cat <<EOF > ${LOG_DIR}/watchdog_daemon.sh
+          #!/bin/bash
+          LOG_FILE="${LOG_DIR}/watchdog_events.log"
+          echo "[WATCHDOG] Started at \$(date)" > \$LOG_FILE
           
-          echo "✅ OMNIVERSE Engine Initialized."
+          while true; do
+            TS=\$(date +'%T')
+            
+            # 1. System Resource Check
+            CPU_LOAD=\$(awk '{print \$1}' /proc/loadavg)
+            MEM_FREE=\$(free -m | grep Mem | awk '{print \$4}')
+            DISK_USAGE=\$(df -h / | tail -1 | awk '{print \$5}')
+            
+            # 2. Service/Container Check
+            DOCKER_ACTIVE=\$(docker ps -q | wc -l)
+            FILE_COUNT=\$(find ${SERVICE_ROOT} -type f 2>/dev/null | wc -l)
+            
+            # 3. Log Status
+            echo "[\$TS] [SYS] Load:\$CPU_LOAD MemFree:\${MEM_FREE}MB Disk:\$DISK_USAGE | [APP] Containers:\$DOCKER_ACTIVE Files:\$FILE_COUNT" >> \$LOG_FILE
+            
+            # 4. Alert Logic (Memory Low Warning)
+            if [ "\$MEM_FREE" -lt 500 ]; then
+               echo "⚠️ [ALERT] LOW MEMORY DETECTED (<500MB)" >> \$LOG_FILE
+            fi
+            
+            sleep 5
+          done
+          EOF
+          
+          chmod +x ${LOG_DIR}/watchdog_daemon.sh
+          nohup ${LOG_DIR}/watchdog_daemon.sh &
+          echo "WATCHDOG_PID=$!" >> $GITHUB_ENV
+          echo "✅ Watchdog Daemon Started."
 
       # ===========================================================================
-      # 1) ROBUST INSTALLATION (Retry Logic + Lock Handling)
+      # 1) ROBUST INSTALLATION (Auto-Healing)
       # ===========================================================================
-      - name: "📦 Install Packages (Self-Healing Mode)"
+      - name: "📦 Install Packages (Auto-Healing)"
         run: |
-          unlock_apt() {
-            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
-            sudo dpkg --configure -a || true
-          }
-
+          sudo killall apt apt-get 2>/dev/null || true
+          sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
+          
           safe_install() {
-            local RETRIES=3
-            local DELAY=5
-            for i in $(seq 1 $RETRIES); do
-              sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends "$@" && return 0
-              echo "⚠️ Apt failed. Retrying in $DELAY seconds... ($i/$RETRIES)"
-              unlock_apt
-              sleep $DELAY
+            for i in {1..3}; do
+              sudo apt-get update -qq && \
+              sudo apt-get install -y -qq --no-install-recommends "$@" && return 0
+              echo "⚠️ Retrying install... ($i/3)"
+              sleep 3
             done
             return 1
           }
 
-          # 1. Base Tools
-          safe_install curl wget git unzip tar gzip sysstat pv pigz tree zstd lz4 p7zip-full
-          
-          # 2. Security Tools
-          safe_install clamav clamav-daemon chkrootkit rkhunter lynis
-          
-          # 3. Dev & DB Tools
-          safe_install python3-pip openjdk-17-jdk maven postgresql-client redis-tools
-          
-          # 4. Binary Installs (Helm/Trivy)
-          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 && chmod 700 get_helm.sh && ./get_helm.sh --no-sudo
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-          
-          echo "✅ All Packages Installed Securely."
+          # Essential Tools & Watchdog Utils
+          safe_install curl wget git unzip tar gzip sysstat pv pigz tree zstd lz4 p7zip-full xorriso rsync
+          safe_install docker-compose-plugin lvm2 fdisk dosfstools xfsprogs
+          safe_install clamav clamav-daemon chkrootkit rkhunter lynis postgresql-client
+
+          echo "✅ Installation Complete."
 
       # ===========================================================================
-      # 2) POLYGLOT CLUSTER (Health Check & Optimization)
+      # 2) POLYGLOT CLUSTER START
       # ===========================================================================
-      - name: "🐘🍃🔺 Start Polyglot Cluster"
+      - name: "🐘🍃🔺 Start Core DB Cluster"
         run: |
-          docker run -d --name pg_main $DOCKER_OPTS \
-            -e POSTGRES_PASSWORD=postgres \
-            -p 5432:5432 \
-            postgres:16-alpine -c 'synchronous_commit=off' -c 'max_connections=200'
-          
-          docker run -d --name redis_cache $DOCKER_OPTS -p 6379:6379 redis:alpine
-          docker run -d --name mongo_log $DOCKER_OPTS -p 27017:27017 mongo:latest
-
-          echo "Waiting for services..."
-          for i in {1..10}; do
-            if pg_isready -h localhost -p 5432 > /dev/null 2>&1; then
-              echo "✅ DB Online"
-              break
-            fi
-            sleep 3
-          done
+          docker run -d --name pg_main -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:16-alpine -c 'synchronous_commit=off'
+          docker run -d --name redis_cache -p 6379:6379 redis:alpine
+          sleep 5
 
       # ===========================================================================
-      # 3) WEALTH INJECTION (Batch Optimization)
+      # 3) HYPER-SCALE SERVICE MESH GENERATION
       # ===========================================================================
-      - name: "💰 100M KRW Injection (Optimized Bulk Insert)"
-        run: |
-          cat <<EOF > ${SQL_DIR}/schema.sql
-          CREATE TABLE customers (id SERIAL PRIMARY KEY, name TEXT, region TEXT, score INT);
-          CREATE TABLE accounts (
-            id SERIAL PRIMARY KEY, 
-            cust_id INT REFERENCES customers(id), 
-            acc_num TEXT, 
-            balance BIGINT CHECK (balance >= 0),
-            created_at TIMESTAMP DEFAULT NOW()
-          );
-          CREATE INDEX idx_region ON customers(region);
-          CREATE INDEX idx_balance ON accounts(balance);
-          EOF
-          
-          cat ${SQL_DIR}/schema.sql | docker exec -i pg_main psql -U postgres
-
-          ROWS=${{ github.event.inputs.active_customer_count }}
-          echo "👥 Generating $ROWS Customers..."
-          
-          docker exec -i pg_main psql -U postgres -c "
-            INSERT INTO customers (name, region, score)
-            SELECT 'User-'||g, (ARRAY['Seoul','Busan','Jeju','NY','London'])[floor(random()*5)+1], (random()*1000)::int
-            FROM generate_series(1, $ROWS) AS g;
-          "
-
-          echo "💰 Depositing 100,000,000 KRW..."
-          docker exec -i pg_main psql -U postgres -c "
-            INSERT INTO accounts (cust_id, acc_num, balance)
-            SELECT id, 'KR-BANK-'||lpad(id::text, 8, '0'), 100000000
-            FROM customers;
-          "
-          
-          echo "🧹 Optimizing DB..."
-          docker exec -i pg_main psql -U postgres -c "VACUUM ANALYZE;"
-
-          TOTAL=$(docker exec -i pg_main psql -U postgres -t -c "SELECT to_char(SUM(balance), 'FM999,999,999,999,999') FROM accounts;")
-          echo "TOTAL_WEALTH=$TOTAL" >> $GITHUB_ENV
-
-      # ===========================================================================
-      # 4) SERVICE-SPECIFIC BPR REPORTING
-      # ===========================================================================
-      - name: "📊 Generate Service BPR Reports"
-        run: |
-          echo "# 🏦 Banking BPR Report" > ${REPORT_DIR}/bpr/banking_report.md
-          echo "- **Analysis Date:** $(date)" >> ${REPORT_DIR}/bpr/banking_report.md
-          echo "- **Total Accounts:** ${{ github.event.inputs.active_customer_count }}" >> ${REPORT_DIR}/bpr/banking_report.md
-          echo "- **Avg Balance:** 100,000,000 KRW" >> ${REPORT_DIR}/bpr/banking_report.md
-
-          echo "# 📈 Stock Trading BPR Report" > ${REPORT_DIR}/bpr/stock_report.md
-          echo "- **Top Symbols:** SAMSUNG, SKHYNIX, NAVER" >> ${REPORT_DIR}/bpr/stock_report.md
-
-          echo "# 🪙 Crypto Asset BPR Report" > ${REPORT_DIR}/bpr/crypto_report.md
-          echo "- **Volatility Index:** High" >> ${REPORT_DIR}/bpr/crypto_report.md
-          
-          echo "# 📋 Consolidated BPR Executive Summary" > ${REPORT_DIR}/bpr/executive_summary.md
-          echo "## Overall Health Score: 98/100" >> ${REPORT_DIR}/bpr/executive_summary.md
-
-      # ===========================================================================
-      # 5) HYPER-SCALE FILESYSTEM (Validation Added)
-      # ===========================================================================
-      - name: "📂 Generate Massive FS & Validate"
+      - name: "🏗️ Build Service Mesh & Docker Configs"
         run: |
           SCALE=${{ github.event.inputs.massive_scale_factor }}
-          ROOT="${MASSIVE_DIR}/omniverse_root"
-          mkdir -p ${ROOT}/{etc,var,opt,usr}
+          DISK_SIZE=${{ github.event.inputs.storage_size_mb }}
+          SVC_COUNT=$((SCALE * 5))
           
-          # Fake Trivy Targets
-          echo "Creating Scan Targets..."
-          for i in {1..50}; do
-             mkdir -p "${ROOT}/app_src/service_$i"
-             echo "FROM ubuntu:18.04" > "${ROOT}/app_src/service_$i/Dockerfile"
-             echo "django==1.11" > "${ROOT}/app_src/service_$i/requirements.txt"
+          echo "🚀 Provisioning $SVC_COUNT Services..."
+          
+          COMPOSE_FILE="${SERVICE_ROOT}/docker-compose-fleet.yml"
+          echo "version: '3.8'" > $COMPOSE_FILE
+          echo "services:" >> $COMPOSE_FILE
+
+          for i in $(seq -f "%03g" 1 $SVC_COUNT); do
+             SVC_NAME="svc_kr_${i}"
+             SVC_DIR="${SERVICE_ROOT}/${SVC_NAME}"
+             
+             mkdir -p ${SVC_DIR}/{bin,conf,logs,data}
+             fallocate -l ${DISK_SIZE}M "${SVC_DIR}/data/virtual_disk.img"
+             
+             # App Simulation
+             echo "port=80${i}" > "${SVC_DIR}/conf/app.conf"
+             cat <<EOF > "${SVC_DIR}/bin/app.py"
+             import time
+             print("Service $SVC_NAME Active")
+             while True: time.sleep(60)
+             EOF
+             
+             # Dockerfile
+             cat <<EOF > "${SVC_DIR}/Dockerfile"
+             FROM python:3.9-slim
+             WORKDIR /app
+             COPY . .
+             CMD ["python3", "bin/app.py"]
+             EOF
+
+             # Compose Entry
+             cat <<EOF >> $COMPOSE_FILE
+               ${SVC_NAME}:
+                 build: { context: ./${SVC_NAME} }
+                 container_name: ${SVC_NAME}
+                 restart: unless-stopped
+                 networks: [kfinance_net]
+             EOF
           done
           
-          # Binary Dumps
-          for i in {1..3}; do
-             dd if=/dev/urandom of=${ROOT}/dump_$i.bin bs=1M count=1 status=none
-          done
-          
-          # Logs
-          for i in $(seq 1 $(($SCALE * 50))); do
-             echo "Log $i" > "${ROOT}/var/log_tx_$i.log"
-          done
-          
-          FILE_CNT=$(find ${MASSIVE_DIR} -type f | wc -l)
-          echo "Files: $FILE_CNT"
-          tree ${MASSIVE_DIR} -L 2 > ${REPORT_DIR}/fs_structure.txt
+          echo "networks: { kfinance_net: { driver: bridge } }" >> $COMPOSE_FILE
+          echo "✅ Generated $SVC_COUNT configurations."
 
       # ===========================================================================
-      # 6) AI FRAUD PRO
+      # 4) DEPLOYMENT TRANSFER SIMULATION (Watchdog Validation)
       # ===========================================================================
-      - name: "🤖 AI Fraud Pro Engine"
+      - name: "🚚 Transfer Services to Production (Simulated)"
         run: |
-          pip3 install joblib scikit-learn pandas
-          cat <<EOF > fraud_pro.py
-          import joblib
-          import numpy as np
-          from sklearn.ensemble import IsolationForest
-          np.random.seed(42)
-          X_train = np.random.rand(5000, 10)
-          clf = IsolationForest(n_estimators=100, random_state=42)
-          clf.fit(X_train)
-          joblib.dump(clf, '${MODEL_DIR}/fraud_model_v1.pkl')
-          EOF
-          python3 fraud_pro.py
-
-      # ===========================================================================
-      # 7) TRI-SHIELD SECURITY
-      # ===========================================================================
-      - name: "🛡️ Run Tri-Shield Security"
-        run: |
-          sudo lynis audit system --quick --auditor "GitHubRunner" > ${LOG_DIR}/lynis_full.txt || true
-          trivy fs --scanners vuln,config ${MASSIVE_DIR} > ${LOG_DIR}/trivy_scan.txt || true
+          TARGET_DIR="${{ github.event.inputs.deploy_target_path }}"
+          echo "🚀 Starting Transfer to Production Zone: $TARGET_DIR"
           
-          sudo systemctl stop clamav-freshclam || true
-          sudo freshclam || echo "Skipping DB Update"
-          clamscan -r -i ${MASSIVE_DIR} > ${LOG_DIR}/virus_scan.log || true
+          # 1. Prepare Target
+          sudo mkdir -p $TARGET_DIR
+          sudo chown $USER:$USER $TARGET_DIR
+          
+          # 2. Rsync Transfer (Simulating Deploy)
+          # Watchdog will monitor the file count increase during this process
+          echo "📦 Copying artifacts..."
+          rsync -av --info=progress2 ${SERVICE_ROOT}/ $TARGET_DIR/
+          
+          # 3. Integrity Check
+          SRC_COUNT=$(find ${SERVICE_ROOT} -type f | wc -l)
+          DST_COUNT=$(find $TARGET_DIR -type f | wc -l)
+          
+          if [ "$SRC_COUNT" -eq "$DST_COUNT" ]; then
+             echo "✅ Deployment Integrity Verified ($DST_COUNT files)."
+          else
+             echo "❌ Deployment Mismatch! Src: $SRC_COUNT vs Dst: $DST_COUNT"
+             exit 1
+          fi
 
       # ===========================================================================
-      # 8) HTML DASHBOARD
+      # 5) CONTAINER FLEET LAUNCH & WATCHDOG CHECK
       # ===========================================================================
-      - name: "📊 Generate Dynamic Dashboard"
+      - name: "🚀 Launch Fleet & Watchdog Check"
         run: |
+          cd ${SERVICE_ROOT}
+          
+          # Tier 1 Services Launch
+          docker compose -f docker-compose-fleet.yml up -d --build svc_kr_001 svc_kr_002 svc_kr_003
+          
+          sleep 10
+          
+          # [WATCHDOG CHECK]
+          echo "🐕 Running Post-Deployment Watchdog Check..."
+          RUNNING_CNT=$(docker ps -q | wc -l)
+          EXPECTED=5 # PG, Redis, 3 Services
+          
+          if [ "$RUNNING_CNT" -ge "$EXPECTED" ]; then
+             echo "✅ Health Check Passed: $RUNNING_CNT containers active."
+          else
+             echo "⚠️ Health Check Warning: Only $RUNNING_CNT active (Expected $EXPECTED)."
+             docker ps -a
+          fi
+
+      # ===========================================================================
+      # 6) WEALTH INJECTION
+      # ===========================================================================
+      - name: "💰 Wealth Injection"
+        run: |
+          docker exec -i pg_main psql -U postgres -c "CREATE TABLE accounts (id SERIAL, bal BIGINT);" || true
+          docker exec -i pg_main psql -U postgres -c "INSERT INTO accounts (bal) SELECT 100000000 FROM generate_series(1, 1000);"
+          echo "✅ Wealth Injected."
+
+      # ===========================================================================
+      # 7) ISO PACKAGING & RELEASE
+      # ===========================================================================
+      - name: "📀 Package ISO & Release"
+        run: |
+          if ! command -v xorriso &> /dev/null; then sudo apt-get install -y xorriso genisoimage; fi
+          
+          mkdir -p ${ISO_DIR}/{00_Dash,01_Prod_Dump,02_Logs}
+          
+          # Dashboard
           cat <<EOF > ${REPORT_DIR}/index.html
-          <!DOCTYPE html><html><head>
-          <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-          <style>body{font-family:sans-serif;padding:20px;background:#f8f9fa;} .card{background:#fff;padding:20px;margin:15px 0;border-radius:10px;}</style>
-          </head><body>
-          <h1>🇰🇷 OMNIVERSE Dashboard (download-maven.yml)</h1>
-          <div class="card">
-            <h2>💰 Total Wealth: ${{ env.TOTAL_WEALTH }} KRW</h2>
-            <canvas id="wealthChart" style="max-height:200px;"></canvas>
-          </div>
-          <div class="card">
-            <p>Files: $(find ${MASSIVE_DIR} -type f | wc -l)</p>
-          </div>
-          <script>
-            const ctx = document.getElementById('wealthChart').getContext('2d');
-            new Chart(ctx, { type: 'bar', data: { labels: ['Bank', 'Stock'], datasets: [{ label: 'Assets', data: [80, 20] }] } });
-          </script>
+          <!DOCTYPE html><html><body>
+          <h1>🇰🇷 ETERNITY v12 Watchdog Report</h1>
+          <h2>Production Deployment</h2>
+          <p>Target Path: ${{ github.event.inputs.deploy_target_path }}</p>
+          <p>Files Deployed: $(find ${{ github.event.inputs.deploy_target_path }} -type f | wc -l)</p>
+          <h2>Watchdog Status</h2>
+          <pre>$(tail -n 10 ${LOG_DIR}/watchdog_events.log)</pre>
           </body></html>
           EOF
+          cp ${REPORT_DIR}/index.html ${ISO_DIR}/00_Dash/
+          
+          # Copy Watchdog Logs
+          cp ${LOG_DIR}/watchdog_events.log ${ISO_DIR}/02_Logs/
+          
+          # Compress Production Data
+          echo "📦 Compressing Production Data..."
+          tar -cf - ${{ github.event.inputs.deploy_target_path }} | zstd -T0 -3 > ${ISO_DIR}/01_Prod_Dump/prod_deploy.tar.zst
+          
+          # Generate ISO
+          xorriso -as mkisofs -o dump/Korea-Eternity-v12.iso -J -R -V 'KOR-ETERNITY-v12' ${ISO_DIR}
 
-      # ===========================================================================
-      # 9) ISO PACKAGING (XORRISO FIX)
-      # ===========================================================================
-      - name: "📀 Package ISO"
-        run: |
-          if ! command -v xorriso &> /dev/null; then
-              sudo apt-get update -qq && sudo apt-get install -y xorriso genisoimage
-          fi
-          
-          docker exec pg_main pg_dump -U postgres > ${SQL_DIR}/postgres_full.sql
-          
-          mkdir -p ${ISO_DIR}/{00_Dashboard,01_BPR,02_DB,03_FS,04_AI,05_Sec}
-          cp ${REPORT_DIR}/index.html ${ISO_DIR}/00_Dashboard/
-          cp ${REPORT_DIR}/bpr/*.md ${ISO_DIR}/01_BPR/
-          cp ${SQL_DIR}/*.sql ${ISO_DIR}/02_DB/
-          cp ${MODEL_DIR}/*.pkl ${ISO_DIR}/04_AI/
-          cp ${LOG_DIR}/* ${ISO_DIR}/05_Sec/
-          
-          tar -cf - ${MASSIVE_DIR} | zstd -10 -T0 > ${ISO_DIR}/03_FS/fs_archive.tar.zst
-          
-          mkdir -p dump
-          xorriso -as mkisofs -o dump/Korea-Omniverse.iso -J -R -V 'KOR-OMNI' ${ISO_DIR}
-
-      # ===========================================================================
-      # 10) RELEASE
-      # ===========================================================================
-      - name: "🚀 Release Omniverse"
+      - name: "🚀 Release Eternity v12"
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "omniverse-v-final"
-          name: "🇰🇷 OMNIVERSE EDITION (download-maven.yml)"
+          tag: "v12-eternity-watchdog"
+          name: "🇰🇷 ETERNITY v12 (Watchdog & Deploy)"
           body: |
-            ## 🇰🇷 OMNIVERSE EDITION
-            **File:** `download-maven.yml`
-            **Wealth:** ${{ env.TOTAL_WEALTH }} KRW
-            **Report:** BPR & Dashboard included.
-          artifacts: "dump/*"
+            ## 🇰🇷 ETERNITY v12 (Watchdog & Deploy Edition)
+            
+            **New Operations:**
+            - 🐕 **Watchdog Daemon:** Real-time monitoring of CPU, RAM, Disk, and Docker Liveness during build.
+            - 🚚 **Deployment Simulation:** Validated transfer of service mesh to `${{ github.event.inputs.deploy_target_path }}`.
+            - ✅ **Integrity Check:** Automated file count verification between Build and Production zones.
+            
+            *Automated by GitHub Actions.*
+          artifacts: "dump/*.iso"
           allowUpdates: true
           makeLatest: true
