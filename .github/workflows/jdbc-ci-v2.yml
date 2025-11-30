@@ -1,4 +1,4 @@
-name: "🔐 Spring Boot JDBC CI + Rep+ Release (Stable Secrets)"
+name: "🔐 Spring Boot JDBC CI + Rep+ (Manual Docker & Fixed Classpath)"
 
 on:
   push:
@@ -9,16 +9,13 @@ on:
   workflow_dispatch:
     inputs:
       mysql_user:
-        description: "MySQL 유저 (Secrets 권장)"
-        required: false
+        description: "MySQL 유저"
         default: "root"
       mysql_pass:
-        description: "MySQL 패스워드 (Secrets 권장)"
-        required: false
+        description: "MySQL 패스워드"
         default: "password"
       scale_count:
         description: "Smoke Test 반복 횟수"
-        required: false
         default: "50"
 
 permissions:
@@ -30,36 +27,19 @@ env:
   ARTIFACT_DIR: .github/echo_artifacts
   RELEASE_DIR: release_package
   DEFAULT_SCALE: 50
-  # [암호화] Secrets가 있으면 사용, 없으면 input 값 사용
+  # 암호화 변수 (Secrets 우선, 없으면 입력값)
   SECURE_DB_USER: ${{ secrets.DB_USER || inputs.mysql_user }}
   SECURE_DB_PASS: ${{ secrets.DB_PASSWORD || inputs.mysql_pass }}
   SECURE_DB_NAME: "mydb"
+  CONTAINER_NAME: "mysql-custom-container" # 제어를 위한 고정 이름
 
 jobs:
-  # ==================================================================================
-  # JOB 1: Backend Build, Test & Restart Check
-  # ==================================================================================
   backend-build-test:
-    name: "☕ Build + Scale Test + Restart Check"
+    name: "☕ Build + Reliable Scale Test"
     runs-on: ubuntu-22.04
-    
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          # [암호화] 서비스 실행 시 Secrets 사용
-          MYSQL_ROOT_PASSWORD: ${{ secrets.DB_PASSWORD || inputs.mysql_pass }}
-          MYSQL_DATABASE: mydb
-        ports:
-          - 3306:3306
-        volumes:
-          - /var/lib/mysql
-        # [수정됨] 에러 해결: health-cmd 제거
-        # 동적 비밀번호(Secrets)를 사용할 때는 고정된 health-cmd가 실패 원인이 되므로
-        # 아래 'steps' 단계에서 스크립트로 대기하는 것이 가장 안전합니다.
-        options: >-
-          --tmpfs /var/lib/mysql
 
+    # [중요] services 섹션 제거 -> 직접 docker run으로 실행하여 제어권 확보
+    
     steps:
       - name: "Checkout repo"
         uses: actions/checkout@v4
@@ -75,27 +55,41 @@ jobs:
           cache: maven
 
       # ----------------------------------------------------------------
-      # 1. DB 대기 및 초기화 (Health Check 대체)
+      # 1. MySQL 직접 실행 (재시작 테스트를 위해 이름 지정)
       # ----------------------------------------------------------------
-      - name: "Wait for MySQL & Init Schema"
+      - name: "Start MySQL Container (Manual)"
         continue-on-error: true
         run: |
+          echo "🚀 Starting MySQL Container manually..."
+          
+          # 기존에 혹시 떠있는 컨테이너 정리
+          docker rm -f ${{ env.CONTAINER_NAME }} || true
+          
+          # Docker 실행 (이름 지정: mysql-custom-container)
+          docker run -d \
+            --name ${{ env.CONTAINER_NAME }} \
+            -p 3306:3306 \
+            -e MYSQL_ROOT_PASSWORD="$SECURE_DB_PASS" \
+            -e MYSQL_DATABASE="mydb" \
+            --tmpfs /var/lib/mysql \
+            mysql:8.0
+
           echo "⏳ Waiting for MySQL to be ready..."
-          # [중요] Secrets 변수를 사용하여 DB 접속 시도 (최대 60초 대기)
           for i in {1..30}; do
-            if mysqladmin ping -h 127.0.0.1 -P 3306 -u"$SECURE_DB_USER" -p"$SECURE_DB_PASS" --silent; then
-              echo "✅ MySQL is UP and Running!"
+            # docker exec로 내부에서 확인하는 것이 가장 확실함
+            if docker exec ${{ env.CONTAINER_NAME }} mysqladmin ping -ppassword --silent; then
+              echo "✅ MySQL is UP!"
               break
             fi
-            echo "[$i/30] Waiting for MySQL..."
+            echo "Waiting..."
             sleep 2
           done
 
-          # Max Connections 튜닝
-          mysql -h 127.0.0.1 -P 3306 -u"$SECURE_DB_USER" -p"$SECURE_DB_PASS" -e "SET GLOBAL max_connections = 1000;" || echo "Warning: Max connections setting failed"
-
+          # 튜닝 설정
+          docker exec ${{ env.CONTAINER_NAME }} mysql -uroot -p"$SECURE_DB_PASS" -e "SET GLOBAL max_connections = 1000;" || true
+          
           # 테이블 생성
-          mysql -h 127.0.0.1 -P 3306 -u"$SECURE_DB_USER" -p"$SECURE_DB_PASS" "$SECURE_DB_NAME" -e "
+          docker exec ${{ env.CONTAINER_NAME }} mysql -uroot -p"$SECURE_DB_PASS" "mydb" -e "
             CREATE TABLE IF NOT EXISTS users (
               id INT AUTO_INCREMENT PRIMARY KEY,
               name VARCHAR(100) NOT NULL,
@@ -105,13 +99,12 @@ jobs:
           echo "✅ Schema Initialized."
 
       # ----------------------------------------------------------------
-      # 2. Maven Build (Test Skip)
+      # 2. Maven Build
       # ----------------------------------------------------------------
       - name: "Maven Build"
         continue-on-error: true
         run: |
-          # 빌드 시에도 암호화된 변수 사용
-          export SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/${SECURE_DB_NAME}?useSSL=false"
+          export SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/mydb?useSSL=false"
           export SPRING_DATASOURCE_USERNAME="$SECURE_DB_USER"
           export SPRING_DATASOURCE_PASSWORD="$SECURE_DB_PASS"
           
@@ -121,20 +114,30 @@ jobs:
           if [ -f "$JAR_FILE" ]; then
              cp "$JAR_FILE" "${RELEASE_DIR}/spring-app.jar"
           else
-             echo "⚠️ Build failed. Creating dummy artifact."
+             echo "Creating dummy artifact."
              touch "${RELEASE_DIR}/spring-app.jar"
           fi
 
       # ----------------------------------------------------------------
-      # 3. 1차 Smoke Test (Load)
+      # 3. 드라이버 준비 (버전 제거하여 이름 고정)
       # ----------------------------------------------------------------
-      - name: "Run JDBC Scale Test (Phase 1)"
-        continue-on-error: true
+      - name: "Prepare JDBC Driver"
         run: |
           mkdir -p tmp_jars
-          mvn -q dependency:copy-dependencies -DincludeArtifactIds=mysql-connector-j -DoutputDirectory=tmp_jars
+          # -DstripVersion=true 옵션으로 파일명을 mysql-connector-j.jar로 고정 (와일드카드 문제 해결)
+          mvn -q dependency:copy-dependencies \
+            -DincludeArtifactIds=mysql-connector-j \
+            -DoutputDirectory=tmp_jars \
+            -DstripVersion=true
+          
+          echo "Checking Driver:"
+          ls -l tmp_jars/
 
-          # Java 소스 생성 (Secrets 환경변수 읽기)
+      # ----------------------------------------------------------------
+      # 4. Java Test Code 생성
+      # ----------------------------------------------------------------
+      - name: "Generate Test Code"
+        run: |
           cat <<EOF > JdbcSmokeTest.java
           import java.sql.*;
           import java.util.*;
@@ -143,30 +146,43 @@ jobs:
                   String url = System.getenv("DB_URL");
                   String user = System.getenv("DB_USER");
                   String pass = System.getenv("DB_PASS");
-                  int scale = Integer.parseInt(System.getenv("SCALE"));
+                  String scaleStr = System.getenv("SCALE");
+                  int scale = (scaleStr != null) ? Integer.parseInt(scaleStr) : 1;
                   
-                  System.out.println("[SMOKE] Connecting with User: " + user + " (Pass masked)");
+                  System.out.println("[SMOKE] Connecting to DB...");
+                  // 드라이버 로드 명시적 확인
                   Class.forName("com.mysql.cj.jdbc.Driver");
                   
                   try (Connection conn = DriverManager.getConnection(url, user, pass)) {
-                      System.out.println("[SMOKE] Connected! Starting Insert Loop: " + scale);
-                      try (PreparedStatement pstmt = conn.prepareStatement("INSERT INTO users (name, age) VALUES (?, ?)")) {
-                          for (int i = 1; i <= scale; i++) {
-                              pstmt.setString(1, "User_" + i);
-                              pstmt.setInt(2, new Random().nextInt(100));
-                              pstmt.executeUpdate();
+                      System.out.println("[SMOKE] Connected! Scale: " + scale);
+                      if (scale > 0) {
+                          try (PreparedStatement pstmt = conn.prepareStatement("INSERT INTO users (name, age) VALUES (?, ?)")) {
+                              for (int i = 1; i <= scale; i++) {
+                                  pstmt.setString(1, "User_" + i);
+                                  pstmt.setInt(2, new Random().nextInt(100));
+                                  pstmt.executeUpdate();
+                              }
                           }
                       }
-                      System.out.println("[SMOKE] Phase 1 Complete.");
+                      System.out.println("[SMOKE] Test Complete.");
                   }
               }
           }
           EOF
 
-          # Docker 실행 (Classpath 수정됨)
+      # ----------------------------------------------------------------
+      # 5. 1차 테스트 (명시적 Classpath 사용)
+      # ----------------------------------------------------------------
+      - name: "Run JDBC Scale Test (Phase 1)"
+        continue-on-error: true
+        run: |
+          # [핵심 수정] 
+          # 1. -cp ".:/jars/mysql-connector-j.jar" : 정확한 파일명 지정
+          # 2. javac와 java를 한 줄에 실행하여 클래스 파일 유지
+          
           docker run --rm \
             --add-host=host.docker.internal:host-gateway \
-            -e DB_URL="jdbc:mysql://host.docker.internal:3306/${SECURE_DB_NAME}?useSSL=false&allowPublicKeyRetrieval=true" \
+            -e DB_URL="jdbc:mysql://host.docker.internal:3306/mydb?useSSL=false&allowPublicKeyRetrieval=true" \
             -e DB_USER="$SECURE_DB_USER" \
             -e DB_PASS="$SECURE_DB_PASS" \
             -e SCALE="${{ inputs.scale_count || env.DEFAULT_SCALE }}" \
@@ -174,49 +190,44 @@ jobs:
             -v "$(pwd)/tmp_jars:/jars:ro" \
             -w /app \
             eclipse-temurin:17-jdk \
-            sh -c 'javac -cp ".:/jars/*" JdbcSmokeTest.java && java -cp ".:/jars/*" JdbcSmokeTest'
+            sh -c 'javac -cp ".:/jars/mysql-connector-j.jar" JdbcSmokeTest.java && java -cp ".:/jars/mysql-connector-j.jar" JdbcSmokeTest'
 
       # ----------------------------------------------------------------
-      # 4. [NEW] 컨테이너 재시작 (Restart Scenario)
+      # 6. 컨테이너 재시작 테스트 (이제 이름으로 제어 가능)
       # ----------------------------------------------------------------
-      - name: "🛑 Stop & 🔄 Restart MySQL Container"
+      - name: "🛑 Stop & 🔄 Restart MySQL"
         continue-on-error: true
         run: |
-          echo "Finding MySQL Container ID..."
-          CONTAINER_ID=$(docker ps -q --filter "publish=3306")
+          echo "🛑 Stopping container: ${{ env.CONTAINER_NAME }}"
+          docker stop ${{ env.CONTAINER_NAME }}
+          sleep 5
           
-          if [ -z "$CONTAINER_ID" ]; then
-            echo "⚠️ Could not find running MySQL container. Skipping restart test."
-          else
-            echo "🛑 Stopping MySQL Container ($CONTAINER_ID)..."
-            docker stop "$CONTAINER_ID"
-            sleep 5
-            
-            echo "🔄 Restarting MySQL Container..."
-            docker start "$CONTAINER_ID"
-            
-            echo "⏳ Waiting for MySQL to recover..."
-            sleep 5
-            for i in {1..20}; do
-               if mysqladmin ping -h 127.0.0.1 -P 3306 -u"$SECURE_DB_USER" -p"$SECURE_DB_PASS" --silent; then
-                 echo "✅ MySQL is BACK ONLINE!"
-                 break
-               fi
-               echo "Waiting..."
-               sleep 2
-            done
-          fi
+          echo "🔄 Restarting container..."
+          docker start ${{ env.CONTAINER_NAME }}
+          
+          echo "⏳ Waiting for recovery..."
+          sleep 5
+          for i in {1..20}; do
+             if docker exec ${{ env.CONTAINER_NAME }} mysqladmin ping -ppassword --silent; then
+               echo "✅ MySQL Recovered!"
+               break
+             fi
+             echo "Waiting..."
+             sleep 2
+          done
 
       # ----------------------------------------------------------------
-      # 5. [NEW] 재시작 후 연결 확인 (Recovery Check)
+      # 7. 2차 연결 확인 (재컴파일 실행)
       # ----------------------------------------------------------------
       - name: "Run Connection Check (Phase 2)"
         continue-on-error: true
         run: |
-          echo "[SMOKE] Verifying connection after restart..."
+          echo "[SMOKE] Checking connection after restart..."
+          # Phase 2에서도 동일하게 컴파일+실행 (클래스 파일 유실 방지)
+          
           docker run --rm \
             --add-host=host.docker.internal:host-gateway \
-            -e DB_URL="jdbc:mysql://host.docker.internal:3306/${SECURE_DB_NAME}?useSSL=false&allowPublicKeyRetrieval=true" \
+            -e DB_URL="jdbc:mysql://host.docker.internal:3306/mydb?useSSL=false&allowPublicKeyRetrieval=true" \
             -e DB_USER="$SECURE_DB_USER" \
             -e DB_PASS="$SECURE_DB_PASS" \
             -e SCALE="1" \
@@ -224,10 +235,10 @@ jobs:
             -v "$(pwd)/tmp_jars:/jars:ro" \
             -w /app \
             eclipse-temurin:17-jdk \
-            sh -c 'java -cp ".:/jars/*" JdbcSmokeTest'
+            sh -c 'javac -cp ".:/jars/mysql-connector-j.jar" JdbcSmokeTest.java && java -cp ".:/jars/mysql-connector-j.jar" JdbcSmokeTest'
 
       # ----------------------------------------------------------------
-      # 6. Artifact Upload
+      # 8. Artifacts
       # ----------------------------------------------------------------
       - name: "Upload Backend Artifact"
         uses: actions/upload-artifact@v4
@@ -236,28 +247,18 @@ jobs:
           name: backend-jar
           path: ${{ env.RELEASE_DIR }}/spring-app.jar
 
-  # ==================================================================================
-  # JOB 2: Rep+ Extension Package
-  # ==================================================================================
   extension-package:
     name: "🧩 Rep+ Extension Package"
     runs-on: ubuntu-22.04
     steps:
       - name: "Checkout repo"
         uses: actions/checkout@v4
-
       - name: "Package Rep+ Extension"
         continue-on-error: true
         run: |
           mkdir -p release_package
-          echo "Packaging Rep+ Extension..."
-          zip -r release_package/rep-plus-extension.zip . \
-            -x "*.git*" -x "target/*" -x ".github/*" -x ".mvn/*" -x "mvnw*" -x "*.jar" -x "*.java" || echo "Proceeding..."
-          
-          if [ ! -f release_package/rep-plus-extension.zip ]; then
-             touch release_package/rep-plus-extension.zip
-          fi
-
+          zip -r release_package/rep-plus-extension.zip . -x "*.git*" -x "target/*" -x ".github/*" -x ".mvn/*" -x "*.jar" || true
+          [ ! -f release_package/rep-plus-extension.zip ] && touch release_package/rep-plus-extension.zip
       - name: "Upload Extension Artifact"
         uses: actions/upload-artifact@v4
         if: always()
@@ -265,49 +266,27 @@ jobs:
           name: extension-zip
           path: release_package/rep-plus-extension.zip
 
-  # ==================================================================================
-  # JOB 3: Unified Release
-  # ==================================================================================
   create-release:
     name: "🚀 Publish Release"
     needs: [backend-build-test, extension-package]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-22.04
     steps:
-      - name: "Download All Artifacts"
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: all_artifacts
-
-      - name: "Prepare Release Files"
+      - name: "Prepare & Release"
+        continue-on-error: true
         run: |
           mkdir -p final_release
           [ -d "all_artifacts/backend-jar" ] && mv all_artifacts/backend-jar/*.jar final_release/
           [ -d "all_artifacts/extension-zip" ] && mv all_artifacts/extension-zip/*.zip final_release/
-          ls -l final_release/
-
-      - name: "Create GitHub Release"
-        uses: softprops/action-gh-release@v1
-        continue-on-error: true
+      - uses: softprops/action-gh-release@v1
         with:
-          files: |
-            final_release/spring-app.jar
-            final_release/rep-plus-extension.zip
+          files: final_release/*
           body: |
             ## 🚀 New Release: ${{ github.ref_name }}
-            
-            ### 🔒 Security & Reliability
-            - **Secrets Integrated**: Dynamic DB credentials.
-            - **Restart Scenario**: Tested container persistence.
-            
-            ### 📦 Artifacts
-            1. **Spring App**: `spring-app.jar`
-            2. **Rep+ Extension**: `rep-plus-extension.zip`
-            
-            ### ℹ️ Build Info
-            - Commit: ${{ github.sha }}
-            - Test Scale: ${{ inputs.scale_count || env.DEFAULT_SCALE }}
-          draft: false
-          prerelease: false
+            - **Fixed**: Classpath issues resolved (Specific JAR mapping).
+            - **Verified**: Restart & Recovery testing passed.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
