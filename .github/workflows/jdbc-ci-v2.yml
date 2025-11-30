@@ -10,15 +10,19 @@ on:
     inputs:
       mysql_user:
         description: "MySQL 유저"
+        required: false
         default: "root"
       mysql_pass:
         description: "MySQL 패스워드"
+        required: false
         default: "password"
       mysql_db:
         description: "DB명"
+        required: false
         default: "mydb"
       scale_count:
         description: "Smoke Test 반복 횟수 (SCALE)"
+        required: false
         default: "50"
 
 permissions:
@@ -33,7 +37,7 @@ env:
 
 jobs:
   # ==================================================================================
-  # JOB 1: Spring Boot Backend Build & JDBC Test
+  # JOB 1: Backend Build & JDBC Scale Test
   # ==================================================================================
   backend-build-test:
     name: "☕ Backend Build & JDBC Scale Test"
@@ -47,6 +51,7 @@ jobs:
           MYSQL_DATABASE: mydb
         ports:
           - 3306:3306
+        # [수정] max_connections 에러 방지: Docker 옵션에서 제거하고 아래 Step에서 SQL로 처리
         volumes:
           - /var/lib/mysql
         options: >-
@@ -55,13 +60,8 @@ jobs:
           --health-interval=5s
           --health-timeout=2s
           --health-retries=20
-          --max_connections=1000
 
     steps:
-      # 
-
-
-
       #################################################################
       # 1. 환경 준비 및 체크아웃
       #################################################################
@@ -73,7 +73,7 @@ jobs:
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${RELEASE_DIR}"
 
       #################################################################
-      # 2. JDK 설정 (Temurin 17)
+      # 2. JDK 설정
       #################################################################
       - name: "Setup Temurin Java 17"
         uses: actions/setup-java@v4
@@ -83,11 +83,11 @@ jobs:
           cache: maven
 
       #################################################################
-      # 3. MySQL 스키마 초기화
+      # 3. MySQL 설정 및 스키마 초기화 (튜닝 포함)
       #################################################################
-      - name: "Init MySQL Schema"
+      - name: "Init MySQL Schema & Tuning"
         run: |
-          # MySQL Port 대기 (Service Health가 있지만 안전장치)
+          # MySQL Port 대기
           while ! mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -ppassword --silent; do
             echo "Waiting for MySQL..."
             sleep 2
@@ -97,7 +97,12 @@ jobs:
           DB_PASS="${{ inputs.mysql_pass || 'password' }}"
           DB_NAME="${{ inputs.mysql_db   || 'mydb' }}"
           
-          echo "Creating table 'users'..."
+          echo "Configuring MySQL & Creating Schema..."
+          
+          # [핵심] max_connections를 SQL 명령으로 설정 (Docker 옵션 에러 해결)
+          mysql -h 127.0.0.1 -P 3306 -u"$DB_USER" -p"$DB_PASS" -e "SET GLOBAL max_connections = 1000;"
+          
+          # 테이블 생성
           mysql -h 127.0.0.1 -P 3306 -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "
             CREATE TABLE IF NOT EXISTS users (
               id INT AUTO_INCREMENT PRIMARY KEY,
@@ -117,20 +122,20 @@ jobs:
           
           mvn -B clean package -DskipTests=false 2>&1 | tee "${LOG_DIR}/maven_build.log"
           
-          # JAR 파일 추출 및 이동
+          # JAR 파일 추출
           JAR_FILE=$(find target -name "*.jar" ! -name "original-*.jar" | head -n 1)
           cp "$JAR_FILE" "${RELEASE_DIR}/spring-app.jar"
 
       #################################################################
-      # 5. JDBC Scale Load Test (Docker)
+      # 5. JDBC Scale Load Test (Docker Container)
       #################################################################
       - name: "Run JDBC Scale Test"
-        continue-on-error: true # 테스트 실패해도 릴리즈 패키징은 진행할 경우 (선택사항)
+        continue-on-error: true
         run: |
           mkdir -p tmp_jars
           mvn -q dependency:copy-dependencies -DincludeArtifactIds=mysql-connector-j -DoutputDirectory=tmp_jars
           
-          # Java 테스트 코드 생성
+          # Java 테스트 소스 생성
           cat <<EOF > JdbcSmokeTest.java
           import java.sql.*;
           import java.util.*;
@@ -143,20 +148,23 @@ jobs:
                   System.out.println("[SMOKE] Scale Test Start: " + scale + " iterations");
                   Class.forName("com.mysql.cj.jdbc.Driver");
                   try (Connection conn = DriverManager.getConnection(url, user, pass)) {
+                      long start = System.currentTimeMillis();
                       try (PreparedStatement pstmt = conn.prepareStatement("INSERT INTO users (name, age) VALUES (?, ?)")) {
                           for (int i = 1; i <= scale; i++) {
                               pstmt.setString(1, "User_" + i);
                               pstmt.setInt(2, new Random().nextInt(100));
                               pstmt.executeUpdate();
+                              if (i % 50 == 0) System.out.println("[SMOKE] Progress: " + i + "/" + scale);
                           }
                       }
-                      System.out.println("[SMOKE] SUCCESS: " + scale + " inserts completed.");
+                      long duration = System.currentTimeMillis() - start;
+                      System.out.println("[SMOKE] SUCCESS: " + scale + " inserts in " + duration + "ms");
                   }
               }
           }
           EOF
 
-          # Docker 실행 (이미지 수정됨: eclipse-temurin)
+          # Docker 실행 (이미지: eclipse-temurin)
           docker run --rm \
             --add-host=host.docker.internal:host-gateway \
             -e DB_URL="jdbc:mysql://host.docker.internal:3306/${{ inputs.mysql_db || 'mydb' }}?useSSL=false&allowPublicKeyRetrieval=true" \
@@ -170,7 +178,7 @@ jobs:
             bash -c 'javac -cp .:/jars/* JdbcSmokeTest.java && java -cp .:/jars/* JdbcSmokeTest'
 
       #################################################################
-      # 6. 아티팩트 임시 저장 (Backend)
+      # 6. Backend Artifact Upload
       #################################################################
       - name: "Upload Backend Artifact"
         uses: actions/upload-artifact@v4
@@ -179,7 +187,7 @@ jobs:
           path: ${{ env.RELEASE_DIR }}/spring-app.jar
 
   # ==================================================================================
-  # JOB 2: Rep+ Chrome Extension Package (요청하신 확장 프로그램 반영)
+  # JOB 2: Rep+ Chrome Extension Package (요청하신 확장 프로그램)
   # ==================================================================================
   extension-package:
     name: "🧩 Rep+ Extension Package"
@@ -192,19 +200,18 @@ jobs:
         run: |
           mkdir -p release_package
           
-          # [중요] 확장 프로그램 패키징 로직
-          # 저장소 루트에 manifest.json 등이 있다고 가정하고 zip으로 압축합니다.
-          # Java 관련 파일(target, src/main/java 등)과 git 파일은 제외합니다.
+          # Rep+ 확장 프로그램 파일만 ZIP으로 압축 (백엔드 소스 제외)
           echo "Packaging Rep+ Extension..."
-          
           zip -r release_package/rep-plus-extension.zip . \
             -x "*.git*" \
             -x "target/*" \
             -x ".github/*" \
+            -x ".mvn/*" \
+            -x "mvnw*" \
             -x "*.jar" \
-            -x "mvnw*"
+            -x "*.java"
             
-          echo "✅ Rep+ Extension Packaged: release_package/rep-plus-extension.zip"
+          echo "✅ Rep+ Extension Packaged."
 
       - name: "Upload Extension Artifact"
         uses: actions/upload-artifact@v4
@@ -213,7 +220,7 @@ jobs:
           path: release_package/rep-plus-extension.zip
 
   # ==================================================================================
-  # JOB 3: Unified Release (JAR + Extension ZIP)
+  # JOB 3: Unified Release
   # ==================================================================================
   create-release:
     name: "🚀 Publish Release"
@@ -229,7 +236,7 @@ jobs:
       - name: "Prepare Release Files"
         run: |
           mkdir -p final_release
-          # 다운로드된 아티팩트들을 하나의 폴더로 이동
+          # 아티팩트 이동
           mv all_artifacts/backend-jar/*.jar final_release/
           mv all_artifacts/extension-zip/*.zip final_release/
           ls -l final_release/
@@ -243,18 +250,18 @@ jobs:
           body: |
             ## 🚀 New Release: ${{ github.ref_name }}
             
-            ### 📦 Artifacts
-            1. **Spring Boot App**: `spring-app.jar` (Backend & DB Smoke Tested)
-            2. **Rep+ Extension**: `rep-plus-extension.zip` (Chrome DevTools Utility)
+            ### 📦 Download Artifacts
+            1. **Backend App**: `spring-app.jar`
+            2. **Rep+ Extension**: `rep-plus-extension.zip`
 
-            ### 📝 Rep+ Features (Included)
-            - **Proxy-less**: Works directly in Chrome.
-            - **Capture & Replay**: Manipulate HTTP requests (Headers, Body).
-            - **AI Powered**: Integrated with Claude for request explanation.
-            - **Massive Replay**: Sniper, Battering Ram, Pitchfork, Cluster Bomb modes.
-            - **Unified Extractor**: JS Secret Scanner & Endpoint Extractor.
+            ### 🧩 Rep+ Features (Extension)
+            - **No Proxy Needed**: Works directly in Chrome DevTools.
+            - **AI Powered**: Integrated with Claude for request analysis.
+            - **Capture & Replay**: Edit headers/body and replay requests.
+            - **Massive Attack Modes**: Sniper, Battering Ram, Pitchfork, Cluster Bomb.
+            - **Unified Extractor**: Auto-detects secrets and API endpoints in JS files.
             
-            ### ℹ️ Build Info
+            ### ℹ️ CI Details
             - Commit: ${{ github.sha }}
             - Scale Test Count: ${{ inputs.scale_count || env.DEFAULT_SCALE }}
           draft: false
