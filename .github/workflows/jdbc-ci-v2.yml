@@ -1,4 +1,4 @@
-name: "🔐 Spring Boot JDBC CI + Rep+ (Ultra Stable Restart)"
+name: "🔐 Spring Boot JDBC CI (Docker Network + Persistence)"
 
 on:
   push:
@@ -30,13 +30,16 @@ env:
   # 암호화 변수 (Secrets 우선)
   SECURE_DB_USER: ${{ secrets.DB_USER || inputs.mysql_user }}
   SECURE_DB_PASS: ${{ secrets.DB_PASSWORD || inputs.mysql_pass }}
-  SECURE_DB_NAME: "mydb"
-  CONTAINER_NAME: "mysql-production-sim"
+  
+  # [핵심] 네트워크 및 컨테이너 설정
+  DOCKER_NETWORK: "ci-network"
+  DB_HOST: "mysql-server"  # 네트워크 내부에서 사용할 DB 주소
+  CONTAINER_NAME: "mysql-server-container"
   DRIVER_URL: "https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.2.0/mysql-connector-j-8.2.0.jar"
 
 jobs:
   backend-build-test:
-    name: "☕ Build + Reliable Test + Release"
+    name: "☕ Build + Network Test + Release"
     runs-on: ubuntu-22.04
 
     steps:
@@ -54,42 +57,44 @@ jobs:
           cache: maven
 
       # ----------------------------------------------------------------
-      # 1. JDBC 드라이버 직접 확보 (Maven 의존성 이슈 원천 차단)
+      # 1. Docker Network 생성 (통신 오류 원천 차단)
       # ----------------------------------------------------------------
-      - name: "Download JDBC Driver Manually"
+      - name: "Create Docker Network"
         run: |
-          mkdir -p libs
-          echo "Downloading MySQL Driver..."
-          # Maven Copy 대신 직접 다운로드로 파일명 고정 (mysql-driver.jar)
-          wget -q -O libs/mysql-driver.jar "${{ env.DRIVER_URL }}"
-          
-          if [ -f "libs/mysql-driver.jar" ]; then
-            echo "✅ Driver downloaded successfully:"
-            ls -l libs/mysql-driver.jar
-          else
-            echo "❌ Driver download failed!"
-            exit 1
-          fi
+          docker network create ${{ env.DOCKER_NETWORK }}
+          echo "✅ Network '${{ env.DOCKER_NETWORK }}' created."
 
       # ----------------------------------------------------------------
-      # 2. MySQL 실행 (tmpfs 제거 -> 재시작 안정성 확보)
+      # 2. JDBC 드라이버 확보
       # ----------------------------------------------------------------
-      - name: "Start MySQL (Persistent Mode)"
+      - name: "Download JDBC Driver"
+        run: |
+          mkdir -p libs
+          wget -q -O libs/mysql-driver.jar "${{ env.DRIVER_URL }}"
+          ls -l libs/mysql-driver.jar
+
+      # ----------------------------------------------------------------
+      # 3. MySQL 실행 (Network + Host Volume)
+      # ----------------------------------------------------------------
+      - name: "Start MySQL (Persistent)"
         continue-on-error: true
         run: |
-          # 기존 컨테이너 정리
-          docker rm -f ${{ env.CONTAINER_NAME }} || true
+          # 데이터 영속성을 위한 호스트 폴더 생성
+          mkdir -p $(pwd)/mysql-data
           
           echo "🚀 Starting MySQL..."
-          # [중요] --tmpfs 제거 (재시작 시 데이터 유지 및 에러 방지)
           docker run -d \
             --name ${{ env.CONTAINER_NAME }} \
+            --network ${{ env.DOCKER_NETWORK }} \
+            --network-alias ${{ env.DB_HOST }} \
             -p 3306:3306 \
+            -v $(pwd)/mysql-data:/var/lib/mysql \
             -e MYSQL_ROOT_PASSWORD="$SECURE_DB_PASS" \
             -e MYSQL_DATABASE="mydb" \
             mysql:8.0
 
           echo "⏳ Waiting for MySQL..."
+          # 네트워크 내부에서 헬스체크 수행 (가장 정확함)
           for i in {1..30}; do
             if docker exec ${{ env.CONTAINER_NAME }} mysqladmin ping -ppassword --silent; then
               echo "✅ MySQL is Ready!"
@@ -98,7 +103,7 @@ jobs:
             sleep 2
           done
 
-          # 설정 및 테이블 생성
+          # 초기 설정
           docker exec ${{ env.CONTAINER_NAME }} mysql -uroot -p"$SECURE_DB_PASS" -e "SET GLOBAL max_connections = 1000;"
           docker exec ${{ env.CONTAINER_NAME }} mysql -uroot -p"$SECURE_DB_PASS" "mydb" -e "
             CREATE TABLE IF NOT EXISTS users (
@@ -109,11 +114,12 @@ jobs:
           "
 
       # ----------------------------------------------------------------
-      # 3. Maven Build
+      # 4. Maven Build
       # ----------------------------------------------------------------
       - name: "Maven Build"
         continue-on-error: true
         run: |
+          # 빌드 시에는 로컬호스트로 접속 (포트 포워딩 -p 3306:3306 덕분)
           export SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/mydb?useSSL=false"
           export SPRING_DATASOURCE_USERNAME="$SECURE_DB_USER"
           export SPRING_DATASOURCE_PASSWORD="$SECURE_DB_PASS"
@@ -128,7 +134,7 @@ jobs:
           fi
 
       # ----------------------------------------------------------------
-      # 4. Java Test Code 생성
+      # 5. Java Test Code 생성
       # ----------------------------------------------------------------
       - name: "Generate Test Code"
         run: |
@@ -142,9 +148,8 @@ jobs:
                   String pass = System.getenv("DB_PASS");
                   int scale = Integer.parseInt(System.getenv("SCALE"));
                   
-                  System.out.println("[SMOKE] Loading Driver...");
+                  System.out.println("[SMOKE] Target DB: " + url);
                   Class.forName("com.mysql.cj.jdbc.Driver");
-                  System.out.println("[SMOKE] Driver Loaded. Connecting...");
                   
                   try (Connection conn = DriverManager.getConnection(url, user, pass)) {
                       System.out.println("[SMOKE] Connected! Executing " + scale + " inserts.");
@@ -158,24 +163,26 @@ jobs:
                           }
                       }
                       System.out.println("[SMOKE] Success.");
+                  } catch (Exception e) {
+                      e.printStackTrace();
+                      System.exit(1);
                   }
               }
           }
           EOF
 
       # ----------------------------------------------------------------
-      # 5. 1차 테스트 (명확한 Classpath)
+      # 6. 1차 테스트 (Docker Network 사용)
       # ----------------------------------------------------------------
       - name: "Run JDBC Scale Test (Phase 1)"
         continue-on-error: true
         run: |
-          # 
-
+          # [핵심] --network 옵션으로 같은 네트워크에 접속
+          # DB_URL은 호스트명이 아닌 컨테이너 Alias(mysql-server)를 사용
           
-          # libs 폴더를 /libs로 마운트하고, 정확한 파일명(mysql-driver.jar) 지정
           docker run --rm \
-            --add-host=host.docker.internal:host-gateway \
-            -e DB_URL="jdbc:mysql://host.docker.internal:3306/mydb?useSSL=false&allowPublicKeyRetrieval=true" \
+            --network ${{ env.DOCKER_NETWORK }} \
+            -e DB_URL="jdbc:mysql://${{ env.DB_HOST }}:3306/mydb?useSSL=false&allowPublicKeyRetrieval=true" \
             -e DB_USER="$SECURE_DB_USER" \
             -e DB_PASS="$SECURE_DB_PASS" \
             -e SCALE="${{ inputs.scale_count || env.DEFAULT_SCALE }}" \
@@ -186,7 +193,7 @@ jobs:
             sh -c 'javac -cp ".:/libs/mysql-driver.jar" JdbcSmokeTest.java && java -cp ".:/libs/mysql-driver.jar" JdbcSmokeTest'
 
       # ----------------------------------------------------------------
-      # 6. 컨테이너 재시작 (안전한 Stop & Start)
+      # 7. 컨테이너 재시작 (데이터 유지 확인)
       # ----------------------------------------------------------------
       - name: "🛑 Stop & 🔄 Restart MySQL"
         continue-on-error: true
@@ -200,16 +207,8 @@ jobs:
           echo "🔄 Restarting container..."
           docker start ${{ env.CONTAINER_NAME }}
           
-          # 컨테이너 상태 확인
-          if [ "$(docker inspect -f '{{.State.Running}}' ${{ env.CONTAINER_NAME }})" = "true" ]; then
-              echo "✅ Container is running."
-          else
-              echo "❌ Container failed to start. Logs:"
-              docker logs ${{ env.CONTAINER_NAME }}
-              exit 1
-          fi
-
           echo "⏳ Waiting for DB recovery..."
+          sleep 5
           for i in {1..20}; do
              if docker exec ${{ env.CONTAINER_NAME }} mysqladmin ping -ppassword --silent; then
                echo "✅ MySQL Recovered!"
@@ -217,17 +216,21 @@ jobs:
              fi
              sleep 2
           done
+          
+          # 로그 확인 (디버깅용)
+          docker logs --tail 20 ${{ env.CONTAINER_NAME }}
 
       # ----------------------------------------------------------------
-      # 7. 2차 연결 확인
+      # 8. 2차 연결 확인 (재시작 후)
       # ----------------------------------------------------------------
       - name: "Run Connection Check (Phase 2)"
         continue-on-error: true
         run: |
-          echo "[SMOKE] Phase 2 Test..."
+          echo "[SMOKE] Phase 2 Test (After Restart)..."
+          
           docker run --rm \
-            --add-host=host.docker.internal:host-gateway \
-            -e DB_URL="jdbc:mysql://host.docker.internal:3306/mydb?useSSL=false&allowPublicKeyRetrieval=true" \
+            --network ${{ env.DOCKER_NETWORK }} \
+            -e DB_URL="jdbc:mysql://${{ env.DB_HOST }}:3306/mydb?useSSL=false&allowPublicKeyRetrieval=true" \
             -e DB_USER="$SECURE_DB_USER" \
             -e DB_PASS="$SECURE_DB_PASS" \
             -e SCALE="1" \
@@ -238,7 +241,7 @@ jobs:
             sh -c 'javac -cp ".:/libs/mysql-driver.jar" JdbcSmokeTest.java && java -cp ".:/libs/mysql-driver.jar" JdbcSmokeTest'
 
       # ----------------------------------------------------------------
-      # 8. Artifacts
+      # 9. Artifacts & Cleanup
       # ----------------------------------------------------------------
       - name: "Upload Backend Artifact"
         uses: actions/upload-artifact@v4
@@ -246,6 +249,12 @@ jobs:
         with:
           name: backend-jar
           path: ${{ env.RELEASE_DIR }}/spring-app.jar
+          
+      - name: "Cleanup Docker"
+        if: always()
+        run: |
+          docker rm -f ${{ env.CONTAINER_NAME }} || true
+          docker network rm ${{ env.DOCKER_NETWORK }} || true
 
   extension-package:
     name: "🧩 Rep+ Extension Package"
@@ -284,7 +293,8 @@ jobs:
           files: final_release/*
           body: |
             ## 🚀 Release: ${{ github.ref_name }}
+            - **Architecture**: Docker Custom Network (`ci-network`).
+            - **Persistence**: Host Volume Mount (`$(pwd)/mysql-data`).
             - **Stability**: Fixed Classpath & Restart Logic.
-            - **Persistence**: Switched from tmpfs to volume.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
