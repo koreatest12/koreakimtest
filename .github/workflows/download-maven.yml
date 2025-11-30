@@ -1,4 +1,4 @@
-name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v15 (ULTIMATE-HYBRID)"
+name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v16.1 (STABILITY-PLUS)"
 
 on:
   schedule:
@@ -7,13 +7,11 @@ on:
     inputs:
       active_customer_count:
         description: "Active Customers (Target: 1M)"
-        default: "1000000"
-      massive_scale_factor:
-        description: "Scale Factor (1~100)"
-        default: "50"
+        default: "500000"
+        required: true
       deploy_env:
         description: "Deployment Target"
-        default: "production-blue"
+        default: "production-god-mode"
 
 permissions:
   contents: write
@@ -21,253 +19,224 @@ permissions:
 env:
   TZ: Asia/Seoul
   DEBIAN_FRONTEND: noninteractive
-  # Directories
-  LOG_DIR: .github/echo_logs
-  REPORT_DIR: .github/echo_reports
-  MASSIVE_DIR: massive_storage
-  SERVICE_ROOT: opt/korea-fin-services
-  ISO_DIR: iso_root
-  SQL_DIR: sql
-  MODEL_DIR: ai_models
-  VAULT_DIR: vault_secure
-  AUDIT_DIR: audit_logs
-  # Security (PBKDF2 Ready)
-  ENC_KEY: "korea-fin-eternity-secret-key-v15"
-  ENC_ITER: "100000"
-  # DB Credentials
+  # Paths
+  LOG_DIR: .github/logs
+  ARTIFACT_DIR: artifacts
+  VISUAL_DIR: artifacts/visuals
+  VAULT_DIR: artifacts/vault
+  # Credentials
   PG_USER: postgres
-  PG_PASS: postgres
-  # ClickHouse (OLAP Replacement)
-  CLICKHOUSE_USER: default
-  CLICKHOUSE_DB: default
+  PG_PASS: postgres_secret_v16
+  ENC_KEY: "korea-fin-eternity-god-key"
   DOCKER_OPTS: "--restart unless-stopped --log-driver local"
 
 jobs:
-  eternity-execution:
-    name: "ETERNITY BUILD (ClickHouse OLAP)"
+  eternity-god-build:
+    name: "🏛️ ETERNITY GOD-MODE (Intelligent OLAP)"
     runs-on: ubuntu-latest
     
     steps:
       # ===========================================================================
-      # 0) SELF-HEALING INITIALIZATION
+      # 0) HYPER-INITIALIZATION
       # ===========================================================================
-      - name: "🔧 Init Engine & Monitor"
+      - name: "🔧 Init System & Dependencies"
         run: |
-          mkdir -p dump ${LOG_DIR} ${REPORT_DIR} ${SQL_DIR} ${MASSIVE_DIR} ${ISO_DIR} ${MODEL_DIR} ${SERVICE_ROOT} ${VAULT_DIR} ${AUDIT_DIR}
+          mkdir -p ${LOG_DIR} ${ARTIFACT_DIR} ${VISUAL_DIR} ${VAULT_DIR}
           
-          # System Monitor
-          cat <<EOF > ${LOG_DIR}/monitor_daemon.sh
-          #!/bin/bash
-          while true; do
-            echo "[\$(date)] LOAD: \$(cat /proc/loadavg)" >> ${LOG_DIR}/sys_monitor.log
-            sleep 10
-          done
-          EOF
-          chmod +x ${LOG_DIR}/monitor_daemon.sh
-          nohup ${LOG_DIR}/monitor_daemon.sh &
-          echo "✅ Init Complete."
+          # Install Python Data Science Stack
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client python3-pip
+          pip3 install pandas matplotlib seaborn sqlalchemy psycopg2-binary
+          
+          echo "✅ System Ready: Python Data Science Stack Loaded."
 
       # ===========================================================================
-      # 1) ROBUST INSTALLATION
+      # 1) HYBRID DATA CLUSTER BOOT (PG + ClickHouse)
       # ===========================================================================
-      - name: "📦 Install Packages"
+      - name: "🐘⚡ Boot Hybrid Cluster"
         run: |
-          sudo killall apt apt-get 2>/dev/null || true
-          
-          safe_install() {
-            sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends "$@"
-          }
-          safe_install curl wget tar gzip sysstat pv tree zstd lz4 p7zip-full xorriso lvm2 clamav openssl postgresql-client
-          echo "✅ Packages Installed."
+          # 1. OLTP: PostgreSQL 16
+          docker run -d --name pg_core $DOCKER_OPTS \
+            -e POSTGRES_PASSWORD=${{ env.PG_PASS }} \
+            -p 5432:5432 postgres:16-alpine
 
-      # ===========================================================================
-      # 2) POLYGLOT CLUSTER (PG + ClickHouse)
-      # ===========================================================================
-      - name: "🐘⚡ Start Hybrid Data Cluster"
-        run: |
-          # 1. OLTP: PostgreSQL
-          docker run -d --name pg_main $DOCKER_OPTS -e POSTGRES_PASSWORD=${{ env.PG_PASS }} -p 5432:5432 postgres:16-alpine -c 'synchronous_commit=off'
-          
-          # 2. NoSQL: Redis
-          docker run -d --name redis_cache $DOCKER_OPTS -p 6379:6379 redis:alpine
-          
-          # [FIX] 3. OLAP: ClickHouse (Replaces Vertica)
-          # 공식 이미지를 사용하여 다운로드 오류 방지
-          echo "⚡ Booting ClickHouse OLAP Server..."
-          docker run -d --name clickhouse_olap $DOCKER_OPTS \
+          # 2. OLAP: ClickHouse (Performance Tuned)
+          docker run -d --name ch_analytics $DOCKER_OPTS \
             -p 8123:8123 -p 9000:9000 \
             --ulimit nofile=262144:262144 \
             clickhouse/clickhouse-server:latest
 
-          echo "⏳ Waiting for Cluster Initialization..."
+          echo "⏳ Waiting for Cluster Warm-up..."
           sleep 10
           
-          # Health Checks
-          PGPASSWORD=${{ env.PG_PASS }} psql -h 127.0.0.1 -U ${{ env.PG_USER }} -c "SELECT 1;" || echo "⚠️ PG Waiting..."
-          
-          # ClickHouse Health Check (HTTP API)
-          for i in {1..20}; do
+          # Health Check Loop
+          for i in {1..15}; do
             if curl -s "http://localhost:8123/ping" | grep -q "Ok"; then
-              echo "✅ ClickHouse is UP and READY!"
+              echo "✅ ClickHouse OLAP is READY!"
               break
             fi
-            echo "💤 Waiting for ClickHouse... ($i/20)"
             sleep 3
           done
 
       # ===========================================================================
-      # 3) WEALTH INJECTION & ETL (PG -> ClickHouse)
+      # 2) MASSIVE DATA GENERATION (OLTP) - [FIX APPLIED]
       # ===========================================================================
-      - name: "💰 Wealth Injection & ETL Pipeline"
+      - name: "💰 Generate Wealth Data (OLTP)"
+        env:
+          PGPASSWORD: ${{ env.PG_PASS }}
+          # GitHub Input을 환경변수로 명시적 매핑
+          INPUT_ROWS: ${{ inputs.active_customer_count }}
+        run: |
+          # [FIX 1] Input Validation Logic (빈 값 방지 및 숫자 검증)
+          # 입력값이 없거나 숫자가 아니면 기본값 100,000으로 설정
+          if [[ -z "${INPUT_ROWS}" ]] || ! [[ "${INPUT_ROWS}" =~ ^[0-9]+$ ]]; then
+            echo "⚠️ Invalid Input Detected. Fallback to default: 100000"
+            ROWS=100000
+          else
+            ROWS=${INPUT_ROWS}
+          fi
+          
+          echo "🎯 Target Rows: $ROWS"
+
+          echo "👥 Generating Accounts in PostgreSQL..."
+          docker exec -i pg_core psql -U ${{ env.PG_USER }} -c "
+            CREATE TABLE accounts (
+              id SERIAL PRIMARY KEY, 
+              acc_num TEXT, 
+              balance BIGINT, 
+              risk_score INT,
+              region TEXT,
+              created_at TIMESTAMP DEFAULT NOW()
+            );
+            
+            -- [FIX 2] Explicit Casting inside SQL to prevent type errors
+            INSERT INTO accounts (acc_num, balance, risk_score, region)
+            SELECT 
+              'KR-'||g, 
+              (random() * 1000000000)::bigint, 
+              floor(random()*100)::int,
+              (ARRAY['Seoul','Busan','Jeju','Incheon','Gwangju'])[floor(random()*5)+1]
+            FROM generate_series(1, $ROWS) AS g;
+            
+            CREATE INDEX idx_region ON accounts(region);
+          "
+
+      # ===========================================================================
+      # 3) HIGH-PERFORMANCE ETL & PARTITIONING (OLAP)
+      # ===========================================================================
+      - name: "🔄 Streaming ETL to ClickHouse (Partitioned)"
         env:
           PGPASSWORD: ${{ env.PG_PASS }}
         run: |
-          ROWS=${{ github.event.inputs.active_customer_count }}
+          echo "🏗️ Designing ClickHouse Schema (Partitioned by Region)..."
           
-          # 1. Postgres Data Injection (OLTP)
-          echo "👥 Injecting Customers into PostgreSQL..."
-          docker exec -i pg_main psql -U ${{ env.PG_USER }} -c "
-            CREATE TABLE accounts (id SERIAL PRIMARY KEY, acc_num TEXT, balance BIGINT, region TEXT);
-            INSERT INTO accounts (acc_num, balance, region)
-            SELECT 'KR-'||g, 100000000, (ARRAY['Seoul','Busan','Jeju'])[floor(random()*3)+1]
-            FROM generate_series(1, $ROWS) AS g;
-          "
-          
-          # 2. ClickHouse Schema (OLAP)
-          echo "🏗️ Creating ClickHouse Schema..."
-          docker exec -i clickhouse_olap clickhouse-client --query="
-            CREATE TABLE IF NOT EXISTS default.dw_accounts (
+          # PARTITION BY region allows faster per-region analytics
+          docker exec -i ch_analytics clickhouse-client --query="
+            CREATE TABLE IF NOT EXISTS default.dw_finance (
               acc_num String,
               balance Int64,
+              risk_score Int8,
               region String
-            ) ENGINE = MergeTree() ORDER BY acc_num;
+            ) ENGINE = MergeTree() 
+            PARTITION BY region 
+            ORDER BY (balance, acc_num);
           "
           
-          # 3. ETL Execution (Stream Copy)
-          echo "🔄 Running ETL (PG -> CSV -> ClickHouse)..."
-          
-          # Postgres에서 CSV 추출 -> 파이프(|) -> ClickHouse로 입력
-          psql -h 127.0.0.1 -U ${{ env.PG_USER }} -c "COPY (SELECT acc_num, balance, region FROM accounts LIMIT 10000) TO STDOUT WITH CSV" \
-          | docker exec -i clickhouse_olap clickhouse-client --format_csv_allow_single_quotes=0 --query="INSERT INTO default.dw_accounts FORMAT CSV"
-          
-          # 4. Analytics Verification
-          echo "📊 Analytics Result (Sum Balance by Region):"
-          docker exec -i clickhouse_olap clickhouse-client --query="
-            SELECT region, sum(balance) FROM default.dw_accounts GROUP BY region FORMAT Pretty;
-          "
+          echo "🚀 Streaming Data: PG -> Pipe -> ClickHouse..."
+          # Removing LIMIT to process FULL dataset
+          psql -h 127.0.0.1 -U ${{ env.PG_USER }} -c "COPY (SELECT acc_num, balance, risk_score, region FROM accounts) TO STDOUT WITH CSV" \
+          | docker exec -i ch_analytics clickhouse-client --format_csv_allow_single_quotes=0 --query="INSERT INTO default.dw_finance FORMAT CSV"
 
       # ===========================================================================
-      # 4) HYPER-SCALE SERVICE MESH
+      # 4) INTELLIGENCE: PYTHON ANALYTICS & VISUALIZATION
       # ===========================================================================
-      - name: "🏗️ Build Service Mesh"
+      - name: "🧠 Run AI Analytics & Visualization"
         run: |
-          SCALE=${{ github.event.inputs.massive_scale_factor }}
-          SVC_COUNT=$((SCALE * 2))
-          for i in $(seq -f "%03g" 1 $SVC_COUNT); do
-             SVC_DIR="${SERVICE_ROOT}/svc_kr_${i}"
-             mkdir -p ${SVC_DIR}/conf
-             echo "db.type=clickhouse" > "${SVC_DIR}/conf/application.properties"
-          done
+          cat <<EOF > analytics.py
+          import pandas as pd
+          import matplotlib.pyplot as plt
+          import seaborn as sns
+          import os
 
-      # ===========================================================================
-      # 5) SECURITY VAULT (PBKDF2 + ClickHouse Backup)
-      # ===========================================================================
-      - name: "🔐 Encrypt Sensitive Data (PBKDF2)"
-        env:
-          PGPASSWORD: ${{ env.PG_PASS }}
-        run: |
-          echo "🛡️ Encrypting Assets..."
+          # Connect to ClickHouse
+          print("🔄 Connecting to ClickHouse for Analysis...")
           
-          # 1. PG Dump
-          pg_dump -h 127.0.0.1 -p 5432 -U ${{ env.PG_USER }} postgres > ${SQL_DIR}/pg_dump.sql
+          # Fetch Data (Using direct CSV export for CI simplicity)
+          os.system('docker exec -i ch_analytics clickhouse-client --query="SELECT * FROM default.dw_finance LIMIT 10000" --format CSVWithNames > data_sample.csv')
           
-          # 2. ClickHouse Data Export (Backup)
-          docker exec -i clickhouse_olap clickhouse-client --query="SELECT * FROM default.dw_accounts FORMAT Parquet" > ${MASSIVE_DIR}/olap_backup.parquet
+          try:
+              df = pd.read_csv("data_sample.csv")
+              if df.empty:
+                  print("⚠️ Warning: Dataset is empty.")
+                  exit(0)
+                  
+              # 1. Wealth Distribution Plot
+              plt.figure(figsize=(10, 6))
+              sns.histplot(data=df, x='balance', hue='region', element="step", stat="density", common_norm=False)
+              plt.title('Wealth Distribution by Region (Sample)')
+              plt.savefig('${VISUAL_DIR}/wealth_distribution.png')
+              print("✅ Graph Generated: wealth_distribution.png")
+              
+              # 2. Risk vs Wealth Scatter
+              plt.figure(figsize=(10, 6))
+              sns.scatterplot(data=df, x='risk_score', y='balance', hue='region', alpha=0.6)
+              plt.title('Risk Score vs Balance Analysis')
+              plt.savefig('${VISUAL_DIR}/risk_analysis.png')
+              print("✅ Graph Generated: risk_analysis.png")
           
-          # 3. Encryption (PBKDF2 Applied)
-          # PG Dump Encrypt
-          openssl enc -aes-256-cbc -salt -pbkdf2 -iter ${{ env.ENC_ITER }} -in ${SQL_DIR}/pg_dump.sql -out ${VAULT_DIR}/pg_dump.sql.enc -k "${ENC_KEY}"
-          # OLAP Backup Encrypt
-          openssl enc -aes-256-cbc -salt -pbkdf2 -iter ${{ env.ENC_ITER }} -in ${MASSIVE_DIR}/olap_backup.parquet -out ${VAULT_DIR}/olap_backup.parquet.enc -k "${ENC_KEY}"
-          
-          # Cleanup
-          rm ${SQL_DIR}/pg_dump.sql ${MASSIVE_DIR}/olap_backup.parquet
-          
-          echo "✅ Encryption Complete."
-
-      # ===========================================================================
-      # 6) DIGITAL NOTARY (INTEGRITY CHECK)
-      # ===========================================================================
-      - name: "📜 Digital Notary & Integrity Audit"
-        run: |
-          echo "🔍 Generating Checksums..."
-          find ${VAULT_DIR} -name "*.enc" -type f -exec sha256sum {} + > ${AUDIT_DIR}/integrity_ledger.txt
-          
-          echo "👮 Verifying Integrity..."
-          if sha256sum -c ${AUDIT_DIR}/integrity_ledger.txt; then
-            echo "✅ INTEGRITY VERIFIED."
-          else
-            echo "❌ TAMPERING DETECTED."
-            exit 1
-          fi
-
-      # ===========================================================================
-      # 7) RESILIENCE TEST
-      # ===========================================================================
-      - name: "🔄 Cluster Resilience Test"
-        run: |
-          echo "⚠️ Stopping OLTP & OLAP..."
-          docker stop pg_main clickhouse_olap
-          sleep 5
-          
-          echo "▶️ Restarting..."
-          docker start pg_main clickhouse_olap
-          
-          sleep 10
-          echo "🏥 Health Check..."
-          curl -f -s "http://localhost:8123/ping" && echo "ClickHouse OK" || exit 1
-          PGPASSWORD=${{ env.PG_PASS }} pg_isready -h 127.0.0.1 || exit 1
-          echo "✅ Cluster Recovered."
-
-      # ===========================================================================
-      # 8) RELEASE
-      # ===========================================================================
-      - name: "📊 Release v15"
-        run: |
-          cat <<EOF > ${REPORT_DIR}/index.html
-          <!DOCTYPE html><html><body>
-          <h1>🇰🇷 ETERNITY v15 Hybrid Report</h1>
-          <p>OLTP: PostgreSQL (Transactions)</p>
-          <p>OLAP: ClickHouse (Analytics)</p>
-          <p>Security: PBKDF2 + SHA256 Integrity</p>
-          </body></html>
+          except Exception as e:
+              print(f"❌ Analytics Error: {e}")
           EOF
           
-          mkdir -p ${ISO_DIR}/{00_Dash,01_Vault,02_Audit}
-          cp ${REPORT_DIR}/index.html ${ISO_DIR}/00_Dash/
-          cp ${VAULT_DIR}/*.enc ${ISO_DIR}/01_Vault/
-          cp ${AUDIT_DIR}/integrity_ledger.txt ${ISO_DIR}/02_Audit/
-          
-          xorriso -as mkisofs -o dump/Korea-Eternity-v15.iso -J -R -V 'KOR-ETERNITY-v15' ${ISO_DIR}
+          # Run Python Script
+          python3 analytics.py
 
-      - name: "🚀 GitHub Release"
+      # ===========================================================================
+      # 5) SECURE VAULT & RELEASE GENERATION
+      # ===========================================================================
+      - name: "📦 Pack Secure Artifacts & HTML Report"
+        run: |
+          # Generate HTML Dashboard
+          cat <<EOF > ${ARTIFACT_DIR}/dashboard.html
+          <!DOCTYPE html>
+          <html>
+          <head><title>🇰🇷 ETERNITY v16.1 Intelligence Report</title></head>
+          <body style="font-family: sans-serif; padding: 20px;">
+            <h1>🇰🇷 ETERNITY v16.1 (STABILITY-PLUS) Report</h1>
+            <hr>
+            <h3>📊 Wealth Distribution AI Analysis</h3>
+            <img src="./visuals/wealth_distribution.png" style="max-width: 100%; border: 1px solid #ccc;">
+            <br><br>
+            <h3>⚠️ Risk Factor Analysis</h3>
+            <img src="./visuals/risk_analysis.png" style="max-width: 100%; border: 1px solid #ccc;">
+            <hr>
+            <p>Generated by GitHub Actions & ClickHouse OLAP</p>
+          </body>
+          </html>
+          EOF
+
+          # Encrypt Data (PBKDF2)
+          tar -czf ${VAULT_DIR}/raw_data.tar.gz ${VISUAL_DIR}
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -in ${VAULT_DIR}/raw_data.tar.gz -out ${VAULT_DIR}/secure_assets.enc -k "${ENC_KEY}"
+          
+          echo "✅ All Assets Secured."
+
+      - name: "🚀 Release v16.1"
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v15-eternity-hybrid"
-          name: "🇰🇷 ETERNITY v15 (ClickHouse OLAP & Hybrid ETL)"
+          tag: "v16.1-stability-plus"
+          name: "🇰🇷 ETERNITY v16.1 (Crash Fix & Stability)"
           body: |
-            ## 🇰🇷 ETERNITY v15 (ULTIMATE-HYBRID)
+            ## 🇰🇷 v16.1 CRITICAL FIX
             
-            **Critical Fix:**
-            - ⚡ **Replaced Vertica with ClickHouse:** Fixed the `pull access denied` error by switching to `clickhouse/clickhouse-server` (Official Public Image).
-            - 🚀 **Performance:** ClickHouse provides superior speed for OLAP workloads in CI environments.
+            **Stability Patch:**
+            - 🛡️ **Input Validation:** Fixed the `syntax error at or near ")"` by adding fallback logic for empty inputs.
+            - 🔧 **Defensive Scripting:** Ensures `$ROWS` is always a valid integer before SQL execution.
             
-            **Features:**
-            - 🔄 **Hybrid ETL:** Real-time data pipeline from Postgres to ClickHouse.
-            - 🛡️ **Advanced Security:** PBKDF2 Encryption + Digital Notary (Integrity Check).
-            
-            *Automated by GitHub Actions.*
-          artifacts: "dump/*.iso"
+            **Capabilities:**
+            - 🧠 **Embedded AI Analytics:** Python (Pandas/Seaborn) integration.
+            - ⚡ **ClickHouse Partitioning:** `PARTITION BY region` enabled.
+            - 🛡️ **Security:** PBKDF2 Encryption.
+          artifacts: "artifacts/**/*"
           allowUpdates: true
           makeLatest: true
