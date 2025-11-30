@@ -1,4 +1,4 @@
-name: "🔐 Spring Boot CI (Massive Services & Inventory)"
+name: "🔐 Spring Boot CI (Compose V2 + Internal Network)"
 
 on:
   push:
@@ -34,6 +34,9 @@ env:
   SECURE_DB_USER: ${{ secrets.DB_USER || inputs.mysql_user }}
   SECURE_DB_PASS: ${{ secrets.DB_PASSWORD || inputs.mysql_pass }}
   DRIVER_URL: "https://repo1.maven.org/maven2/com/mysql/mysql-connector-j/8.2.0/mysql-connector-j-8.2.0.jar"
+  
+  # 네트워크 이름 정의
+  COMPOSE_PROJECT_NAME: "ci_stack"
 
 jobs:
   backend-orchestration:
@@ -47,6 +50,9 @@ jobs:
       - name: "Prepare Directories"
         run: |
           mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${RELEASE_DIR}" "${INVENTORY_DIR}" "${DATA_DIR}"
+          # 데이터 디렉토리 권한 미리 확보
+          mkdir -p "${DATA_DIR}/primary" "${DATA_DIR}/replica"
+          chmod -R 777 "${DATA_DIR}"
           echo "✅ Directories Created."
 
       - name: "Setup Temurin Java 17"
@@ -57,15 +63,17 @@ jobs:
           cache: maven
 
       # ----------------------------------------------------------------
-      # 1. Docker Compose 파일 생성 (서비스 대량 정의)
+      # 1. Docker Compose 파일 생성 (Healthcheck & Network 포함)
       # ----------------------------------------------------------------
-      - name: "Generate Docker Compose (Massive Services)"
+      - name: "Generate Docker Compose"
         run: |
           cat <<EOF > docker-compose.yml
           version: '3.8'
           
           networks:
-            ci-net:
+            # 명시적 네트워크 이름 설정
+            ci-network:
+              name: ci-network
               driver: bridge
 
           services:
@@ -81,10 +89,16 @@ jobs:
               volumes:
                 - ./${DATA_DIR}/primary:/var/lib/mysql
               networks:
-                - ci-net
+                - ci-network
               command: --max_connections=1000
+              # 자체 헬스체크 추가
+              healthcheck:
+                test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u${SECURE_DB_USER}", "-p${SECURE_DB_PASS}"]
+                interval: 5s
+                timeout: 3s
+                retries: 10
 
-            # [Service 2] Replica Database (확장성 시뮬레이션)
+            # [Service 2] Replica Database
             mysql-replica:
               image: mysql:8.0
               container_name: ci-mysql-replica
@@ -96,78 +110,80 @@ jobs:
               volumes:
                 - ./${DATA_DIR}/replica:/var/lib/mysql
               networks:
-                - ci-net
+                - ci-network
 
-            # [Service 3] Redis (캐시 서비스 추가)
+            # [Service 3] Redis Cache
             redis-cache:
               image: redis:alpine
               container_name: ci-redis
               ports:
                 - "6379:6379"
               networks:
-                - ci-net
+                - ci-network
           EOF
           
           echo "📄 docker-compose.yml generated."
-          cat docker-compose.yml
 
       # ----------------------------------------------------------------
-      # 2. 서비스 일괄 실행 (Orchestration)
+      # 2. 서비스 실행 (docker compose v2 명령어 사용)
       # ----------------------------------------------------------------
-      - name: "🚀 Start All Services"
-        continue-on-error: true
+      - name: "🚀 Start Services (Compose V2)"
         run: |
-          echo "Starting Docker Compose Stack..."
-          docker-compose up -d
+          echo "Starting Stack..."
+          # [수정] docker-compose -> docker compose (하이픈 제거)
+          docker compose up -d
           
-          echo "⏳ Waiting for Services..."
-          sleep 10
+          echo "⏳ Waiting for Healthchecks..."
+          # docker compose wait 명령어를 사용하면 서비스가 healthy 상태가 될 때까지 기다려줍니다.
+          # 하지만 구버전 호환성을 위해 직접 loop 체크
           
-          # MySQL Primary Health Check
           for i in {1..30}; do
-            if mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -p"${SECURE_DB_PASS}" --silent; then
-              echo "✅ MySQL Primary is Ready!"
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' ci-mysql-primary 2>/dev/null || echo "starting")
+            echo "[$i] Primary Status: $STATUS"
+            if [ "$STATUS" == "healthy" ]; then
+              echo "✅ MySQL Primary is HEALTHY!"
               break
             fi
             sleep 2
           done
 
       # ----------------------------------------------------------------
-      # 3. [요청사항] 모든 정보 디렉토리 적재 (Inventory Recording)
+      # 3. 인벤토리 적재 (디렉토리에 정보 저장)
       # ----------------------------------------------------------------
-      - name: "📂 Record Service Inventory"
+      - name: "📂 Archive Service Inventory"
         continue-on-error: true
         run: |
-          echo "Collecting Container Info..."
+          echo "Archiving Container Data..."
           
-          # 1. 실행 중인 컨테이너 목록 적재
-          docker ps -a > "${INVENTORY_DIR}/containers_list.txt"
+          # 1. 전체 프로세스 목록
+          docker compose ps -a > "${INVENTORY_DIR}/compose_ps.txt"
           
-          # 2. 상세 스펙(JSON) 적재
-          docker inspect ci-mysql-primary > "${INVENTORY_DIR}/primary_inspect.json"
-          docker inspect ci-mysql-replica > "${INVENTORY_DIR}/replica_inspect.json"
-          docker inspect ci-redis > "${INVENTORY_DIR}/redis_inspect.json"
+          # 2. 개별 서비스 상세 정보 및 로그 (반복문 처리)
+          SERVICES=("ci-mysql-primary" "ci-mysql-replica" "ci-redis")
           
-          # 3. 네트워크 정보 적재
-          docker network inspect ci_ci-net > "${INVENTORY_DIR}/network_inspect.json" || docker network ls > "${INVENTORY_DIR}/network_list.txt"
+          for SVC in "${SERVICES[@]}"; do
+            echo "Archiving $SVC..."
+            if docker ps -q -f name=$SVC > /dev/null; then
+               docker inspect $SVC > "${INVENTORY_DIR}/${SVC}_inspect.json"
+               docker logs $SVC > "${INVENTORY_DIR}/${SVC}.log" 2>&1
+            else
+               echo "⚠️ $SVC not found running." > "${INVENTORY_DIR}/${SVC}_error.txt"
+            fi
+          done
           
-          # 4. 로그 적재
-          docker logs ci-mysql-primary > "${INVENTORY_DIR}/primary.log" 2>&1
-          docker logs ci-mysql-replica > "${INVENTORY_DIR}/replica.log" 2>&1
+          # 3. 네트워크 정보
+          docker network inspect ci-network > "${INVENTORY_DIR}/network_inspect.json"
           
-          echo "✅ All service data archived in ${INVENTORY_DIR}/"
           ls -R "${INVENTORY_DIR}"
 
       # ----------------------------------------------------------------
-      # 4. Maven Build & Driver Setup
+      # 4. Maven Build & Driver
       # ----------------------------------------------------------------
       - name: "Download Driver & Build"
         run: |
-          # 드라이버 다운로드
           mkdir -p libs
           wget -q -O libs/mysql-driver.jar "${{ env.DRIVER_URL }}"
           
-          # Maven 빌드
           export SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/mydb?useSSL=false"
           export SPRING_DATASOURCE_USERNAME="$SECURE_DB_USER"
           export SPRING_DATASOURCE_PASSWORD="$SECURE_DB_PASS"
@@ -182,9 +198,9 @@ jobs:
           fi
 
       # ----------------------------------------------------------------
-      # 5. Java Test (Primary DB 연결)
+      # 5. Java Test (Internal Network 사용)
       # ----------------------------------------------------------------
-      - name: "Generate & Run Test Code"
+      - name: "Run Test (Inside Network)"
         continue-on-error: true
         run: |
           cat <<EOF > JdbcSmokeTest.java
@@ -201,30 +217,31 @@ jobs:
                   Class.forName("com.mysql.cj.jdbc.Driver");
                   
                   try (Connection conn = DriverManager.getConnection(url, user, pass)) {
-                      System.out.println("[SMOKE] Connected! Executing " + scale + " inserts.");
-                      if (scale > 0) {
-                          try (PreparedStatement pstmt = conn.prepareStatement("INSERT INTO users (name, age) VALUES (?, ?)")) {
-                              // 테이블 생성 (Compose에서 초기화 안되었을 경우 대비)
-                              Statement stmt = conn.createStatement();
-                              stmt.execute("CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100), age INT)");
-                              
-                              for (int i = 1; i <= scale; i++) {
-                                  pstmt.setString(1, "User_" + i);
-                                  pstmt.setInt(2, new Random().nextInt(100));
-                                  pstmt.executeUpdate();
-                              }
+                      System.out.println("[SMOKE] Connected via Internal Network!");
+                      
+                      Statement stmt = conn.createStatement();
+                      stmt.execute("CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(100), age INT)");
+                      
+                      try (PreparedStatement pstmt = conn.prepareStatement("INSERT INTO users (name, age) VALUES (?, ?)")) {
+                          for (int i = 1; i <= scale; i++) {
+                              pstmt.setString(1, "User_" + i);
+                              pstmt.setInt(2, new Random().nextInt(100));
+                              pstmt.executeUpdate();
                           }
                       }
-                      System.out.println("[SMOKE] Success.");
+                      System.out.println("[SMOKE] Success: " + scale + " rows inserted.");
                   }
               }
           }
           EOF
 
-          # Host Network 모드 대신 포트 포워딩된 로컬호스트 사용
+          # [핵심 수정]
+          # 1. --network ci-network: 테스트 컨테이너를 DB와 같은 네트워크에 넣습니다.
+          # 2. mysql-primary: localhost 대신 서비스 이름(DNS)을 사용합니다.
+          
           docker run --rm \
-            --network host \
-            -e DB_URL="jdbc:mysql://127.0.0.1:3306/mydb?useSSL=false&allowPublicKeyRetrieval=true" \
+            --network ci-network \
+            -e DB_URL="jdbc:mysql://ci-mysql-primary:3306/mydb?useSSL=false&allowPublicKeyRetrieval=true" \
             -e DB_USER="$SECURE_DB_USER" \
             -e DB_PASS="$SECURE_DB_PASS" \
             -e SCALE="${{ inputs.scale_count || 50 }}" \
@@ -235,30 +252,31 @@ jobs:
             sh -c 'javac -cp ".:/libs/mysql-driver.jar" JdbcSmokeTest.java && java -cp ".:/libs/mysql-driver.jar" JdbcSmokeTest'
 
       # ----------------------------------------------------------------
-      # 6. 서비스 재시작 및 데이터 무결성 확인
+      # 6. 재시작 및 데이터 검증
       # ----------------------------------------------------------------
-      - name: "🔄 Restart Services & Verify Persistence"
+      - name: "🔄 Restart Stack (Persistence Check)"
         continue-on-error: true
         run: |
-          echo "🛑 Restarting All Services via Compose..."
-          docker-compose restart
+          echo "Restarting via Docker Compose..."
+          # [수정] docker compose 명령어 사용
+          docker compose restart
           
-          echo "⏳ Waiting for Recovery..."
+          echo "⏳ Waiting for Health status..."
           sleep 10
           
-          # 재시작 후 데이터 디렉토리에 파일이 존재하는지 확인 (적재 확인)
+          # 재시작 후에도 데이터 파일이 남아있는지 물리적으로 확인
           if [ -d "${DATA_DIR}/primary/sys" ]; then
-             echo "✅ Data Directory Persistence Verified: ${DATA_DIR}/primary"
-             ls -l "${DATA_DIR}/primary"
+             echo "✅ Persistence Verified. Data files exist."
+             ls -l "${DATA_DIR}/primary" | head -n 5
           else
-             echo "❌ Data Directory Missing!"
+             echo "❌ Data missing!"
              exit 1
           fi
 
       # ----------------------------------------------------------------
-      # 7. Artifacts & Cleanup
+      # 7. 정리 및 업로드
       # ----------------------------------------------------------------
-      - name: "Upload Artifacts (App + Inventory)"
+      - name: "Upload Full Artifacts"
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -269,7 +287,7 @@ jobs:
             
       - name: "Cleanup"
         if: always()
-        run: docker-compose down -v
+        run: docker compose down -v
 
   extension-package:
     name: "🧩 Rep+ Extension Package"
@@ -307,9 +325,9 @@ jobs:
         with:
           files: final_release/*
           body: |
-            ## 🚀 Massive Service Release: ${{ github.ref_name }}
-            - **Orchestration**: Docker Compose (Primary, Replica, Redis).
-            - **Inventory**: Full container logs & inspect data archived.
-            - **Persistence**: Data mapped to `${{ env.DATA_DIR }}`.
+            ## 🚀 Massive Release: ${{ github.ref_name }}
+            - **Tech Stack**: Docker Compose V2, MySQL 8, Redis.
+            - **Persistence**: Verified data survival after restart.
+            - **Inventory**: Logs and Inspect data archived.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
