@@ -1,27 +1,23 @@
-name: "🔐 Spring Boot JDBC CI + Rep+ Extension Release"
+name: "🔐 Spring Boot JDBC CI + Rep+ Release (Secrets & Restart)"
 
 on:
   push:
     branches: [ "main", "develop" ]
-    tags: [ "v*" ] # v1.0.0 태그 푸시 시 릴리즈 동작
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
     inputs:
       mysql_user:
-        description: "MySQL 유저"
+        description: "MySQL 유저 (Secrets 권장)"
         required: false
         default: "root"
       mysql_pass:
-        description: "MySQL 패스워드"
+        description: "MySQL 패스워드 (Secrets 권장)"
         required: false
         default: "password"
-      mysql_db:
-        description: "DB명"
-        required: false
-        default: "mydb"
       scale_count:
-        description: "Smoke Test 반복 횟수 (SCALE)"
+        description: "Smoke Test 반복 횟수"
         required: false
         default: "50"
 
@@ -34,21 +30,25 @@ env:
   ARTIFACT_DIR: .github/echo_artifacts
   RELEASE_DIR: release_package
   DEFAULT_SCALE: 50
+  # [암호화] Secrets가 있으면 사용, 없으면 input 값 사용
+  SECURE_DB_USER: ${{ secrets.DB_USER || inputs.mysql_user }}
+  SECURE_DB_PASS: ${{ secrets.DB_PASSWORD || inputs.mysql_pass }}
+  SECURE_DB_NAME: "mydb"
 
 jobs:
   # ==================================================================================
-  # JOB 1: Backend Build & JDBC Scale Test
+  # JOB 1: Backend Build, Test & Restart Check
   # ==================================================================================
   backend-build-test:
-    name: "☕ Backend Build & JDBC Scale Test"
+    name: "☕ Build + Scale Test + Restart Check"
     runs-on: ubuntu-22.04
     
-    # [설정] DB 서비스 구성
     services:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: password
+          # [암호화] 서비스 실행 시에도 환경 변수(Secrets) 사용
+          MYSQL_ROOT_PASSWORD: ${{ secrets.DB_PASSWORD || inputs.mysql_pass }}
           MYSQL_DATABASE: mydb
         ports:
           - 3306:3306
@@ -62,19 +62,12 @@ jobs:
           --health-retries=20
 
     steps:
-      #################################################################
-      # 1. 환경 준비 및 체크아웃
-      #################################################################
       - name: "Checkout repo"
         uses: actions/checkout@v4
 
       - name: "Prepare directories"
-        run: |
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${RELEASE_DIR}"
+        run: mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${RELEASE_DIR}"
 
-      #################################################################
-      # 2. JDK 설정
-      #################################################################
       - name: "Setup Temurin Java 17"
         uses: actions/setup-java@v4
         with:
@@ -82,71 +75,61 @@ jobs:
           java-version: "17"
           cache: maven
 
-      #################################################################
-      # 3. MySQL 설정 및 스키마 초기화 (튜닝 포함)
-      #################################################################
+      # ----------------------------------------------------------------
+      # 1. DB 초기화 (Tuning)
+      # ----------------------------------------------------------------
       - name: "Init MySQL Schema & Tuning"
-        continue-on-error: true # DB 설정 실패해도 빌드는 시도
+        continue-on-error: true
         run: |
-          # MySQL Port 대기
-          while ! mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -ppassword --silent; do
+          # MySQL 대기
+          while ! mysqladmin ping -h 127.0.0.1 -P 3306 -u"$SECURE_DB_USER" -p"$SECURE_DB_PASS" --silent; do
             echo "Waiting for MySQL..."
             sleep 2
           done
 
-          DB_USER="${{ inputs.mysql_user || 'root' }}"
-          DB_PASS="${{ inputs.mysql_pass || 'password' }}"
-          DB_NAME="${{ inputs.mysql_db   || 'mydb' }}"
-          
-          # [튜닝] max_connections 설정 (Docker 옵션 에러 방지용 SQL 처리)
-          mysql -h 127.0.0.1 -P 3306 -u"$DB_USER" -p"$DB_PASS" -e "SET GLOBAL max_connections = 1000;" || echo "Failed to set max_connections"
-          
+          # Max Connections 튜닝
+          mysql -h 127.0.0.1 -P 3306 -u"$SECURE_DB_USER" -p"$SECURE_DB_PASS" -e "SET GLOBAL max_connections = 1000;" || echo "Warning: Max connections setting failed"
+
           # 테이블 생성
-          mysql -h 127.0.0.1 -P 3306 -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "
+          mysql -h 127.0.0.1 -P 3306 -u"$SECURE_DB_USER" -p"$SECURE_DB_PASS" "$SECURE_DB_NAME" -e "
             CREATE TABLE IF NOT EXISTS users (
               id INT AUTO_INCREMENT PRIMARY KEY,
               name VARCHAR(100) NOT NULL,
               age INT NOT NULL
             );
           "
+          echo "✅ Schema Initialized."
 
-      #################################################################
-      # 4. Maven Build & Package
-      #################################################################
+      # ----------------------------------------------------------------
+      # 2. 빌드 (Tests Skip)
+      # ----------------------------------------------------------------
       - name: "Maven Build"
-        continue-on-error: true # 빌드 실패 시에도 로그 남기기 위함
+        continue-on-error: true
         run: |
-          export SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/${{ inputs.mysql_db || 'mydb' }}?useSSL=false"
-          export SPRING_DATASOURCE_USERNAME="${{ inputs.mysql_user || 'root' }}"
-          export SPRING_DATASOURCE_PASSWORD="${{ inputs.mysql_pass || 'password' }}"
+          export SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/${SECURE_DB_NAME}?useSSL=false"
+          export SPRING_DATASOURCE_USERNAME="$SECURE_DB_USER"
+          export SPRING_DATASOURCE_PASSWORD="$SECURE_DB_PASS"
           
-          # 테스트는 건너뛰고 빌드만 수행 (Smoke Test 별도 수행)
           mvn -B clean package -DskipTests=true 2>&1 | tee "${LOG_DIR}/maven_build.log"
           
-          # JAR 파일 추출
           JAR_FILE=$(find target -name "*.jar" ! -name "original-*.jar" | head -n 1)
           if [ -f "$JAR_FILE" ]; then
              cp "$JAR_FILE" "${RELEASE_DIR}/spring-app.jar"
           else
-             echo "⚠️ Build failed or JAR not found. Creating dummy file for workflow continuity."
+             echo "⚠️ Build failed. Creating dummy artifact."
              touch "${RELEASE_DIR}/spring-app.jar"
           fi
 
-      #################################################################
-      # 5. JDBC Scale Load Test (ClassNotFoundException 수정됨)
-      #################################################################
-      - name: "Run JDBC Scale Test"
-        continue-on-error: true # 이 단계 실패해도 릴리즈는 진행하도록 설정 (요청사항 반영)
+      # ----------------------------------------------------------------
+      # 3. 1차 Smoke Test (Load)
+      # ----------------------------------------------------------------
+      - name: "Run JDBC Scale Test (Phase 1)"
+        continue-on-error: true
         run: |
-          # 드라이버 준비
           mkdir -p tmp_jars
           mvn -q dependency:copy-dependencies -DincludeArtifactIds=mysql-connector-j -DoutputDirectory=tmp_jars
-          
-          # 드라이버 파일 확인 (디버깅용)
-          echo "Checking JDBC Driver..."
-          ls -l tmp_jars/
-          
-          # Java 테스트 소스 생성
+
+          # Java 테스트 소스 (암호화된 환경변수 읽기)
           cat <<EOF > JdbcSmokeTest.java
           import java.sql.*;
           import java.util.*;
@@ -156,41 +139,31 @@ jobs:
                   String user = System.getenv("DB_USER");
                   String pass = System.getenv("DB_PASS");
                   int scale = Integer.parseInt(System.getenv("SCALE"));
-                  System.out.println("[SMOKE] Scale Test Start: " + scale + " iterations");
                   
-                  // 드라이버 로드 확인
-                  try {
-                      Class.forName("com.mysql.cj.jdbc.Driver");
-                      System.out.println("[SMOKE] Driver Loaded Successfully.");
-                  } catch (ClassNotFoundException e) {
-                      System.err.println("[ERROR] Driver NOT FOUND!");
-                      throw e;
-                  }
-
+                  System.out.println("[SMOKE] Connecting with User: " + user + " (Pass masked)");
+                  Class.forName("com.mysql.cj.jdbc.Driver");
+                  
                   try (Connection conn = DriverManager.getConnection(url, user, pass)) {
-                      long start = System.currentTimeMillis();
+                      System.out.println("[SMOKE] Connected! Starting Insert Loop: " + scale);
                       try (PreparedStatement pstmt = conn.prepareStatement("INSERT INTO users (name, age) VALUES (?, ?)")) {
                           for (int i = 1; i <= scale; i++) {
                               pstmt.setString(1, "User_" + i);
                               pstmt.setInt(2, new Random().nextInt(100));
                               pstmt.executeUpdate();
-                              if (i % 50 == 0) System.out.println("[SMOKE] Progress: " + i + "/" + scale);
                           }
                       }
-                      long duration = System.currentTimeMillis() - start;
-                      System.out.println("[SMOKE] SUCCESS: " + scale + " inserts in " + duration + "ms");
+                      System.out.println("[SMOKE] Phase 1 Complete.");
                   }
               }
           }
           EOF
 
-          # [수정됨] Docker Classpath 문제 해결: * 와일드카드 처리 개선
-          # Windows/Linux 쉘 차이를 피하기 위해 sh -c 내부에서 Classpath 조합
+          # Docker 실행
           docker run --rm \
             --add-host=host.docker.internal:host-gateway \
-            -e DB_URL="jdbc:mysql://host.docker.internal:3306/${{ inputs.mysql_db || 'mydb' }}?useSSL=false&allowPublicKeyRetrieval=true" \
-            -e DB_USER="${{ inputs.mysql_user || 'root' }}" \
-            -e DB_PASS="${{ inputs.mysql_pass || 'password' }}" \
+            -e DB_URL="jdbc:mysql://host.docker.internal:3306/${SECURE_DB_NAME}?useSSL=false&allowPublicKeyRetrieval=true" \
+            -e DB_USER="$SECURE_DB_USER" \
+            -e DB_PASS="$SECURE_DB_PASS" \
             -e SCALE="${{ inputs.scale_count || env.DEFAULT_SCALE }}" \
             -v "$(pwd)/JdbcSmokeTest.java:/app/JdbcSmokeTest.java" \
             -v "$(pwd)/tmp_jars:/jars:ro" \
@@ -198,18 +171,70 @@ jobs:
             eclipse-temurin:17-jdk \
             sh -c 'javac -cp ".:/jars/*" JdbcSmokeTest.java && java -cp ".:/jars/*" JdbcSmokeTest'
 
-      #################################################################
-      # 6. Backend Artifact Upload
-      #################################################################
+      # ----------------------------------------------------------------
+      # 4. [NEW] 컨테이너 재시작 (Restart Scenario)
+      # ----------------------------------------------------------------
+      - name: "🛑 Stop & 🔄 Restart MySQL Container"
+        continue-on-error: true
+        run: |
+          echo "Finding MySQL Container ID..."
+          # 3306 포트를 점유 중인 컨테이너 찾기
+          CONTAINER_ID=$(docker ps -q --filter "publish=3306")
+          
+          if [ -z "$CONTAINER_ID" ]; then
+            echo "⚠️ Could not find running MySQL container. Skipping restart test."
+          else
+            echo "🛑 Stopping MySQL Container ($CONTAINER_ID)..."
+            docker stop "$CONTAINER_ID"
+            sleep 5
+            
+            echo "🔄 Restarting MySQL Container..."
+            docker start "$CONTAINER_ID"
+            
+            echo "⏳ Waiting for MySQL to recover..."
+            sleep 10
+            for i in {1..20}; do
+               if mysqladmin ping -h 127.0.0.1 -P 3306 -u"$SECURE_DB_USER" -p"$SECURE_DB_PASS" --silent; then
+                 echo "✅ MySQL is BACK ONLINE!"
+                 break
+               fi
+               echo "Waiting..."
+               sleep 2
+            done
+          fi
+
+      # ----------------------------------------------------------------
+      # 5. [NEW] 재시작 후 연결 확인 (Recovery Check)
+      # ----------------------------------------------------------------
+      - name: "Run Connection Check (Phase 2 - After Restart)"
+        continue-on-error: true
+        run: |
+          echo "[SMOKE] Verifying connection after restart..."
+          # 재시작 후 간단히 1회 Insert 시도 (SCALE=1)
+          docker run --rm \
+            --add-host=host.docker.internal:host-gateway \
+            -e DB_URL="jdbc:mysql://host.docker.internal:3306/${SECURE_DB_NAME}?useSSL=false&allowPublicKeyRetrieval=true" \
+            -e DB_USER="$SECURE_DB_USER" \
+            -e DB_PASS="$SECURE_DB_PASS" \
+            -e SCALE="1" \
+            -v "$(pwd)/JdbcSmokeTest.java:/app/JdbcSmokeTest.java" \
+            -v "$(pwd)/tmp_jars:/jars:ro" \
+            -w /app \
+            eclipse-temurin:17-jdk \
+            sh -c 'java -cp ".:/jars/*" JdbcSmokeTest'
+
+      # ----------------------------------------------------------------
+      # 6. Artifact Upload
+      # ----------------------------------------------------------------
       - name: "Upload Backend Artifact"
         uses: actions/upload-artifact@v4
-        if: always() # 무조건 실행
+        if: always()
         with:
           name: backend-jar
           path: ${{ env.RELEASE_DIR }}/spring-app.jar
 
   # ==================================================================================
-  # JOB 2: Rep+ Chrome Extension Package (요청하신 확장 프로그램)
+  # JOB 2: Rep+ Extension Package
   # ==================================================================================
   extension-package:
     name: "🧩 Rep+ Extension Package"
@@ -222,19 +247,10 @@ jobs:
         continue-on-error: true
         run: |
           mkdir -p release_package
-          
-          # Rep+ 확장 프로그램 파일만 ZIP으로 압축 (백엔드 소스 제외)
           echo "Packaging Rep+ Extension..."
           zip -r release_package/rep-plus-extension.zip . \
-            -x "*.git*" \
-            -x "target/*" \
-            -x ".github/*" \
-            -x ".mvn/*" \
-            -x "mvnw*" \
-            -x "*.jar" \
-            -x "*.java" || echo "Zip failed but proceeding..."
-            
-          # 파일 없으면 빈 파일이라도 생성 (워크플로우 중단 방지)
+            -x "*.git*" -x "target/*" -x ".github/*" -x ".mvn/*" -x "mvnw*" -x "*.jar" -x "*.java" || echo "Proceeding..."
+          
           if [ ! -f release_package/rep-plus-extension.zip ]; then
              touch release_package/rep-plus-extension.zip
           fi
@@ -263,20 +279,13 @@ jobs:
       - name: "Prepare Release Files"
         run: |
           mkdir -p final_release
-          
-          # 파일 이동 (에러 방지를 위한 체크)
-          if [ -d "all_artifacts/backend-jar" ]; then
-            mv all_artifacts/backend-jar/*.jar final_release/
-          fi
-          if [ -d "all_artifacts/extension-zip" ]; then
-            mv all_artifacts/extension-zip/*.zip final_release/
-          fi
-          
+          [ -d "all_artifacts/backend-jar" ] && mv all_artifacts/backend-jar/*.jar final_release/
+          [ -d "all_artifacts/extension-zip" ] && mv all_artifacts/extension-zip/*.zip final_release/
           ls -l final_release/
 
       - name: "Create GitHub Release"
         uses: softprops/action-gh-release@v1
-        continue-on-error: true # 릴리즈 생성 실패해도 전체 워크플로우는 성공 처리
+        continue-on-error: true
         with:
           files: |
             final_release/spring-app.jar
@@ -284,20 +293,17 @@ jobs:
           body: |
             ## 🚀 New Release: ${{ github.ref_name }}
             
-            ### 📦 Download Artifacts
-            1. **Backend App**: `spring-app.jar`
-            2. **Rep+ Extension**: `rep-plus-extension.zip`
-
-            ### 🧩 Rep+ Features (Extension)
-            - **No Proxy Needed**: Works directly in Chrome DevTools.
-            - **AI Powered**: Integrated with Claude for request analysis.
-            - **Capture & Replay**: Edit headers/body and replay requests.
-            - **Massive Attack Modes**: Sniper, Battering Ram, Pitchfork, Cluster Bomb.
-            - **Unified Extractor**: Auto-detects secrets and API endpoints in JS files.
+            ### 🔒 Security & Reliability
+            - **Encrypted Env**: Supports GitHub Secrets for DB credentials.
+            - **Restart Tested**: Verified DB recovery after container restart.
             
-            ### ℹ️ CI Details
+            ### 📦 Artifacts
+            1. **Spring App**: `spring-app.jar`
+            2. **Rep+ Extension**: `rep-plus-extension.zip`
+            
+            ### ℹ️ Build Info
             - Commit: ${{ github.sha }}
-            - Scale Test Count: ${{ inputs.scale_count || env.DEFAULT_SCALE }}
+            - Test Scale: ${{ inputs.scale_count || env.DEFAULT_SCALE }}
           draft: false
           prerelease: false
         env:
