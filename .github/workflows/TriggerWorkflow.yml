@@ -1,0 +1,52 @@
+name: "🛡️ DefenderBot Autonomous Patrol Trigger"
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"  # 24시간 순환 감시 (6시간 간격)
+  workflow_dispatch:       # 수동 실행 지원
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  security-events: write
+  actions: write # 실패한 워크플로우 제어를 위해 필요
+
+jobs:
+  # -----------------------------------------------------------------------------------
+  # 전략 매트릭스 정의: 다양한 환경(Variant)에 대해 병렬로 순찰 및 배포 수행
+  # -----------------------------------------------------------------------------------
+  patrol-matrix:
+    name: "🚀 Patrol Dispatcher"
+    strategy:
+      fail-fast: false # 하나가 실패해도 나머지는 계속 진행
+      matrix:
+        include:
+          - variant: docker
+            distro: alpine
+            upgrade: "true"
+            port: 8080
+          - variant: linux
+            distro: ubuntu-22.04
+            upgrade: "true"
+            port: 22
+          - variant: java
+            distro: temurin-17
+            upgrade: "true"
+            port: 8081
+          - variant: python
+            distro: python-3.9
+            upgrade: "true"
+            port: 5000
+
+    # 재사용 워크플로우 호출
+    uses: ./.github/workflows/defenderbot.yml
+    with:
+      variant: ${{ matrix.variant }}
+      distro: ${{ matrix.distro }}
+      upgrade: ${{ matrix.upgrade }}
+      service_port: ${{ matrix.port }}
+      release_tag: "v-${{ github.run_number }}"
+    secrets: inherit
