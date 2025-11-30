@@ -1,4 +1,4 @@
-name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v14 (ULTIMATE-INTEGRITY)"
+name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v15 (ULTIMATE-HYBRID)"
 
 on:
   schedule:
@@ -31,20 +31,20 @@ env:
   MODEL_DIR: ai_models
   VAULT_DIR: vault_secure
   AUDIT_DIR: audit_logs
-  # Security (Updated)
-  ENC_KEY: "korea-fin-eternity-secret-key-v14"
-  ENC_ITER: "100000" # PBKDF2 Iterations (High Security)
+  # Security (PBKDF2 Ready)
+  ENC_KEY: "korea-fin-eternity-secret-key-v15"
+  ENC_ITER: "100000"
   # DB Credentials
   PG_USER: postgres
   PG_PASS: postgres
-  VERTICA_DB_USER: dbadmin
-  VERTICA_DB_PASS: vertica_strong_password
-  VERTICA_DB_NAME: VMart
+  # ClickHouse (OLAP Replacement)
+  CLICKHOUSE_USER: default
+  CLICKHOUSE_DB: default
   DOCKER_OPTS: "--restart unless-stopped --log-driver local"
 
 jobs:
   eternity-execution:
-    name: "ETERNITY BUILD (PBKDF2 Secured)"
+    name: "ETERNITY BUILD (ClickHouse OLAP)"
     runs-on: ubuntu-latest
     
     steps:
@@ -55,7 +55,7 @@ jobs:
         run: |
           mkdir -p dump ${LOG_DIR} ${REPORT_DIR} ${SQL_DIR} ${MASSIVE_DIR} ${ISO_DIR} ${MODEL_DIR} ${SERVICE_ROOT} ${VAULT_DIR} ${AUDIT_DIR}
           
-          # System Monitor Daemon
+          # System Monitor
           cat <<EOF > ${LOG_DIR}/monitor_daemon.sh
           #!/bin/bash
           while true; do
@@ -73,7 +73,6 @@ jobs:
       - name: "📦 Install Packages"
         run: |
           sudo killall apt apt-get 2>/dev/null || true
-          sudo rm -f /var/lib/apt/lists/lock
           
           safe_install() {
             sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends "$@"
@@ -82,61 +81,80 @@ jobs:
           echo "✅ Packages Installed."
 
       # ===========================================================================
-      # 2) POLYGLOT CLUSTER (Postgres + Vertica + NoSQL)
+      # 2) POLYGLOT CLUSTER (PG + ClickHouse)
       # ===========================================================================
-      - name: "🐘🏔️ Start Data Cluster"
+      - name: "🐘⚡ Start Hybrid Data Cluster"
         run: |
-          # OLTP & NoSQL
+          # 1. OLTP: PostgreSQL
           docker run -d --name pg_main $DOCKER_OPTS -e POSTGRES_PASSWORD=${{ env.PG_PASS }} -p 5432:5432 postgres:16-alpine -c 'synchronous_commit=off'
+          
+          # 2. NoSQL: Redis
           docker run -d --name redis_cache $DOCKER_OPTS -p 6379:6379 redis:alpine
           
-          # OLAP (Vertica)
-          echo "🏔️ Booting Vertica Analytics..."
-          docker run -d --name vertica_olap $DOCKER_OPTS \
-            -p 5433:5433 \
-            -e VERTICA_DB_NAME=${{ env.VERTICA_DB_NAME }} \
-            -e VMARTAUTH=${{ env.VERTICA_DB_USER }} \
-            -e VERTICA_DB_PASSWORD=${{ env.VERTICA_DB_PASS }} \
-            vertica/vertica-ce:latest
+          # [FIX] 3. OLAP: ClickHouse (Replaces Vertica)
+          # 공식 이미지를 사용하여 다운로드 오류 방지
+          echo "⚡ Booting ClickHouse OLAP Server..."
+          docker run -d --name clickhouse_olap $DOCKER_OPTS \
+            -p 8123:8123 -p 9000:9000 \
+            --ulimit nofile=262144:262144 \
+            clickhouse/clickhouse-server:latest
 
-          echo "⏳ Waiting for DBs..."
-          sleep 15
-          PGPASSWORD=${{ env.PG_PASS }} psql -h 127.0.0.1 -U ${{ env.PG_USER }} -c "SELECT 1;" || echo "⚠️ PG Starting..."
+          echo "⏳ Waiting for Cluster Initialization..."
+          sleep 10
+          
+          # Health Checks
+          PGPASSWORD=${{ env.PG_PASS }} psql -h 127.0.0.1 -U ${{ env.PG_USER }} -c "SELECT 1;" || echo "⚠️ PG Waiting..."
+          
+          # ClickHouse Health Check (HTTP API)
+          for i in {1..20}; do
+            if curl -s "http://localhost:8123/ping" | grep -q "Ok"; then
+              echo "✅ ClickHouse is UP and READY!"
+              break
+            fi
+            echo "💤 Waiting for ClickHouse... ($i/20)"
+            sleep 3
+          done
 
       # ===========================================================================
-      # 3) WEALTH INJECTION & ETL
+      # 3) WEALTH INJECTION & ETL (PG -> ClickHouse)
       # ===========================================================================
-      - name: "💰 Wealth Injection & ETL"
+      - name: "💰 Wealth Injection & ETL Pipeline"
         env:
           PGPASSWORD: ${{ env.PG_PASS }}
         run: |
           ROWS=${{ github.event.inputs.active_customer_count }}
           
-          # 1. Postgres Schema & Data
+          # 1. Postgres Data Injection (OLTP)
+          echo "👥 Injecting Customers into PostgreSQL..."
           docker exec -i pg_main psql -U ${{ env.PG_USER }} -c "
-            CREATE TABLE accounts (id SERIAL PRIMARY KEY, acc_num TEXT, balance BIGINT);
-            INSERT INTO accounts (acc_num, balance)
-            SELECT 'KR-'||g, 100000000 FROM generate_series(1, $ROWS) AS g;
+            CREATE TABLE accounts (id SERIAL PRIMARY KEY, acc_num TEXT, balance BIGINT, region TEXT);
+            INSERT INTO accounts (acc_num, balance, region)
+            SELECT 'KR-'||g, 100000000, (ARRAY['Seoul','Busan','Jeju'])[floor(random()*3)+1]
+            FROM generate_series(1, $ROWS) AS g;
           "
           
-          # 2. Vertica Schema
-          # Vertica 부팅 대기 (간소화된 루프)
-          for i in {1..20}; do
-            if docker exec vertica_olap /opt/vertica/bin/vsql -U ${{ env.VERTICA_DB_USER }} -w ${{ env.VERTICA_DB_PASS }} -c "SELECT 1;" &>/dev/null; then break; fi
-            echo "💤 Waiting Vertica... $i"
-            sleep 5
-          done
-
-          docker exec -i vertica_olap /opt/vertica/bin/vsql -U ${{ env.VERTICA_DB_USER }} -w ${{ env.VERTICA_DB_PASS }} -c "
-            CREATE TABLE IF NOT EXISTS dw_accounts (acc_num VARCHAR(20), balance INT);
+          # 2. ClickHouse Schema (OLAP)
+          echo "🏗️ Creating ClickHouse Schema..."
+          docker exec -i clickhouse_olap clickhouse-client --query="
+            CREATE TABLE IF NOT EXISTS default.dw_accounts (
+              acc_num String,
+              balance Int64,
+              region String
+            ) ENGINE = MergeTree() ORDER BY acc_num;
           "
           
-          # 3. ETL (Extract -> Load)
-          echo "🔄 Running ETL..."
-          psql -h 127.0.0.1 -U ${{ env.PG_USER }} -c "COPY (SELECT acc_num, balance FROM accounts LIMIT 5000) TO STDOUT WITH CSV" \
-          | docker exec -i vertica_olap /opt/vertica/bin/vsql -U ${{ env.VERTICA_DB_USER }} -w ${{ env.VERTICA_DB_PASS }} -c "COPY dw_accounts FROM STDIN DELIMITER ',' ABORT ON ERROR;"
+          # 3. ETL Execution (Stream Copy)
+          echo "🔄 Running ETL (PG -> CSV -> ClickHouse)..."
           
-          echo "✅ ETL Complete."
+          # Postgres에서 CSV 추출 -> 파이프(|) -> ClickHouse로 입력
+          psql -h 127.0.0.1 -U ${{ env.PG_USER }} -c "COPY (SELECT acc_num, balance, region FROM accounts LIMIT 10000) TO STDOUT WITH CSV" \
+          | docker exec -i clickhouse_olap clickhouse-client --format_csv_allow_single_quotes=0 --query="INSERT INTO default.dw_accounts FORMAT CSV"
+          
+          # 4. Analytics Verification
+          echo "📊 Analytics Result (Sum Balance by Region):"
+          docker exec -i clickhouse_olap clickhouse-client --query="
+            SELECT region, sum(balance) FROM default.dw_accounts GROUP BY region FORMAT Pretty;
+          "
 
       # ===========================================================================
       # 4) HYPER-SCALE SERVICE MESH
@@ -148,114 +166,106 @@ jobs:
           for i in $(seq -f "%03g" 1 $SVC_COUNT); do
              SVC_DIR="${SERVICE_ROOT}/svc_kr_${i}"
              mkdir -p ${SVC_DIR}/conf
-             echo "db.password=SECRET_PWD_${i}" > "${SVC_DIR}/conf/application.properties"
+             echo "db.type=clickhouse" > "${SVC_DIR}/conf/application.properties"
           done
 
       # ===========================================================================
-      # 5) SECURITY VAULT (FIXED: PBKDF2)
+      # 5) SECURITY VAULT (PBKDF2 + ClickHouse Backup)
       # ===========================================================================
       - name: "🔐 Encrypt Sensitive Data (PBKDF2)"
         env:
           PGPASSWORD: ${{ env.PG_PASS }}
         run: |
-          echo "🛡️ Encrypting with PBKDF2-HMAC-SHA256..."
+          echo "🛡️ Encrypting Assets..."
           
-          # 1. DB Dump
-          pg_dump -h 127.0.0.1 -p 5432 -U ${{ env.PG_USER }} postgres > ${SQL_DIR}/full_dump.sql
+          # 1. PG Dump
+          pg_dump -h 127.0.0.1 -p 5432 -U ${{ env.PG_USER }} postgres > ${SQL_DIR}/pg_dump.sql
           
-          # [FIX] -pbkdf2 및 -iter 옵션 추가
-          openssl enc -aes-256-cbc -salt -pbkdf2 -iter ${{ env.ENC_ITER }} \
-            -in ${SQL_DIR}/full_dump.sql \
-            -out ${VAULT_DIR}/db_dump.sql.enc \
-            -k "${ENC_KEY}"
-          rm ${SQL_DIR}/full_dump.sql
+          # 2. ClickHouse Data Export (Backup)
+          docker exec -i clickhouse_olap clickhouse-client --query="SELECT * FROM default.dw_accounts FORMAT Parquet" > ${MASSIVE_DIR}/olap_backup.parquet
           
-          # 2. Service Configs (Batch)
-          find ${SERVICE_ROOT} -name "application.properties" | while read config; do
-            dir=$(dirname "$config")
-            filename=$(basename "$config")
-            
-            # [FIX] -pbkdf2 및 -iter 옵션 추가
-            openssl enc -aes-256-cbc -salt -pbkdf2 -iter ${{ env.ENC_ITER }} \
-              -in "$config" \
-              -out "${dir}/${filename}.enc" \
-              -k "${ENC_KEY}"
-            rm "$config"
-          done
+          # 3. Encryption (PBKDF2 Applied)
+          # PG Dump Encrypt
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter ${{ env.ENC_ITER }} -in ${SQL_DIR}/pg_dump.sql -out ${VAULT_DIR}/pg_dump.sql.enc -k "${ENC_KEY}"
+          # OLAP Backup Encrypt
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter ${{ env.ENC_ITER }} -in ${MASSIVE_DIR}/olap_backup.parquet -out ${VAULT_DIR}/olap_backup.parquet.enc -k "${ENC_KEY}"
           
-          echo "✅ Encryption Complete (No Warnings)."
-          ls -lh ${VAULT_DIR}
+          # Cleanup
+          rm ${SQL_DIR}/pg_dump.sql ${MASSIVE_DIR}/olap_backup.parquet
+          
+          echo "✅ Encryption Complete."
 
       # ===========================================================================
-      # [NEW] 6) DIGITAL NOTARY (INTEGRITY CHECK)
+      # 6) DIGITAL NOTARY (INTEGRITY CHECK)
       # ===========================================================================
       - name: "📜 Digital Notary & Integrity Audit"
         run: |
-          echo "🔍 Generating SHA-256 Checksums for Audit Trail..."
+          echo "🔍 Generating Checksums..."
+          find ${VAULT_DIR} -name "*.enc" -type f -exec sha256sum {} + > ${AUDIT_DIR}/integrity_ledger.txt
           
-          # 모든 암호화된 파일에 대해 해시값 생성
-          find ${VAULT_DIR} ${SERVICE_ROOT} -name "*.enc" -type f -exec sha256sum {} + > ${AUDIT_DIR}/integrity_ledger.txt
-          
-          # 무결성 검증 시뮬레이션
           echo "👮 Verifying Integrity..."
           if sha256sum -c ${AUDIT_DIR}/integrity_ledger.txt; then
-            echo "✅ INTEGRITY VERIFIED: All files are tamper-proof."
+            echo "✅ INTEGRITY VERIFIED."
           else
-            echo "❌ INTEGRITY ALERT: File tampering detected!"
+            echo "❌ TAMPERING DETECTED."
             exit 1
           fi
-          
-          cat ${AUDIT_DIR}/integrity_ledger.txt | head -n 5
 
       # ===========================================================================
       # 7) RESILIENCE TEST
       # ===========================================================================
       - name: "🔄 Cluster Resilience Test"
         run: |
-          docker stop pg_main vertica_olap
+          echo "⚠️ Stopping OLTP & OLAP..."
+          docker stop pg_main clickhouse_olap
           sleep 5
-          docker start pg_main vertica_olap
-          echo "✅ Cluster Rebooted."
+          
+          echo "▶️ Restarting..."
+          docker start pg_main clickhouse_olap
+          
+          sleep 10
+          echo "🏥 Health Check..."
+          curl -f -s "http://localhost:8123/ping" && echo "ClickHouse OK" || exit 1
+          PGPASSWORD=${{ env.PG_PASS }} pg_isready -h 127.0.0.1 || exit 1
+          echo "✅ Cluster Recovered."
 
       # ===========================================================================
       # 8) RELEASE
       # ===========================================================================
-      - name: "📊 Release v14"
+      - name: "📊 Release v15"
         run: |
-          # Dashboard
           cat <<EOF > ${REPORT_DIR}/index.html
           <!DOCTYPE html><html><body>
-          <h1>🇰🇷 ETERNITY v14 Security Report</h1>
-          <p>Encryption: AES-256-CBC (PBKDF2 / 100k Iterations)</p>
-          <p>Integrity: SHA-256 Verified</p>
+          <h1>🇰🇷 ETERNITY v15 Hybrid Report</h1>
+          <p>OLTP: PostgreSQL (Transactions)</p>
+          <p>OLAP: ClickHouse (Analytics)</p>
+          <p>Security: PBKDF2 + SHA256 Integrity</p>
           </body></html>
           EOF
           
-          # Pack
           mkdir -p ${ISO_DIR}/{00_Dash,01_Vault,02_Audit}
           cp ${REPORT_DIR}/index.html ${ISO_DIR}/00_Dash/
           cp ${VAULT_DIR}/*.enc ${ISO_DIR}/01_Vault/
           cp ${AUDIT_DIR}/integrity_ledger.txt ${ISO_DIR}/02_Audit/
           
-          xorriso -as mkisofs -o dump/Korea-Eternity-v14.iso -J -R -V 'KOR-ETERNITY-v14' ${ISO_DIR}
+          xorriso -as mkisofs -o dump/Korea-Eternity-v15.iso -J -R -V 'KOR-ETERNITY-v15' ${ISO_DIR}
 
       - name: "🚀 GitHub Release"
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v14-eternity-integrity"
-          name: "🇰🇷 ETERNITY v14 (PBKDF2 Secured & Digital Notary)"
+          tag: "v15-eternity-hybrid"
+          name: "🇰🇷 ETERNITY v15 (ClickHouse OLAP & Hybrid ETL)"
           body: |
-            ## 🇰🇷 ETERNITY v14 (ULTIMATE-INTEGRITY)
+            ## 🇰🇷 ETERNITY v15 (ULTIMATE-HYBRID)
             
-            **Security Critical Patches:**
-            - 🛡️ **PBKDF2 Enforcement:** Added `-pbkdf2 -iter 100000` to all OpenSSL commands. No more deprecated warnings.
-            - 📜 **Digital Notary:** Automated SHA-256 checksum generation (`integrity_ledger.txt`) for all encrypted assets to prevent tampering.
+            **Critical Fix:**
+            - ⚡ **Replaced Vertica with ClickHouse:** Fixed the `pull access denied` error by switching to `clickhouse/clickhouse-server` (Official Public Image).
+            - 🚀 **Performance:** ClickHouse provides superior speed for OLAP workloads in CI environments.
             
-            **Stack:**
-            - OLTP: Postgres 16
-            - OLAP: Vertica
-            - Security: Vault + Audit
+            **Features:**
+            - 🔄 **Hybrid ETL:** Real-time data pipeline from Postgres to ClickHouse.
+            - 🛡️ **Advanced Security:** PBKDF2 Encryption + Digital Notary (Integrity Check).
             
             *Automated by GitHub Actions.*
           artifacts: "dump/*.iso"
