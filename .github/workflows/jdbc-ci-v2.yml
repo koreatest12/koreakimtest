@@ -1,44 +1,47 @@
-name: "🔐 Spring Boot JDBC CI + DB Test (V8 - Scale Load Test)"
+name: "🔐 Spring Boot JDBC CI + Release (Scale Test V9)"
 
 on:
   push:
-    branches: [ "main", "develop", "feature/**" ]
+    branches: [ "main", "develop" ]
+    tags: [ "v*" ] # v1.0.0 같은 태그 푸시 시 릴리즈 동작
   pull_request:
     branches: [ "main" ]
   workflow_dispatch:
     inputs:
       mysql_user:
-        description: "MySQL 유저 (기본 root)"
+        description: "MySQL 유저"
         required: false
         default: "root"
       mysql_pass:
-        description: "MySQL 패스워드 (기본 password)"
+        description: "MySQL 패스워드"
         required: false
         default: "password"
       mysql_db:
-        description: "DB명 (기본 mydb)"
+        description: "DB명"
         required: false
         default: "mydb"
-      table_name:
-        description: "테스트 테이블명 (기본 users)"
-        required: false
-        default: "users"
       scale_count:
-        description: "반복 테스트 횟수 (SCALE)"
+        description: "Smoke Test 반복 횟수 (SCALE)"
         required: false
         default: "50"
+
+# 릴리즈 생성을 위해 쓰기 권한 필요
+permissions:
+  contents: write
 
 env:
   TZ: Asia/Seoul
   LOG_DIR: .github/echo_logs
   ARTIFACT_DIR: .github/echo_artifacts
-  # 기본 스케일 값 (입력이 없으면 이 값을 사용)
+  RELEASE_DIR: release_package
   DEFAULT_SCALE: 50
 
 jobs:
-  build-and-test:
-    name: "Build + MySQL Init + Spring Boot Test + JDBC Smoke Scale Test"
+  build-test-release:
+    name: "Build + Scale Test + Release"
     runs-on: ubuntu-22.04
+    
+    # [서비스 최적화] 테스트 성능 향상을 위한 DB 튜닝
     services:
       mysql:
         image: mysql:8.0
@@ -47,35 +50,38 @@ jobs:
           MYSQL_DATABASE: mydb
         ports:
           - 3306:3306
+        # tmpfs 마운트로 I/O 속도 향상 및 max_connections 증가
+        volumes:
+          - /var/lib/mysql
         options: >-
+          --tmpfs /var/lib/mysql
           --health-cmd="mysqladmin ping -ppassword --silent"
           --health-interval=5s
           --health-timeout=2s
           --health-retries=20
+          --max_connections=1000
 
     steps:
+      # 
+
+[Image of CI/CD pipeline architecture with database integration]
+
+      
       #################################################################
-      # 0. 준비: 체크아웃 + 로그 디렉토리 확보
+      # 0. 환경 준비
       #################################################################
-      - name: "[echo] Checkout repo"
+      - name: "Checkout repo"
         uses: actions/checkout@v4
 
-      - name: "[echo] Prepare echo dirs (logs, artifacts)"
-        shell: bash
+      - name: "Prepare directories"
         run: |
-          set -Eeuo pipefail
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}"
-          {
-            echo "[$(date +'%F %T%z')] LOG_DIR=${LOG_DIR}"
-            echo "[$(date +'%F %T%z')] ARTIFACT_DIR=${ARTIFACT_DIR}"
-            echo "runner.os=$(uname -a)"
-            echo "pwd=$(pwd)"
-          } | tee "${LOG_DIR}/runner_info.log"
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${RELEASE_DIR}"
+          echo "Directories created."
 
       #################################################################
-      # 1. JDK / Maven 세팅
+      # 1. JDK 설정
       #################################################################
-      - name: "[echo] Setup Temurin Java 17"
+      - name: "Setup Temurin Java 17"
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -83,193 +89,138 @@ jobs:
           cache: maven
 
       #################################################################
-      # 2. MySQL health 대기
+      # 2. MySQL 대기 및 스키마 초기화
       #################################################################
-      - name: "[echo] Wait for MySQL service to be healthy"
+      - name: "Wait for MySQL & Init Schema"
         shell: bash
         run: |
           set -Eeuo pipefail
-          echo "Waiting for mysql service health..." | tee "${LOG_DIR}/mysql_wait.log"
+          
+          # Health Check 대기 (Service 기능 활용하여 간단히 처리 가능하나, 이중 확인)
+          echo "Waiting for MySQL..."
           for i in {1..30}; do
-            HEALTH=$(docker inspect --format='{{json .State.Health.Status}}' ${{ job.services.mysql.id }})
-            echo "[$i] MySQL health: $HEALTH" | tee -a "${LOG_DIR}/mysql_wait.log"
-            if [ "$HEALTH" = "\"healthy\"" ]; then
-              echo "MySQL is healthy." | tee -a "${LOG_DIR}/mysql_wait.log"
+            if mysqladmin ping -h 127.0.0.1 -P 3306 -uroot -ppassword --silent; then
+              echo "MySQL is up!"
               break
             fi
             sleep 2
           done
 
-      #################################################################
-      # 3. MySQL client 설치 + 스키마 생성
-      #################################################################
-      - name: "[echo] Install MySQL client"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          sudo apt-get update -y
-          sudo apt-get install -y mysql-client
-
-      - name: "[echo] Init schema (CREATE TABLE users)"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          DB_USER="${{ github.event.inputs.mysql_user || 'root' }}"
-          DB_PASS="${{ github.event.inputs.mysql_pass || 'password' }}"
-          DB_NAME="${{ github.event.inputs.mysql_db   || 'mydb' }}"
-          TBL="${{ github.event.inputs.table_name     || 'users' }}"
+          # 변수 매핑
+          DB_USER="${{ inputs.mysql_user || 'root' }}"
+          DB_PASS="${{ inputs.mysql_pass || 'password' }}"
+          DB_NAME="${{ inputs.mysql_db   || 'mydb' }}"
           
-          SQL_CREATE="CREATE TABLE IF NOT EXISTS ${TBL} ( \
-            id   INT AUTO_INCREMENT PRIMARY KEY, \
-            name VARCHAR(100) NOT NULL, \
-            age  INT NOT NULL \
-          );"
-          
-          echo "[SCHEMA] Creating table '${TBL}' in DB '${DB_NAME}'..." | tee "${LOG_DIR}/mysql_schema_init.log"
-          mysql -h 127.0.0.1 -P 3306 -u"${DB_USER}" -p"${DB_PASS}" "${DB_NAME}" -e "${SQL_CREATE}" \
-            2>&1 | tee -a "${LOG_DIR}/mysql_schema_init.log"
-          
-          mysql -h 127.0.0.1 -P 3306 -u"${DB_USER}" -p"${DB_PASS}" "${DB_NAME}" -e "SHOW TABLES;" \
-            2>&1 | tee -a "${LOG_DIR}/mysql_schema_init.log"
+          # 테이블 생성 (스키마)
+          echo "Creating table 'users'..."
+          mysql -h 127.0.0.1 -P 3306 -u"$DB_USER" -p"$DB_PASS" "$DB_NAME" -e "
+            CREATE TABLE IF NOT EXISTS users (
+              id INT AUTO_INCREMENT PRIMARY KEY,
+              name VARCHAR(100) NOT NULL,
+              age INT NOT NULL
+            );
+          "
 
       #################################################################
-      # 4. Maven Build & Spring Boot Test
+      # 3. Maven Build (패키지 생성)
       #################################################################
-      - name: "[echo] mvn clean package (with DB env)"
-        shell: bash
+      - name: "Maven Build & Package"
         run: |
-          set -Eeuo pipefail
-          DB_NAME="${{ github.event.inputs.mysql_db   || 'mydb' }}"
-          export SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/${DB_NAME}?useSSL=false&serverTimezone=UTC"
-          export SPRING_DATASOURCE_USERNAME="${{ github.event.inputs.mysql_user || 'root' }}"
-          export SPRING_DATASOURCE_PASSWORD="${{ github.event.inputs.mysql_pass || 'password' }}"
+          export SPRING_DATASOURCE_URL="jdbc:mysql://127.0.0.1:3306/${{ inputs.mysql_db || 'mydb' }}?useSSL=false"
+          export SPRING_DATASOURCE_USERNAME="${{ inputs.mysql_user || 'root' }}"
+          export SPRING_DATASOURCE_PASSWORD="${{ inputs.mysql_pass || 'password' }}"
           
-          mvn -B clean package 2>&1 | tee "${LOG_DIR}/maven_build.log"
-          if [ "${PIPESTATUS[0]}" != "0" ]; then
-             echo "Maven build failed" && exit 1
+          mvn -B clean package -DskipTests=false 2>&1 | tee "${LOG_DIR}/maven_build.log"
+          
+          # JAR 파일 확보 (버전 포함된 파일 찾기)
+          JAR_FILE=$(find target -name "*.jar" ! -name "original-*.jar" | head -n 1)
+          if [ -f "$JAR_FILE" ]; then
+            echo "Found artifact: $JAR_FILE"
+            cp "$JAR_FILE" "${RELEASE_DIR}/app-release.jar"
+          else
+            echo "Error: JAR file not found!" && exit 1
           fi
 
       #################################################################
-      # 5. JDBC Driver 준비 (Smoke Test용)
+      # 4. JDBC Smoke Test (Docker 컨테이너 수정됨)
       #################################################################
-      - name: "[echo] Prepare MySQL JDBC driver jar"
+      - name: "Run JDBC Scale Test (Independent Container)"
         shell: bash
         run: |
           set -Eeuo pipefail
+          
+          # 드라이버 준비
           mkdir -p tmp_jars
-          mvn -q dependency:copy-dependencies \
-            -DincludeArtifactIds=mysql-connector-j \
-            -DoutputDirectory=tmp_jars \
-            -DexcludeTransitive=false
-          ls -l tmp_jars | tee "${LOG_DIR}/jdbc_jars.log"
+          mvn -q dependency:copy-dependencies -DincludeArtifactIds=mysql-connector-j -DoutputDirectory=tmp_jars
 
-      #################################################################
-      # 6. JDBC Smoke Test 컨테이너 (SCALE 적용)
-      #   - SCALE 값만큼 Java 내부에서 Loop 실행
-      #   - Syntax Error 방지를 위해 heredoc 대신 printf 사용 유지
-      #################################################################
-      - name: "[echo] JDBC Smoke Container (SCALE Loop Test)"
-        shell: bash
-        continue-on-error: true
-        run: |
-          set -Eeuo pipefail
-          DB_USER="${{ github.event.inputs.mysql_user || 'root' }}"
-          DB_PASS="${{ github.event.inputs.mysql_pass || 'password' }}"
-          DB_NAME="${{ github.event.inputs.mysql_db   || 'mydb' }}"
-          # 입력값 없으면 기본 env 값 사용
-          SCALE_VAL="${{ github.event.inputs.scale_count || env.DEFAULT_SCALE }}"
-          
-          DB_URL="jdbc:mysql://host.docker.internal:3306/${DB_NAME}?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true"
-          
-          echo "[SMOKE] Generating Java Source with SCALE=${SCALE_VAL}..." | tee "${LOG_DIR}/smoke_container.log"
+          # Java 소스 생성 (이전 로직 유지하되 간결화)
+          cat <<EOF > JdbcSmokeTest.java
+          import java.sql.*;
+          import java.util.*;
+          public class JdbcSmokeTest {
+              public static void main(String[] args) throws Exception {
+                  String url = System.getenv("DB_URL");
+                  String user = System.getenv("DB_USER");
+                  String pass = System.getenv("DB_PASS");
+                  int scale = Integer.parseInt(System.getenv("SCALE"));
+                  
+                  System.out.println("[SMOKE] Connecting to " + url + " | SCALE: " + scale);
+                  Class.forName("com.mysql.cj.jdbc.Driver");
+                  
+                  try (Connection conn = DriverManager.getConnection(url, user, pass)) {
+                      System.out.println("[SMOKE] Connected!");
+                      long start = System.currentTimeMillis();
+                      
+                      try (PreparedStatement pstmt = conn.prepareStatement("INSERT INTO users (name, age) VALUES (?, ?)")) {
+                          for (int i = 1; i <= scale; i++) {
+                              pstmt.setString(1, "User_" + i);
+                              pstmt.setInt(2, new Random().nextInt(100));
+                              pstmt.executeUpdate();
+                              if (i % 10 == 0) System.out.println("[SMOKE] Inserted " + i + "/" + scale);
+                          }
+                      }
+                      System.out.println("[SMOKE] Finished in " + (System.currentTimeMillis() - start) + "ms");
+                  }
+              }
+          }
+          EOF
 
-          rm -f JdbcSmokeTest.java
-          touch JdbcSmokeTest.java
-          
-          # -----------------------------------------------------------------------------------------
-          # Java 소스 코드 주입 (Shell 변수 $SCALE_VAL을 Java Code 상수로 박아넣거나 env로 처리 가능)
-          # 여기서는 Runtime에 환경변수 SCALE을 읽도록 처리함.
-          # -----------------------------------------------------------------------------------------
-          printf "%s\n" "import java.sql.*;" >> JdbcSmokeTest.java
-          printf "%s\n" "import java.util.*;" >> JdbcSmokeTest.java
-          printf "%s\n" "" >> JdbcSmokeTest.java
-          printf "%s\n" "public class JdbcSmokeTest {" >> JdbcSmokeTest.java
-          printf "%s\n" "    public static void main(String[] args) throws Exception {" >> JdbcSmokeTest.java
-          printf "%s\n" "        String url  = System.getenv(\"DB_URL\");" >> JdbcSmokeTest.java
-          printf "%s\n" "        String user = System.getenv(\"DB_USER\");" >> JdbcSmokeTest.java
-          printf "%s\n" "        String pass = System.getenv(\"DB_PASS\");" >> JdbcSmokeTest.java
-          printf "%s\n" "        String scaleStr = System.getenv(\"SCALE\");" >> JdbcSmokeTest.java
-          printf "%s\n" "        int scale = (scaleStr != null) ? Integer.parseInt(scaleStr) : 1;" >> JdbcSmokeTest.java
-          printf "%s\n" "" >> JdbcSmokeTest.java
-          printf "%s\n" "        System.out.println(\"[SMOKE] Connecting to: \" + url);" >> JdbcSmokeTest.java
-          printf "%s\n" "        System.out.println(\"[SMOKE] Target SCALE count: \" + scale);" >> JdbcSmokeTest.java
-          printf "%s\n" "" >> JdbcSmokeTest.java
-          printf "%s\n" "        Class.forName(\"com.mysql.cj.jdbc.Driver\");" >> JdbcSmokeTest.java
-          printf "%s\n" "" >> JdbcSmokeTest.java
-          printf "%s\n" "        // 1. Connection Retry Logic" >> JdbcSmokeTest.java
-          printf "%s\n" "        Connection conn = null;" >> JdbcSmokeTest.java
-          printf "%s\n" "        for (int i = 1; i <= 10; i++) {" >> JdbcSmokeTest.java
-          printf "%s\n" "            try {" >> JdbcSmokeTest.java
-          printf "%s\n" "                conn = DriverManager.getConnection(url, user, pass);" >> JdbcSmokeTest.java
-          printf "%s\n" "                System.out.println(\"[SMOKE] Connected successfully!\");" >> JdbcSmokeTest.java
-          printf "%s\n" "                break;" >> JdbcSmokeTest.java
-          printf "%s\n" "            } catch (SQLException e) {" >> JdbcSmokeTest.java
-          printf "%s\n" "                System.out.println(\"[SMOKE] Retry \" + i + \" failed: \" + e.getMessage());" >> JdbcSmokeTest.java
-          printf "%s\n" "                Thread.sleep(1000);" >> JdbcSmokeTest.java
-          printf "%s\n" "            }" >> JdbcSmokeTest.java
-          printf "%s\n" "        }" >> JdbcSmokeTest.java
-          printf "%s\n" "        if (conn == null) throw new RuntimeException(\"DB Connection Failed\");" >> JdbcSmokeTest.java
-          printf "%s\n" "" >> JdbcSmokeTest.java
-          printf "%s\n" "        // 2. Massive Scale Loop" >> JdbcSmokeTest.java
-          printf "%s\n" "        try (Connection c = conn) {" >> JdbcSmokeTest.java
-          printf "%s\n" "            long startTime = System.currentTimeMillis();" >> JdbcSmokeTest.java
-          printf "%s\n" "            for (int k = 1; k <= scale; k++) {" >> JdbcSmokeTest.java
-          printf "%s\n" "                // INSERT" >> JdbcSmokeTest.java
-          printf "%s\n" "                try (PreparedStatement pstmt = c.prepareStatement(\"INSERT INTO users (name, age) VALUES (?, ?)\")) {" >> JdbcSmokeTest.java
-          printf "%s\n" "                    pstmt.setString(1, \"User_\" + k);" >> JdbcSmokeTest.java
-          printf "%s\n" "                    pstmt.setInt(2, new Random().nextInt(100));" >> JdbcSmokeTest.java
-          printf "%s\n" "                    pstmt.executeUpdate();" >> JdbcSmokeTest.java
-          printf "%s\n" "                }" >> JdbcSmokeTest.java
-          printf "%s\n" "                // SELECT (Log every 10th)" >> JdbcSmokeTest.java
-          printf "%s\n" "                if (k % 10 == 0 || k == scale) {" >> JdbcSmokeTest.java
-          printf "%s\n" "                    try (PreparedStatement pstmt = c.prepareStatement(\"SELECT count(*) from users\")) {" >> JdbcSmokeTest.java
-          printf "%s\n" "                         ResultSet rs = pstmt.executeQuery();" >> JdbcSmokeTest.java
-          printf "%s\n" "                         if(rs.next()) System.out.println(\"[SMOKE-LOOP] \" + k + \"/\" + scale + \" committed. Total rows: \" + rs.getInt(1));" >> JdbcSmokeTest.java
-          printf "%s\n" "                    }" >> JdbcSmokeTest.java
-          printf "%s\n" "                }" >> JdbcSmokeTest.java
-          printf "%s\n" "            }" >> JdbcSmokeTest.java
-          printf "%s\n" "            long duration = System.currentTimeMillis() - startTime;" >> JdbcSmokeTest.java
-          printf "%s\n" "            System.out.println(\"[SMOKE] DONE. Duration: \" + duration + \"ms\");" >> JdbcSmokeTest.java
-          printf "%s\n" "        }" >> JdbcSmokeTest.java
-          printf "%s\n" "    }" >> JdbcSmokeTest.java
-          printf "%s\n" "}" >> JdbcSmokeTest.java
-          
-          echo "[SMOKE] Compilation & Run..." | tee -a "${LOG_DIR}/smoke_container.log"
-          
+          # [수정됨] Docker 실행: 이미지 변경 (openjdk:17-jdk -> eclipse-temurin:17-jdk)
+          echo "Running Smoke Test in Docker..."
           docker run --rm \
             --add-host=host.docker.internal:host-gateway \
-            -e DB_URL="${DB_URL}" \
-            -e DB_USER="${DB_USER}" \
-            -e DB_PASS="${DB_PASS}" \
-            -e SCALE="${SCALE_VAL}" \
+            -e DB_URL="jdbc:mysql://host.docker.internal:3306/${{ inputs.mysql_db || 'mydb' }}?useSSL=false&allowPublicKeyRetrieval=true" \
+            -e DB_USER="${{ inputs.mysql_user || 'root' }}" \
+            -e DB_PASS="${{ inputs.mysql_pass || 'password' }}" \
+            -e SCALE="${{ inputs.scale_count || env.DEFAULT_SCALE }}" \
             -v "$(pwd)/JdbcSmokeTest.java:/app/JdbcSmokeTest.java" \
             -v "$(pwd)/tmp_jars:/jars:ro" \
             -w /app \
-            openjdk:17-jdk \
-            bash -lc '
-              javac -cp .:/jars/* JdbcSmokeTest.java
-              java -cp .:/jars/* JdbcSmokeTest
-            ' 2>&1 | tee -a "${LOG_DIR}/smoke_container.log"
+            eclipse-temurin:17-jdk \
+            bash -c 'javac -cp .:/jars/* JdbcSmokeTest.java && java -cp .:/jars/* JdbcSmokeTest'
 
       #################################################################
-      # 7. 결과 아티팩트 업로드
+      # 5. 아티팩트 업로드 및 릴리즈 (패키지 출시)
       #################################################################
-      - name: "[echo] Collect & Upload Artifacts"
-        if: always()
+      - name: "Upload Build Artifacts"
         uses: actions/upload-artifact@v4
         with:
-          name: spring-ci-artifacts-${{ github.run_id }}
+          name: build-artifacts
           path: |
-            ${{ env.LOG_DIR }}
-            ${{ env.ARTIFACT_DIR }}
-            target/surefire-reports
+            ${{ env.RELEASE_DIR }}/*.jar
+            ${{ env.LOG_DIR }}/*.log
+
+      - name: "Create GitHub Release (On Tag)"
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.RELEASE_DIR }}/app-release.jar
+          body: |
+            ## 🚀 New Release
+            - Commit: ${{ github.sha }}
+            - Time: ${{ steps.date.outputs.date }}
+            - Scale Test Count: ${{ inputs.scale_count || env.DEFAULT_SCALE }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
