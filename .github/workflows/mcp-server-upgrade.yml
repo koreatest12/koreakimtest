@@ -1,4 +1,4 @@
-name: "🚀 MCP Server Install & Context Sync v2.7 (CACHE-OPTIMIZATION)"
+name: "🚀 MCP Server Install & Context Sync v2.8 (RUNTIME-CONTEXT-FIX)"
 
 on:
   push:
@@ -39,22 +39,24 @@ env:
   MCP_ARTIFACTS: .github/mcp-workspace/artifacts
   MCP_CONFIG: .github/mcp-workspace/config
   COPILOT_DIR: .github/copilot
-  # Define the core cache key prefix
-  CACHE_KEY_PREFIX: mcp-omniservice-${{ runner.os }}
+  # FIX: Removed CACHE_KEY_PREFIX calculation from here, as 'runner' context is invalid globally.
 
 jobs:
   provision-omniservice:
-    name: "Provision MCP Omniservice (Cache Optimized)"
+    name: "Provision MCP Omniservice (Validated Runtime)"
     runs-on: ubuntu-24.04
     
+    # FIX: Define the RUNTIME-DEPENDENT CACHE KEY PREFIX here
+    env:
+      CACHE_KEY_PREFIX: mcp-omniservice-${{ runner.os }}
+      
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ===========================================================================
-      # 1. CORE WORKSPACE PREPARATION (Unchanged)
-      # ... (Workspace setup and file creation code remains) ...
-
+      # 1. CORE WORKSPACE PREPARATION
+      # ===========================================================================
       - name: Prepare workspace directories and service files
         run: |
           echo "======================================================"
@@ -77,7 +79,7 @@ jobs:
           echo "======================================================"
 
       # ===========================================================================
-      # 2. PYTHON SERVICE PROVISIONING & TESTING (Cache Added)
+      # 2. PYTHON SERVICE PROVISIONING & TESTING (Cache Update)
       # ===========================================================================
       - name: Set up Python
         id: setup-python
@@ -92,7 +94,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: mcp-python-server/__pycache__
-          key: ${{ env.CACHE_KEY_PREFIX }}-pyc-${{ hashFiles('mcp-python-server/server_mcp.py') }}
+          key: ${{ env.CACHE_KEY_PREFIX }}-pyc-${{ hashFiles('mcp-python-server/server_mcp.py') }} # Fixed reference
           
       - name: Install Python dependencies
         run: |
@@ -101,11 +103,10 @@ jobs:
           echo "======================================================"
           echo "📦 Installing Python packages from requirements.txt..."
           python -m pip install --upgrade pip
-          # Installation will use the cache restored by setup-python
           pip install -r mcp-python-server/requirements.txt
           pip install pytest 
           echo "✅ Python dependencies installed."
-
+          
       - name: Compile MCP server modules (Restored from v1.x)
         run: |
           echo "🔨 Compiling Python server modules..."
@@ -122,21 +123,20 @@ jobs:
           echo "======================================================"
 
       # ===========================================================================
-      # 3. NODE.JS SERVICE PROVISIONING (Cache Added)
+      # 3. NODE.JS SERVICE PROVISIONING (Cache Update)
       # ===========================================================================
-      # Node.js setup handles cache restore implicitly, but we add a dedicated restore step
       - name: Restore Node.js NPM Cache (Explicit)
         id: cache-restore-npm
         uses: actions/cache/restore@v4
         with:
           path: ~/.npm
-          key: ${{ env.CACHE_KEY_PREFIX }}-npm-${{ hashFiles('mcp-node-service/package.json', 'mcp-security/package.json') }}
+          key: ${{ env.CACHE_KEY_PREFIX }}-npm-${{ hashFiles('mcp-node-service/package.json', 'mcp-security/package.json') }} # Fixed reference
           
       - name: Set up Node.js tooling
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version || '20' }}
-          cache: 'npm' # This keyword handles the setup and restore for npm
+          cache: 'npm' 
           cache-dependency-path: |
             mcp-node-service/package.json
             mcp-security/package.json
@@ -162,7 +162,6 @@ jobs:
           echo "✅ Node.js Security dependencies installed."
           
       - name: Archive Node.js dependency trees
-        # ... (Archiving code remains unchanged) ...
         run: |
           echo "======================================================"
           echo "  📦 [PHASE 3.3] NODE.JS ARTIFACT ARCHIVE START"
@@ -182,22 +181,21 @@ jobs:
           echo "======================================================"
 
       # ===========================================================================
-      # 4. JAVA SERVICE PROVISIONING & BUILDING (Cache Added)
+      # 4. JAVA SERVICE PROVISIONING & BUILDING (Cache Update)
       # ===========================================================================
-      # Java setup handles cache restore implicitly, but we add a dedicated restore step
       - name: Restore Java Maven Cache (Explicit)
         id: cache-restore-maven
         uses: actions/cache/restore@v4
         with:
           path: ~/.m2/repository
-          key: ${{ env.CACHE_KEY_PREFIX }}-maven-${{ hashFiles('mcp-java-server/pom.xml') }}
+          key: ${{ env.CACHE_KEY_PREFIX }}-maven-${{ hashFiles('mcp-java-server/pom.xml') }} # Fixed reference
           
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           java-version: ${{ inputs.java_version || '17' }}
           distribution: 'temurin'
-          cache: 'maven' # This keyword handles the setup and restore for maven
+          cache: 'maven' 
 
       - name: Build Java server and archive artifacts
         run: |
@@ -206,7 +204,6 @@ jobs:
           echo "======================================================"
           echo "🏗️ Building Java server with Maven..."
           cd mcp-java-server
-          # Maven will use the restored cache (implicitly or explicitly)
           mvn clean package -DskipTests
           
           echo "📦 Archiving Java artifacts (.jar) to ${{ env.JAVA_ARTIFACTS }}..."
@@ -219,16 +216,35 @@ jobs:
           echo "======================================================"
 
       # ===========================================================================
-      # 5. CONTEXT SYNC & ARTIFACT UPLOAD (Unchanged)
-      # ... (Summary generation and artifact uploads remain unchanged) ...
-
+      # 5. CONTEXT SYNC & ARTIFACT UPLOAD 
+      # ===========================================================================
       - name: Generate Copilot summary file
-        # ... (Code remains unchanged) ...
         run: |
           echo "======================================================"
           echo "  📋 [PHASE 5.1] COPILOT CONTEXT GENERATION START"
           echo "======================================================"
-          # ... (Summary generation code remains) ...
+          PYTHON_VER="${{ steps.setup-python.outputs.python-version || inputs.python_version || '3.11' }}"
+          NODE_VER="${{ inputs.node_version || '20' }}"
+          JAVA_VER="${{ inputs.java_version || '17' }}"
+          
+          cat <<MD > "$COPILOT_DIR/mcp-server-omniservice-context.md"
+          # MCP Omniservice Provisioning Context (v2.8)
+          
+          ## 🌐 Environment Summary
+          - Workflow: \`${{ github.workflow }}\`
+          - Run: \`${{ github.run_id }}\`
+          - **Python Version:** \`${PYTHON_VER}\`
+          - **Node.js Version:** \`${NODE_VER}\`
+          - **Java Version:** \`${JAVA_VER}\`
+          
+          ## 📦 Artifacts & Services
+          - **Artifacts Root:** \`${{ env.MCP_ARTIFACTS }}\`
+          - **Bootstrap Config:** \`${{ env.MCP_CONFIG }}/bootstrap.json\`
+          - **Java Service:** Packaged JAR available in \`${{ env.JAVA_ARTIFACTS }}\`.
+
+          ---
+          *This summary provides GitHub Copilot with fresh context about all provisioned assets and dependencies for follow-up automation.*
+          MD
           echo "✅ Copilot context file generated."
           
       - name: Upload MCP artifacts (Full Workspace)
@@ -262,16 +278,29 @@ jobs:
             ~/.cache/pip
             ~/.npm
             ~/.m2/repository
-            mcp-python-server/__pycache__ # <-- NEW: Cache compiled Python artifacts
-          key: mcp-omniservice-${{ runner.os }}-${{ hashFiles('mcp-python-server/requirements.txt', 'mcp-node-service/package.json', 'mcp-security/package.json', 'mcp-java-server/pom.xml') }}-${{ inputs.node_version || '20' }}-${{ inputs.python_version || '3.11' }}-${{ inputs.java_version || '17' }}
+            mcp-python-server/__pycache__ 
+          key: ${{ env.CACHE_KEY_PREFIX }}-${{ hashFiles('mcp-python-server/requirements.txt', 'mcp-node-service/package.json', 'mcp-security/package.json', 'mcp-java-server/pom.xml') }}-${{ inputs.node_version || '20' }}-${{ inputs.python_version || '3.11' }}-${{ inputs.java_version || '17' }} # Removed redundant key prefix component
 
       - name: Record installation details & Commit Log
-        # ... (Log record code remains unchanged) ...
         run: |
           echo "======================================================"
           echo "  📝 [PHASE 6.1] INSTALLATION LOGGING START"
           echo "======================================================"
-          # ... (Log file update code remains) ...
+          mkdir -p docs
+          LOG_FILE="docs/copilot_install_log.md"
+          
+          DATE=$(date '+%Y-%m-%d %H:%M:%S KST')
+          PYTHON_VER="${{ steps.setup-python.outputs.python-version || inputs.python_version || '3.11' }}"
+          NODE_VER="${{ inputs.node_version || '20' }}"
+          JAVA_VER="${{ inputs.java_version || '17' }}"
+          STATUS="Success (Omniservice)"
+          
+          if [ ! -f "$LOG_FILE" ]; then
+            echo "# Copilot Server Installation Log" > "$LOG_FILE"
+            echo "| Date | Run ID | Python Version | Node Version | Java Version | Status |" >> "$LOG_FILE"
+            echo "|---|---|---|---|---|---|" >> "$LOG_FILE"
+          fi
+          echo "| $DATE | ${{ github.run_id }} | $PYTHON_VER | $NODE_VER | $JAVA_VER | $STATUS |" >> "$LOG_FILE"
           echo "✅ Installation log file updated."
 
       - name: Commit and Push Log
