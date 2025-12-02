@@ -1,4 +1,4 @@
-name: "🚀 MCP Server Install & Context Sync v2.4 (OMNISERVICE-OBSERVABILITY)"
+name: "🚀 MCP Server Install & Context Sync v2.5 (FINAL-STRUCTURAL-FIX)"
 
 on:
   push:
@@ -34,7 +34,7 @@ permissions:
   checks: write
 
 env:
-  TZ: Asia/Seoul # Added TZ for consistent logging
+  TZ: Asia/Seoul
   MCP_WORKSPACE: .github/mcp-workspace
   MCP_ARTIFACTS: .github/mcp-workspace/artifacts
   MCP_CONFIG: .github/mcp-workspace/config
@@ -42,7 +42,7 @@ env:
 
 jobs:
   provision-omniservice:
-    name: "Provision MCP Omniservice (Verbose Log)"
+    name: "Provision MCP Omniservice (Validated Structure)"
     runs-on: ubuntu-24.04
     
     steps:
@@ -59,7 +59,7 @@ jobs:
           echo "======================================================"
           set -Eeuo pipefail
           
-          # Define and Export derived paths (CRITICAL FIX from v2.1)
+          # Define and Export derived paths
           JAVA_ARTIFACTS="$MCP_ARTIFACTS/java"
           NODE_ARTIFACTS="$MCP_ARTIFACTS/node"
           echo "Setting JAVA_ARTIFACTS=$JAVA_ARTIFACTS"
@@ -261,7 +261,7 @@ jobs:
           JAVA_VER="${{ inputs.java_version || '17' }}"
           
           cat <<MD > "$COPILOT_DIR/mcp-server-omniservice-context.md"
-          # MCP Omniservice Provisioning Context (v2.4)
+          # MCP Omniservice Provisioning Context (v2.5)
           
           ## 🌐 Environment Summary
           - Workflow: \`${{ github.workflow }}\`
@@ -296,6 +296,11 @@ jobs:
           path: ${{ env.COPILOT_DIR }}/mcp-server-omniservice-context.md
           retention-days: 7
 
+      # **FIXED:** Removed the invalid `echo` here.
+      - name: Final Artifact Upload Log
+        run: |
+          echo "✅ Copilot hints artifact uploaded."
+          echo "======================================================"
 
       # ===========================================================================
       # 6. CACHING & DOCUMENTATION
@@ -337,5 +342,4 @@ jobs:
           commit_message: "docs(log): Update Copilot Omniservice installation log"
           file_pattern: docs/copilot_install_log.md
           skip_dirty_check: false
-          echo "✅ Installation log committed and pushed."
-          echo "======================================================"
+          # **FIXED:** Removed the invalid `echo` here.
