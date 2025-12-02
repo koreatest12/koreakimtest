@@ -295,8 +295,6 @@ jobs:
           name: copilot-context-omniservice
           path: ${{ env.COPILOT_DIR }}/mcp-server-omniservice-context.md
           retention-days: 7
-          echo "✅ Copilot hints artifact uploaded."
-          echo "======================================================"
 
 
       # ===========================================================================
