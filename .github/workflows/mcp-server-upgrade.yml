@@ -1,4 +1,4 @@
-name: "🚀 MCP Server Install & Context Sync v2.8 (RUNTIME-CONTEXT-FIX)"
+name: "🚀 MCP Server Install & Context Sync v2.9 (FINAL-RUNTIME-CONTEXT-FIX)"
 
 on:
   push:
@@ -39,23 +39,20 @@ env:
   MCP_ARTIFACTS: .github/mcp-workspace/artifacts
   MCP_CONFIG: .github/mcp-workspace/config
   COPILOT_DIR: .github/copilot
-  # FIX: Removed CACHE_KEY_PREFIX calculation from here, as 'runner' context is invalid globally.
 
 jobs:
   provision-omniservice:
     name: "Provision MCP Omniservice (Validated Runtime)"
     runs-on: ubuntu-24.04
     
-    # FIX: Define the RUNTIME-DEPENDENT CACHE KEY PREFIX here
-    env:
-      CACHE_KEY_PREFIX: mcp-omniservice-${{ runner.os }}
+    # FIX: Removed the invalid Job-level env block here.
       
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ===========================================================================
-      # 1. CORE WORKSPACE PREPARATION
+      # 1. CORE WORKSPACE PREPARATION (FIXED: Runtime Context Export)
       # ===========================================================================
       - name: Prepare workspace directories and service files
         run: |
@@ -63,6 +60,10 @@ jobs:
           echo "  🌐 [PHASE 1] WORKSPACE SETUP & FILE GENERATION START"
           echo "======================================================"
           set -Eeuo pipefail
+          
+          # CRITICAL FIX: Define RUNTIME CONTEXT (runner.os) via GITHUB_ENV
+          echo "CACHE_KEY_PREFIX=mcp-omniservice-${{ runner.os }}" >> $GITHUB_ENV
+          echo "Setting RUNTIME CACHE_KEY_PREFIX..."
           
           # Define and Export derived paths
           JAVA_ARTIFACTS="$MCP_ARTIFACTS/java"
@@ -94,7 +95,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: mcp-python-server/__pycache__
-          key: ${{ env.CACHE_KEY_PREFIX }}-pyc-${{ hashFiles('mcp-python-server/server_mcp.py') }} # Fixed reference
+          key: ${{ env.CACHE_KEY_PREFIX }}-pyc-${{ hashFiles('mcp-python-server/server_mcp.py') }}
           
       - name: Install Python dependencies
         run: |
@@ -130,7 +131,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.npm
-          key: ${{ env.CACHE_KEY_PREFIX }}-npm-${{ hashFiles('mcp-node-service/package.json', 'mcp-security/package.json') }} # Fixed reference
+          key: ${{ env.CACHE_KEY_PREFIX }}-npm-${{ hashFiles('mcp-node-service/package.json', 'mcp-security/package.json') }}
           
       - name: Set up Node.js tooling
         uses: actions/setup-node@v4
@@ -188,7 +189,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.m2/repository
-          key: ${{ env.CACHE_KEY_PREFIX }}-maven-${{ hashFiles('mcp-java-server/pom.xml') }} # Fixed reference
+          key: ${{ env.CACHE_KEY_PREFIX }}-maven-${{ hashFiles('mcp-java-server/pom.xml') }}
           
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -228,7 +229,7 @@ jobs:
           JAVA_VER="${{ inputs.java_version || '17' }}"
           
           cat <<MD > "$COPILOT_DIR/mcp-server-omniservice-context.md"
-          # MCP Omniservice Provisioning Context (v2.8)
+          # MCP Omniservice Provisioning Context (v2.9)
           
           ## 🌐 Environment Summary
           - Workflow: \`${{ github.workflow }}\`
@@ -279,7 +280,7 @@ jobs:
             ~/.npm
             ~/.m2/repository
             mcp-python-server/__pycache__ 
-          key: ${{ env.CACHE_KEY_PREFIX }}-${{ hashFiles('mcp-python-server/requirements.txt', 'mcp-node-service/package.json', 'mcp-security/package.json', 'mcp-java-server/pom.xml') }}-${{ inputs.node_version || '20' }}-${{ inputs.python_version || '3.11' }}-${{ inputs.java_version || '17' }} # Removed redundant key prefix component
+          key: ${{ env.CACHE_KEY_PREFIX }}-${{ hashFiles('mcp-python-server/requirements.txt', 'mcp-node-service/package.json', 'mcp-security/package.json', 'mcp-java-server/pom.xml') }}-${{ inputs.node_version || '20' }}-${{ inputs.python_version || '3.11' }}-${{ inputs.java_version || '17' }}
 
       - name: Record installation details & Commit Log
         run: |
@@ -308,4 +309,3 @@ jobs:
         with:
           commit_message: "docs(log): Update Copilot Omniservice installation log"
           file_pattern: docs/copilot_install_log.md
-          skip_dirty_check: false
