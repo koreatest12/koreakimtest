@@ -23,7 +23,7 @@ on:
         default: true
 
 permissions:
-  contents: read
+  contents: write
   actions: read
   checks: write
 
@@ -139,3 +139,28 @@ jobs:
             ~/.cache/pip
             ~/.npm
           key: mcp-${{ runner.os }}-${{ hashFiles('mcp-python-server/requirements.txt') }}-${{ inputs.node_version || '20' }}-${{ inputs.python_version || '3.11' }}
+
+      - name: Record installation details
+        run: |
+          mkdir -p docs
+          LOG_FILE="docs/copilot_install_log.md"
+
+          if [ ! -f "$LOG_FILE" ]; then
+            echo "# Copilot Server Installation Log" > "$LOG_FILE"
+            echo "| Date | Run ID | Python Version | Node Version | Status |" >> "$LOG_FILE"
+            echo "|---|---|---|---|---|" >> "$LOG_FILE"
+          fi
+
+          DATE=$(date '+%Y-%m-%d %H:%M:%S KST')
+          PYTHON_VER="${{ steps.setup-python.outputs.python-version || inputs.python_version || '3.11' }}"
+          NODE_VER="${{ inputs.node_version || '20' }}"
+          STATUS="Success"
+
+          echo "| $DATE | ${{ github.run_id }} | $PYTHON_VER | $NODE_VER | $STATUS |" >> "$LOG_FILE"
+
+      - name: Commit and Push Log
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs(log): Update Copilot Server installation log"
+          file_pattern: docs/copilot_install_log.md
+          skip_dirty_check: false
