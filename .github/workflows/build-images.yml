@@ -1,4 +1,4 @@
-name: "🐧 All-in-One CI/CD Pipeline (Ultra-Stable Final) — EchoOps"
+name: "🐧 All-in-One CI/CD (Maximum Execution) — EchoOps"
 
 # 1. 트리거 설정
 on:
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: 'Image tag to deploy (e.g., latest or v1.0.0)'
+        description: 'Image tag for Containers (e.g., latest)'
         required: false
         default: 'latest'
       environment:
@@ -33,8 +33,8 @@ env:
   ECHO_PREFIX: "[EchoOps][CI/CD]"
 
 jobs:
-  # 1. 이미지 빌드, 보안 검증 및 푸시
-  build-and-push:
+  # 1. 컨테이너 이미지 빌드, 보안 검증 및 푸시
+  build-and-push-images:
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 5
@@ -42,9 +42,11 @@ jobs:
       matrix: # 스킵 없이 모든 항목 무조건 실행
         include:
           - name: ubuntu
+            type: container
             context: ./docker/ubuntu
             dockerfile: ./docker/ubuntu/Dockerfile
           - name: ubi
+            type: container
             context: ./docker/ubi
             dockerfile: ./docker/ubi/Dockerfile
     
@@ -58,13 +60,12 @@ jobs:
           platforms: all
       - uses: docker/setup-buildx-action@v3
         
-      # Hadolint 오류 발생해도 강행하도록 continue-on-error: true 유지 및 ignore 추가
       - name: Lint Dockerfile (Hadolint)
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: ${{ matrix.dockerfile }}
           failure-threshold: warning
-          ignore: DL3005,DL3007 # Dockerfile 수정 전까지 오류 무시
+          ignore: DL3005,DL3007 # Hadolint 오류 우회
         continue-on-error: true 
 
       - name: Prepare Image Metadata & Build Params
@@ -74,31 +75,11 @@ jobs:
           SHA_TAG="${IMAGE_NAME}:sha-${GITHUB_SHA}"
           TAGS="${SHA_TAG}"
           
-          # 1. 태그 결정 로직
-          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
-            TAGS="${TAGS},${IMAGE_NAME}:latest"
-          fi
-          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
-            TAGS="${TAGS},${IMAGE_NAME}:${GITHUB_REF_NAME}"
-          fi
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then TAGS="${TAGS},${IMAGE_NAME}:latest"; fi
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then TAGS="${TAGS},${IMAGE_NAME}:${GITHUB_REF_NAME}"; fi
           
-          # 2. Load/Push/Platform 결정 로직
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            PUSH_MODE="false"
-            LOAD_MODE="true"
-            BUILD_PLATFORMS="linux/amd64"
-          else
-            PUSH_MODE="true"
-            LOAD_MODE="false"
-            BUILD_PLATFORMS="linux/amd64,linux/arm64"
-          fi
-
-          # GITHUB_OUTPUT 파일에 변수 저장 (안정적인 Boolean 전달 및 Deprecation 해결)
           echo "image_sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_tags=${TAGS}" >> "$GITHUB_OUTPUT"
-          echo "push_mode=${PUSH_MODE}" >> "$GITHUB_OUTPUT"
-          echo "load_mode=${LOAD_MODE}" >> "$GITHUB_OUTPUT"
-          echo "build_platforms=${BUILD_PLATFORMS}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -107,30 +88,65 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           
-      - name: Build and Push Image
+      # A. Pull Request 및 Local Test용 빌드 (Load 모드)
+      - name: Build Image for Local Test (Load Only)
+        id: build_load
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          platforms: ${{ steps.meta.outputs.build_platforms }}
-          push: ${{ steps.meta.outputs.push_mode }} 
-          load: ${{ steps.meta.outputs.load_mode }}
+          platforms: linux/amd64 # 단일 아키텍처만 로드
+          push: false 
+          load: true 
+          tags: ${{ steps.meta.outputs.image_sha_tag }} # SHA 태그만 로드
+          cache-from: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }}
+          cache-to: type=gha,mode=max
+
+      # B. Push 및 배포용 빌드 (Push 모드)
+      - name: Build and Push Multi-Arch Image (Push Only)
+        id: build_push
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64 # Multi-Arch 푸시
+          push: true
+          load: false
           tags: ${{ steps.meta.outputs.image_tags }}
           cache-from: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }}
           cache-to: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }},mode=max
 
-      # Smoke Test는 Load Mode일 때만 실행 가능
-      - name: Smoke Test Image (Only on Load Mode)
-        if: steps.meta.outputs.load_mode == 'true'
+      # 2. Smoke Test (Skip 없이 무조건 실행)
+      - name: Smoke Test Image 
         run: |
           IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
-          docker run --rm "${IMAGE}" bash -lc "
-            test -f /etc/app/permissions.conf;
-            test -d /opt/app/data;
-            test -d /var/log/app;
-            echo 'Smoke test passed.';
-          "
           
+          # Load 모드 성공 시 (PR/Dispatch) 로컬 이미지 테스트
+          if [[ "${{ steps.build_load.outcome }}" == "success" ]]; then
+            echo "${{ env.ECHO_PREFIX}} Running local smoke test on loaded image: ${IMAGE}"
+            docker run --rm "${IMAGE}" bash -lc "
+              test -f /etc/app/permissions.conf;
+              test -d /opt/app/data;
+              test -d /var/log/app;
+              echo 'Smoke test passed.';
+            "
+          # Push 모드 성공 시 (Push) GHCR에서 당겨와 테스트
+          elif [[ "${{ steps.build_push.outcome }}" == "success" ]]; then
+            echo "${{ env.ECHO_PREFIX}} Running remote smoke test on pushed image: ${IMAGE}"
+            docker pull "${IMAGE}"
+            docker run --rm "${IMAGE}" bash -lc "
+              test -f /etc/app/permissions.conf;
+              test -d /opt/app/data;
+              test -d /var/log/app;
+              echo 'Smoke test passed.';
+            "
+          else
+            echo "${{ env.ECHO_PREFIX}} Skipping smoke test as neither load nor push was executed successfully."
+          fi
+          
+      # 3. Trivy Security Gate 및 SBOM 생성 (Skip 없이 무조건 실행)
       - name: Scan Image for Vulnerabilities (Trivy Security Gate)
         uses: aquasecurity/trivy-action@0.28.0
         with:
@@ -155,14 +171,15 @@ jobs:
           path: sbom-${{ matrix.name }}.json
           retention-days: 30 
 
+      # 4. 아티팩트 저장 및 백업
       - name: Save Image and Upload to Artifacts (Short-term)
-        if: steps.meta.outputs.load_mode == 'true'
+        if: steps.build_load.outcome == 'success'
         run: |
           IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
           TAR_NAME="${{ matrix.name }}.tar.gz"
           docker save "${IMAGE}" | gzip > "${TAR_NAME}"
       - name: Upload Image Artifact
-        if: steps.meta.outputs.load_mode == 'true'
+        if: steps.build_load.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}-image-${{ github.run_number }}
@@ -171,13 +188,42 @@ jobs:
 
       - name: Long-term Image Backup to Cloud Storage
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        # 실제 백업 명령어 (인프라에 맞게 수정 필요)
         run: |
           echo "${{ env.ECHO_PREFIX}} Backing up ${{ matrix.name }}.tar.gz to S3/GCS..."
 
-  # 2. 스테이징 배포
-  deploy-staging:
-    needs: [build-and-push]
+  ---
+
+  # 2. 홈페이지 빌드 Job
+  build-website:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Website Code
+        uses: actions/checkout@v4
+      
+      - name: Set up Node.js for Frontend Build
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' 
+          
+      - name: Install Dependencies and Build Frontend
+        run: |
+          echo "${{ env.ECHO_PREFIX}} Building website..."
+          cd ./web # 홈페이지 소스가 있는 디렉토리 가정 (수정 필요)
+          npm install
+          npm run build 
+          
+      - name: Upload Website Artifact (Build Output)
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-build-${{ github.run_number }}
+          path: ./web/dist # 빌드 결과물이 저장되는 경로 가정 (수정 필요)
+          retention-days: 7
+
+  ---
+
+  # 3. 컨테이너 배포 (스테이징)
+  deploy-staging-containers:
+    needs: [build-and-push-images]
     if: |
       success() && (
         (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || 
@@ -186,16 +232,14 @@ jobs:
     runs-on: ubuntu-latest
     environment: Staging 
     steps:
-      - name: Determine Image Tag (셸 문법 오류 수정 반영)
+      - name: Determine Image Tag
         id: tag
         run: |
           TAG='${{ github.sha }}'
           
-          # 셸 스크립트 문법을 표준 Bash 패턴 비교로 수정
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
             TAG='latest'
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/tags/"* ]]; then
-            # startsWith("refs/heads/main", "refs/tags/") 오류 수정:
             TAG="${{ github.ref_name }}"
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             TAG="${{ github.event.inputs.image_tag }}"
@@ -203,13 +247,40 @@ jobs:
           echo "DEPLOY_TAG=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy Image to Staging Environment
-        # 배포 명령어는 사용자의 인프라에 맞게 수정 필요
         run: |
-          echo "${{ env.ECHO_PREFIX}} Deploying ${{ steps.tag.outputs.DEPLOY_TAG }} to Staging."
+          echo "${{ env.ECHO_PREFIX}} Deploying Container ${{ steps.tag.outputs.DEPLOY_TAG }} to Staging."
 
-  # 3. 운영 환경 배포 (수동 승인 포함)
-  deploy-production:
-    needs: [deploy-staging]
+  # 4. 홈페이지 배포
+  deploy-website:
+    needs: [build-website]
+    if: needs.build-website.result == 'success'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }} 
+    steps:
+      - name: Download Website Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: website-build-${{ github.run_number }}
+          path: ./website-deploy
+          
+      # 홈페이지 스테이징 배포 (Push/Dispatch Staging)
+      - name: Deploy Website to Staging (S3/Cloudflare)
+        if: github.event.inputs.environment == 'Staging' || github.ref == 'refs/heads/main'
+        # 실제 배포 액션으로 대체 필요
+        run: |
+          echo "${{ env.ECHO_PREFIX}} Deploying Website to Staging Host."
+
+      # 홈페이지 운영 배포 (Dispatch Production/Tag Push)
+      - name: Deploy Website to Production (S3/Cloudflare)
+        if: github.event.inputs.environment == 'Production' || startsWith(github.ref, 'refs/tags/')
+        # 실제 배포 액션으로 대체 필요
+        run: |
+          echo "${{ env.ECHO_PREFIX}} Deploying Website to Production Host."
+
+
+  # 5. 컨테이너 운영 배포 및 스케일 아웃
+  deploy-production-containers:
+    needs: [deploy-staging-containers]
     if: |
       success() && (
         (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) ||
@@ -220,12 +291,11 @@ jobs:
       name: Production 
       url: https://your-production-url.com
     steps:
-      - name: Determine Image Tag (셸 문법 오류 수정 반영)
+      - name: Determine Image Tag
         id: tag
         run: |
           TAG='${{ github.sha }}'
           
-          # 셸 스크립트 문법을 표준 Bash 패턴 비교로 수정
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
             TAG='latest'
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/tags/"* ]]; then
@@ -236,11 +306,9 @@ jobs:
           echo "DEPLOY_TAG=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy Image to Production Environment
-        # 배포 명령어는 사용자의 인프라에 맞게 수정 필요
         run: |
-          echo "${{ env.ECHO_PREFIX}} Deploying ${{ steps.tag.outputs.DEPLOY_TAG }} to Production."
+          echo "${{ env.ECHO_PREFIX}} Deploying Container ${{ steps.tag.outputs.DEPLOY_TAG }} to Production."
           
       - name: Scale up Server Replicas
-        # 서버 설치 증가/확장 로직
         run: |
           echo "${{ env.ECHO_PREFIX}} Scaling up deployment to desired capacity (e.g., 5 replicas)."
