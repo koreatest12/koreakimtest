@@ -1,13 +1,13 @@
-name: "🐧 All-in-One CI/CD Pipeline (No Skip) — EchoOps"
+name: "🐧 All-in-One CI/CD Pipeline (Stabilized) — EchoOps"
 
 # 1. 트리거 설정
 on:
   push:
     branches: [ main, master, '**/create-and-manage-linux-images**' ]
-    tags: # 태그 푸시도 배포 트리거로 사용
+    tags: 
       - 'v[0-9]+.[0-9]+.[0-9]+'
   pull_request:
-  workflow_dispatch: # 수동 실행을 위해 input 설정
+  workflow_dispatch:
     inputs:
       image_tag:
         description: 'Image tag to deploy (e.g., latest or v1.0.0)'
@@ -24,9 +24,9 @@ on:
           
 permissions:
   contents: read
-  packages: write # GHCR push
-  id-token: write # Cloud Provider OIDC 인증
-  deployments: write # GitHub Environments 사용
+  packages: write 
+  id-token: write
+  deployments: write
 
 env:
   REGISTRY: ghcr.io
@@ -34,13 +34,12 @@ env:
 
 jobs:
   # 1. 이미지 빌드, 보안 검증 및 푸시
-  # (이전의 'filter-changes' Job을 제거하고 matrix를 고정하여 무조건 실행)
   build-and-push:
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 5
       fail-fast: false
-      matrix: # 모든 항목을 명시적으로 정의하여 스킵 없이 무조건 실행
+      matrix: # 스킵 없이 모든 항목 무조건 실행
         include:
           - name: ubuntu
             context: ./docker/ubuntu
@@ -59,17 +58,19 @@ jobs:
           platforms: all
       - uses: docker/setup-buildx-action@v3
         
+      # Hadolint는 오류가 발생해도 빌드를 계속 진행하도록 설정 유지 (Dockerfile 수정 권장)
       - name: Lint Dockerfile (Hadolint)
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: ${{ matrix.dockerfile }}
-        continue-on-error: true
-
+          failure-threshold: warning # warning 이상 시 에러 발생
+        continue-on-error: true # 오류 발생 시에도 워크플로우는 계속 진행
+          
       - name: Prepare Image Metadata & Tags
         id: meta
         run: |
           IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}"
-          SHA_TAG="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          SHA_TAG="${IMAGE_NAME}:sha-${GITHUB_SHA}}"
           TAGS="${SHA_TAG}"
           
           if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
@@ -79,9 +80,23 @@ jobs:
             TAGS="${TAGS},${IMAGE_NAME}:${GITHUB_REF_NAME}"
           fi
           
-          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          # Load/Push 정책 설정 (Multi-Arch 오류 해결을 위한 핵심 로직)
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo "::set-output name=PUSH_MODE::false"
+            echo "::set-output name=LOAD_MODE::true"
+            echo "::set-output name=BUILD_PLATFORMS::linux/amd64" # PR은 단일 아키텍처만 로드
+          else
+            echo "::set-output name=PUSH_MODE::true"
+            echo "::set-output name=LOAD_MODE::false"
+            echo "::set-output name=BUILD_PLATFORMS::linux/amd64,linux/arm64" # Push는 Multi-Arch 푸시
+          fi
+
           echo "image_sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "PUSH_MODE=${PUSH_MODE}" >> "$GITHUB_OUTPUT"
+          echo "LOAD_MODE=${LOAD_MODE}" >> "$GITHUB_OUTPUT"
+          echo "BUILD_PLATFORMS=${BUILD_PLATFORMS}" >> "$GITHUB_OUTPUT"
+
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -90,21 +105,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           
+      # 2. Build and Push (Multi-Arch 오류 해결 로직 적용)
       - name: Build and Push Image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64, linux/arm64 
-          push: ${{ github.event_name != 'pull_request' }}
-          load: true 
+          # PR과 Push 이벤트에 따라 플랫폼, Load, Push 모드 분리
+          platforms: ${{ steps.meta.outputs.BUILD_PLATFORMS }}
+          push: ${{ steps.meta.outputs.PUSH_MODE }}
+          load: ${{ steps.meta.outputs.LOAD_MODE }}
           tags: ${{ steps.meta.outputs.image_tags }}
           cache-from: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }}
           cache-to: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }},mode=max
 
-      - name: Smoke Test Image
+      # 3. Smoke Test (PR 시 Load 모드에서만 실행 가능)
+      - name: Smoke Test Image (Only on Load Mode)
+        if: steps.meta.outputs.LOAD_MODE == 'true'
         run: |
           IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
+          echo "${{ env.ECHO_PREFIX}} Running smoke test on loaded image: ${IMAGE}"
           docker run --rm "${IMAGE}" bash -lc "
             test -f /etc/app/permissions.conf;
             test -d /opt/app/data;
@@ -112,6 +133,7 @@ jobs:
             echo 'Smoke test passed.';
           "
           
+      # 4. Trivy Security Gate 및 SBOM 생성
       - name: Scan Image for Vulnerabilities (Trivy Security Gate)
         uses: aquasecurity/trivy-action@0.28.0
         with:
@@ -136,12 +158,17 @@ jobs:
           path: sbom-${{ matrix.name }}.json
           retention-days: 30 
 
+      # 5. 아티팩트 저장 및 백업
       - name: Save Image and Upload to Artifacts (Short-term)
+        # Load 모드일 때만 docker save 가능
+        if: steps.meta.outputs.LOAD_MODE == 'true'
         run: |
           IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
           TAR_NAME="${{ matrix.name }}.tar.gz"
           docker save "${IMAGE}" | gzip > "${TAR_NAME}"
-      - uses: actions/upload-artifact@v4
+      - name: Upload Image Artifact
+        if: steps.meta.outputs.LOAD_MODE == 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}-image-${{ github.run_number }}
           path: ${{ matrix.name }}.tar.gz
@@ -151,14 +178,12 @@ jobs:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         # 이 스텝은 실제 S3, GCS 업로드 스크립트/액션으로 대체되어야 함
         run: |
-          echo "${ECHO_PREFIX} Backing up ${{ matrix.name }}.tar.gz to S3/GCS..."
-          # 실제 백업 명령어: aws s3 cp ... 또는 gcloud storage cp ...
+          echo "${{ env.ECHO_PREFIX}} Backing up ${{ matrix.name }}.tar.gz to S3/GCS..."
+          # aws s3 cp ${{ matrix.name }}.tar.gz s3://${{ secrets.BACKUP_BUCKET }}/artifacts/
 
-  # 2. 스테이징 배포 
-  # (이전 버전의 'needs' 조건을 'build-and-push'의 성공으로만 단순화)
+  # 6. 스테이징 배포 (빌드 성공 시 무조건 실행)
   deploy-staging:
     needs: [build-and-push]
-    # Push 성공 또는 수동 실행 시 무조건 실행 (빌드 성공 가정)
     if: |
       success() && (
         (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || 
@@ -181,15 +206,13 @@ jobs:
           echo "DEPLOY_TAG=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy Image to Staging Environment
-        # 실제 배포 로직 (K8s/ECS/VM)
+        # 배포 명령어는 사용자의 인프라에 맞게 수정 필요
         run: |
-          echo "${ECHO_PREFIX} Deploying ${{ steps.tag.outputs.DEPLOY_TAG }} to Staging."
-          # 예시: K8s 명령어 (실제 환경에 맞게 수정 필요)
+          echo "${{ env.ECHO_PREFIX}} Deploying ${{ steps.tag.outputs.DEPLOY_TAG }} to Staging."
           # kubectl set image deployment/app-staging app-container=${{ env.REGISTRY }}/${{ github.repository_owner }}/app:${{ steps.tag.outputs.DEPLOY_TAG }}
 
-  # 3. 운영 환경 배포 (수동 승인 포함)
+  # 7. 운영 환경 배포 (수동 승인 포함)
   deploy-production:
-    # Staging 배포 성공 시 또는 수동 실행 시 무조건 실행 (Staging 성공 가정)
     needs: [deploy-staging]
     if: |
       success() && (
@@ -198,7 +221,7 @@ jobs:
       )
     runs-on: ubuntu-latest
     environment: 
-      name: Production # 수동 승인/검토자 설정은 GitHub UI에서 진행
+      name: Production 
       url: https://your-production-url.com
     steps:
       - name: Determine Image Tag
@@ -215,15 +238,13 @@ jobs:
           echo "DEPLOY_TAG=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy Image to Production Environment
-        # 실제 배포 로직 (K8s/ECS/VM)
+        # 배포 명령어는 사용자의 인프라에 맞게 수정 필요
         run: |
-          echo "${ECHO_PREFIX} Deploying ${{ steps.tag.outputs.DEPLOY_TAG }} to Production."
-          # 예시: K8s 명령어 (실제 환경에 맞게 수정 필요)
+          echo "${{ env.ECHO_PREFIX}} Deploying ${{ steps.tag.outputs.DEPLOY_TAG }} to Production."
           # kubectl set image deployment/app-prod app-container=${{ env.REGISTRY }}/${{ github.repository_owner }}/app:${{ steps.tag.outputs.DEPLOY_TAG }}
           
-      - name: Scale up Server Replicas (Post-Deployment)
+      - name: Scale up Server Replicas
         # 서버 설치 증가/확장 로직
         run: |
-          echo "${ECHO_PREFIX} Scaling up deployment to desired capacity (e.g., 5 replicas)."
-          # 예시: K8s replica 수를 5로 증가 (실제 환경에 맞게 수정 필요)
+          echo "${{ env.ECHO_PREFIX}} Scaling up deployment to desired capacity (e.g., 5 replicas)."
           # kubectl scale deployment app-prod --replicas=5
