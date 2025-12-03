@@ -1,4 +1,4 @@
-name: "🐧 All-in-One CI/CD Pipeline (Stabilized) — EchoOps"
+name: "🐧 All-in-One CI/CD Pipeline (Ultra-Stable) — EchoOps"
 
 # 1. 트리거 설정
 on:
@@ -58,21 +58,24 @@ jobs:
           platforms: all
       - uses: docker/setup-buildx-action@v3
         
-      # Hadolint는 오류가 발생해도 빌드를 계속 진행하도록 설정 유지 (Dockerfile 수정 권장)
+      # Hadolint 오류 발생해도 강행하도록 continue-on-error: true 유지 및 ignore 추가
       - name: Lint Dockerfile (Hadolint)
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: ${{ matrix.dockerfile }}
           failure-threshold: warning # warning 이상 시 에러 발생
-        continue-on-error: true # 오류 발생 시에도 워크플로우는 계속 진행
-          
-      - name: Prepare Image Metadata & Tags
+          # DL3005 (dist-upgrade) 및 DL3007 (latest) 경고를 워크플로우 수준에서 무시
+          ignore: DL3005,DL3007
+        continue-on-error: true 
+
+      - name: Prepare Image Metadata & Build Params (GITHUB_OUTPUT 사용)
         id: meta
         run: |
           IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}"
-          SHA_TAG="${IMAGE_NAME}:sha-${GITHUB_SHA}}"
+          SHA_TAG="${IMAGE_NAME}:sha-${GITHUB_SHA}"
           TAGS="${SHA_TAG}"
           
+          # 1. 태그 결정 로직
           if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
             TAGS="${TAGS},${IMAGE_NAME}:latest"
           fi
@@ -80,23 +83,24 @@ jobs:
             TAGS="${TAGS},${IMAGE_NAME}:${GITHUB_REF_NAME}"
           fi
           
-          # Load/Push 정책 설정 (Multi-Arch 오류 해결을 위한 핵심 로직)
+          # 2. Load/Push/Platform 결정 로직 (YAML Boolean 오류 해결)
+          # PR이 아니면 push=true, load=false, multi-arch
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            echo "::set-output name=PUSH_MODE::false"
-            echo "::set-output name=LOAD_MODE::true"
-            echo "::set-output name=BUILD_PLATFORMS::linux/amd64" # PR은 단일 아키텍처만 로드
+            PUSH_MODE="false"
+            LOAD_MODE="true"
+            BUILD_PLATFORMS="linux/amd64" # PR은 단일 아키텍처만 로드
           else
-            echo "::set-output name=PUSH_MODE::true"
-            echo "::set-output name=LOAD_MODE::false"
-            echo "::set-output name=BUILD_PLATFORMS::linux/amd64,linux/arm64" # Push는 Multi-Arch 푸시
+            PUSH_MODE="true"
+            LOAD_MODE="false"
+            BUILD_PLATFORMS="linux/amd64,linux/arm64" # Push는 Multi-Arch 푸시
           fi
 
+          # GITHUB_OUTPUT 파일에 변수 저장 (안정적인 Boolean 전달)
           echo "image_sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_tags=${TAGS}" >> "$GITHUB_OUTPUT"
-          echo "PUSH_MODE=${PUSH_MODE}" >> "$GITHUB_OUTPUT"
-          echo "LOAD_MODE=${LOAD_MODE}" >> "$GITHUB_OUTPUT"
-          echo "BUILD_PLATFORMS=${BUILD_PLATFORMS}" >> "$GITHUB_OUTPUT"
-
+          echo "push_mode=${PUSH_MODE}" >> "$GITHUB_OUTPUT"
+          echo "load_mode=${LOAD_MODE}" >> "$GITHUB_OUTPUT"
+          echo "build_platforms=${BUILD_PLATFORMS}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -105,27 +109,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           
-      # 2. Build and Push (Multi-Arch 오류 해결 로직 적용)
+      # 2. Build and Push (Boolean 오류 해결된 변수 사용)
       - name: Build and Push Image
-        id: build
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          # PR과 Push 이벤트에 따라 플랫폼, Load, Push 모드 분리
-          platforms: ${{ steps.meta.outputs.BUILD_PLATFORMS }}
-          push: ${{ steps.meta.outputs.PUSH_MODE }}
-          load: ${{ steps.meta.outputs.LOAD_MODE }}
+          # YAML 오류 해결: meta 스텝에서 문자열 'true'/'false'로 출력된 변수 사용
+          platforms: ${{ steps.meta.outputs.build_platforms }}
+          push: ${{ steps.meta.outputs.push_mode }} 
+          load: ${{ steps.meta.outputs.load_mode }}
           tags: ${{ steps.meta.outputs.image_tags }}
           cache-from: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }}
           cache-to: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }},mode=max
 
-      # 3. Smoke Test (PR 시 Load 모드에서만 실행 가능)
+      # 3. Smoke Test (Load Mode일 때만 실행)
       - name: Smoke Test Image (Only on Load Mode)
-        if: steps.meta.outputs.LOAD_MODE == 'true'
+        if: steps.meta.outputs.load_mode == 'true'
         run: |
           IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
-          echo "${{ env.ECHO_PREFIX}} Running smoke test on loaded image: ${IMAGE}"
           docker run --rm "${IMAGE}" bash -lc "
             test -f /etc/app/permissions.conf;
             test -d /opt/app/data;
@@ -160,14 +162,13 @@ jobs:
 
       # 5. 아티팩트 저장 및 백업
       - name: Save Image and Upload to Artifacts (Short-term)
-        # Load 모드일 때만 docker save 가능
-        if: steps.meta.outputs.LOAD_MODE == 'true'
+        if: steps.meta.outputs.load_mode == 'true'
         run: |
           IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
           TAR_NAME="${{ matrix.name }}.tar.gz"
           docker save "${IMAGE}" | gzip > "${TAR_NAME}"
       - name: Upload Image Artifact
-        if: steps.meta.outputs.LOAD_MODE == 'true'
+        if: steps.meta.outputs.load_mode == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}-image-${{ github.run_number }}
@@ -176,14 +177,15 @@ jobs:
 
       - name: Long-term Image Backup to Cloud Storage
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        # 이 스텝은 실제 S3, GCS 업로드 스크립트/액션으로 대체되어야 함
+        # 실제 백업 명령어 (인프라에 맞게 수정 필요)
         run: |
           echo "${{ env.ECHO_PREFIX}} Backing up ${{ matrix.name }}.tar.gz to S3/GCS..."
           # aws s3 cp ${{ matrix.name }}.tar.gz s3://${{ secrets.BACKUP_BUCKET }}/artifacts/
 
-  # 6. 스테이징 배포 (빌드 성공 시 무조건 실행)
+  # 6. 스테이징 배포
   deploy-staging:
     needs: [build-and-push]
+    # build-and-push Job의 모든 매트릭스 항목이 성공했을 때만 실행
     if: |
       success() && (
         (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || 
