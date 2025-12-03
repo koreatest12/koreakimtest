@@ -246,7 +246,7 @@ jobs:
           echo "Python scan target: ${{ matrix.project }}" | tee -a "${REPORT_DIR}/SUMMARY_py.txt"
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"
