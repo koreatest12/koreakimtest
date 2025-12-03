@@ -1,4 +1,4 @@
-name: "🐧 All-in-One CI/CD Pipeline (Ultra-Stable) — EchoOps"
+name: "🐧 All-in-One CI/CD Pipeline (Ultra-Stable Final) — EchoOps"
 
 # 1. 트리거 설정
 on:
@@ -63,12 +63,11 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: ${{ matrix.dockerfile }}
-          failure-threshold: warning # warning 이상 시 에러 발생
-          # DL3005 (dist-upgrade) 및 DL3007 (latest) 경고를 워크플로우 수준에서 무시
-          ignore: DL3005,DL3007
+          failure-threshold: warning
+          ignore: DL3005,DL3007 # Dockerfile 수정 전까지 오류 무시
         continue-on-error: true 
 
-      - name: Prepare Image Metadata & Build Params (GITHUB_OUTPUT 사용)
+      - name: Prepare Image Metadata & Build Params
         id: meta
         run: |
           IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}"
@@ -83,19 +82,18 @@ jobs:
             TAGS="${TAGS},${IMAGE_NAME}:${GITHUB_REF_NAME}"
           fi
           
-          # 2. Load/Push/Platform 결정 로직 (YAML Boolean 오류 해결)
-          # PR이 아니면 push=true, load=false, multi-arch
+          # 2. Load/Push/Platform 결정 로직
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
             PUSH_MODE="false"
             LOAD_MODE="true"
-            BUILD_PLATFORMS="linux/amd64" # PR은 단일 아키텍처만 로드
+            BUILD_PLATFORMS="linux/amd64"
           else
             PUSH_MODE="true"
             LOAD_MODE="false"
-            BUILD_PLATFORMS="linux/amd64,linux/arm64" # Push는 Multi-Arch 푸시
+            BUILD_PLATFORMS="linux/amd64,linux/arm64"
           fi
 
-          # GITHUB_OUTPUT 파일에 변수 저장 (안정적인 Boolean 전달)
+          # GITHUB_OUTPUT 파일에 변수 저장 (안정적인 Boolean 전달 및 Deprecation 해결)
           echo "image_sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "push_mode=${PUSH_MODE}" >> "$GITHUB_OUTPUT"
@@ -109,13 +107,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           
-      # 2. Build and Push (Boolean 오류 해결된 변수 사용)
       - name: Build and Push Image
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          # YAML 오류 해결: meta 스텝에서 문자열 'true'/'false'로 출력된 변수 사용
           platforms: ${{ steps.meta.outputs.build_platforms }}
           push: ${{ steps.meta.outputs.push_mode }} 
           load: ${{ steps.meta.outputs.load_mode }}
@@ -123,7 +119,7 @@ jobs:
           cache-from: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }}
           cache-to: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }},mode=max
 
-      # 3. Smoke Test (Load Mode일 때만 실행)
+      # Smoke Test는 Load Mode일 때만 실행 가능
       - name: Smoke Test Image (Only on Load Mode)
         if: steps.meta.outputs.load_mode == 'true'
         run: |
@@ -135,7 +131,6 @@ jobs:
             echo 'Smoke test passed.';
           "
           
-      # 4. Trivy Security Gate 및 SBOM 생성
       - name: Scan Image for Vulnerabilities (Trivy Security Gate)
         uses: aquasecurity/trivy-action@0.28.0
         with:
@@ -160,7 +155,6 @@ jobs:
           path: sbom-${{ matrix.name }}.json
           retention-days: 30 
 
-      # 5. 아티팩트 저장 및 백업
       - name: Save Image and Upload to Artifacts (Short-term)
         if: steps.meta.outputs.load_mode == 'true'
         run: |
@@ -180,12 +174,10 @@ jobs:
         # 실제 백업 명령어 (인프라에 맞게 수정 필요)
         run: |
           echo "${{ env.ECHO_PREFIX}} Backing up ${{ matrix.name }}.tar.gz to S3/GCS..."
-          # aws s3 cp ${{ matrix.name }}.tar.gz s3://${{ secrets.BACKUP_BUCKET }}/artifacts/
 
-  # 6. 스테이징 배포
+  # 2. 스테이징 배포
   deploy-staging:
     needs: [build-and-push]
-    # build-and-push Job의 모든 매트릭스 항목이 성공했을 때만 실행
     if: |
       success() && (
         (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || 
@@ -194,13 +186,16 @@ jobs:
     runs-on: ubuntu-latest
     environment: Staging 
     steps:
-      - name: Determine Image Tag
+      - name: Determine Image Tag (셸 문법 오류 수정 반영)
         id: tag
         run: |
           TAG='${{ github.sha }}'
+          
+          # 셸 스크립트 문법을 표준 Bash 패턴 비교로 수정
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
             TAG='latest'
-          elif [[ "${{ github.event_name }}" == "push" && startsWith("${{ github.ref }}", "refs/tags/") ]]; then
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/tags/"* ]]; then
+            # startsWith("refs/heads/main", "refs/tags/") 오류 수정:
             TAG="${{ github.ref_name }}"
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             TAG="${{ github.event.inputs.image_tag }}"
@@ -211,9 +206,8 @@ jobs:
         # 배포 명령어는 사용자의 인프라에 맞게 수정 필요
         run: |
           echo "${{ env.ECHO_PREFIX}} Deploying ${{ steps.tag.outputs.DEPLOY_TAG }} to Staging."
-          # kubectl set image deployment/app-staging app-container=${{ env.REGISTRY }}/${{ github.repository_owner }}/app:${{ steps.tag.outputs.DEPLOY_TAG }}
 
-  # 7. 운영 환경 배포 (수동 승인 포함)
+  # 3. 운영 환경 배포 (수동 승인 포함)
   deploy-production:
     needs: [deploy-staging]
     if: |
@@ -226,13 +220,15 @@ jobs:
       name: Production 
       url: https://your-production-url.com
     steps:
-      - name: Determine Image Tag
+      - name: Determine Image Tag (셸 문법 오류 수정 반영)
         id: tag
         run: |
           TAG='${{ github.sha }}'
+          
+          # 셸 스크립트 문법을 표준 Bash 패턴 비교로 수정
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
             TAG='latest'
-          elif [[ "${{ github.event_name }}" == "push" && startsWith("${{ github.ref }}", "refs/tags/") ]]; then
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/tags/"* ]]; then
             TAG="${{ github.ref_name }}"
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             TAG="${{ github.event.inputs.image_tag }}"
@@ -243,10 +239,8 @@ jobs:
         # 배포 명령어는 사용자의 인프라에 맞게 수정 필요
         run: |
           echo "${{ env.ECHO_PREFIX}} Deploying ${{ steps.tag.outputs.DEPLOY_TAG }} to Production."
-          # kubectl set image deployment/app-prod app-container=${{ env.REGISTRY }}/${{ github.repository_owner }}/app:${{ steps.tag.outputs.DEPLOY_TAG }}
           
       - name: Scale up Server Replicas
         # 서버 설치 증가/확장 로직
         run: |
           echo "${{ env.ECHO_PREFIX}} Scaling up deployment to desired capacity (e.g., 5 replicas)."
-          # kubectl scale deployment app-prod --replicas=5
