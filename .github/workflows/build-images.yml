@@ -191,8 +191,6 @@ jobs:
         run: |
           echo "${{ env.ECHO_PREFIX}} Backing up ${{ matrix.name }}.tar.gz to S3/GCS..."
 
-  ---
-
   # 2. 홈페이지 빌드 Job
   build-website:
     runs-on: ubuntu-latest
@@ -218,8 +216,6 @@ jobs:
           name: website-build-${{ github.run_number }}
           path: ./web/dist # 빌드 결과물이 저장되는 경로 가정 (수정 필요)
           retention-days: 7
-
-  ---
 
   # 3. 컨테이너 배포 (스테이징)
   deploy-staging-containers:
@@ -266,14 +262,12 @@ jobs:
       # 홈페이지 스테이징 배포 (Push/Dispatch Staging)
       - name: Deploy Website to Staging (S3/Cloudflare)
         if: github.event.inputs.environment == 'Staging' || github.ref == 'refs/heads/main'
-        # 실제 배포 액션으로 대체 필요
         run: |
           echo "${{ env.ECHO_PREFIX}} Deploying Website to Staging Host."
 
       # 홈페이지 운영 배포 (Dispatch Production/Tag Push)
       - name: Deploy Website to Production (S3/Cloudflare)
         if: github.event.inputs.environment == 'Production' || startsWith(github.ref, 'refs/tags/')
-        # 실제 배포 액션으로 대체 필요
         run: |
           echo "${{ env.ECHO_PREFIX}} Deploying Website to Production Host."
 
