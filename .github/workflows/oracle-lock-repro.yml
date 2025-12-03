@@ -1,369 +1,86 @@
-name: "🚀 MCP Server Install & Context Sync v3.0 (OMNISERVICE-DEPLOYMENT)"
+name: ETL Daily Workflow (PostgreSQL to Vertica)
 
 on:
-  push:
-    paths:
-      - 'mcp-python-server/**'
-      - 'mcp-java-server/**'
-      - 'mcp-node-service/**'
-      - 'mcp-security/**' 
-      - '.mcp.json'
-      - 'config/copilot/**'
+  schedule:
+    - cron: '0 3 * * *' # 매일 UTC 기준 새벽 3시에 실행
   workflow_dispatch:
     inputs:
-      python_version:
-        description: 'Python version for MCP server validation'
+      reason:
+        description: '수동 실행 사유'
         required: false
-        default: '3.11'
-      node_version:
-        description: 'Node.js version for auxiliary MCP tooling'
-        required: false
-        default: '20'
-      java_version:
-        description: 'Java version for MCP server validation'
-        required: false
-        default: '17'
-      generate_copilot_summary:
-        description: 'Also publish Copilot context summary as workflow output'
-        type: boolean
-        default: true
-
-permissions:
-  contents: write
-  actions: read
-  checks: write
-
-env:
-  TZ: Asia/Seoul
-  MCP_WORKSPACE: .github/mcp-workspace
-  MCP_ARTIFACTS: .github/mcp-workspace/artifacts
-  MCP_CONFIG: .github/mcp-workspace/config
-  COPILOT_DIR: .github/copilot
+        default: 'Manual Trigger'
 
 jobs:
-  provision-omniservice:
-    name: "Provision MCP Omniservice (Deployment Ready)"
-    runs-on: ubuntu-24.04
+  run_etl_pipeline:
+    # 🚨 주의: Self-Hosted Runner 또는 SSH 키를 직접 파일 시스템에 추가해야 함
+    runs-on: self-hosted # Self-Hosted Runner 사용을 가정하여 서버 접근 문제 회피
     
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ===========================================================================
-      # 1. WORKSPACE PREPARATION & DOCKERFILE GENERATION
-      # ===========================================================================
-      - name: Prepare workspace directories and generate service files
+      # 1. SSH 접속 설정 (Secrets 제거로 인한 변경)
+      # Self-Hosted Runner를 사용하지 않는다면, 이 단계에서 SSH 키를 직접 파일로 생성해야 합니다.
+      - name: SSH Key Setup and Connection Test
         run: |
-          echo "======================================================"
-          echo "  🌐 [PHASE 1] WORKSPACE SETUP & DOCKERFILE GENERATION"
-          echo "======================================================"
-          set -Eeuo pipefail
+          # 🚨 보안 경고: 실제 키를 여기에 직접 입력하지 마십시오.
+          # 예시: echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa 대신
+          # echo "하드코딩된_개인_키_문자열" > ~/.ssh/id_rsa
           
-          # CRITICAL FIX: Define RUNTIME CONTEXT via GITHUB_ENV
-          echo "CACHE_KEY_PREFIX=mcp-omniservice-${{ runner.os }}" >> $GITHUB_ENV
+          # SSH 접속 정보 (하드코딩 예시 - 보안 위험)
+          export ETL_SERVER_USER="etl_user"
+          export ETL_SERVER_HOST="10.0.1.10"
+          export SSH_CONNECT_STRING="${ETL_SERVER_USER}@${ETL_SERVER_HOST}"
           
-          # Define and Export derived paths
-          JAVA_ARTIFACTS="$MCP_ARTIFACTS/java"
-          NODE_ARTIFACTS="$MCP_ARTIFACTS/node"
-          echo "JAVA_ARTIFACTS=$JAVA_ARTIFACTS" >> $GITHUB_ENV
-          echo "NODE_ARTIFACTS=$NODE_ARTIFACTS" >> $GITHUB_ENV
-          
-          echo "📂 Creating core directories..."
-          mkdir -p "$MCP_WORKSPACE" "$MCP_ARTIFACTS" "$MCP_CONFIG" "$COPILOT_DIR"
-          mkdir -p "$JAVA_ARTIFACTS" "$NODE_ARTIFACTS"
-          
-          # 📝 Generate core service files (Python/Node/Java package.json/pom.xml)
-          # ... (File creation code remains unchanged) ...
-          
-          # 📝 Generate DOCKERFILES for all three services (NEW)
-          mkdir -p $MCP_CONFIG/docker
-          
-          cat <<'DOCKER' > $MCP_CONFIG/docker/python.Dockerfile
-          FROM python:${{ inputs.python_version || '3.11' }}-slim
-          WORKDIR /app
-          COPY mcp-python-server/requirements.txt .
-          RUN pip install --no-cache-dir -r requirements.txt
-          COPY mcp-python-server/ .
-          CMD ["python", "server_mcp.py"]
-          DOCKER
-          
-          cat <<'DOCKER' > $MCP_CONFIG/docker/node.Dockerfile
-          FROM node:${{ inputs.node_version || '20' }}-slim
-          WORKDIR /app
-          COPY mcp-node-service/package*.json .
-          RUN npm ci --only=production
-          COPY mcp-node-service/ .
-          CMD ["node", "index.js"]
-          DOCKER
-          
-          cat <<'DOCKER' > $MCP_CONFIG/docker/java.Dockerfile
-          FROM openjdk:${{ inputs.java_version || '17' }}-jdk-slim
-          WORKDIR /app
-          # Artifact will be copied during the build step below
-          CMD ["java", "-jar", "java-mcp-server-1.0.0.jar"]
-          DOCKER
-          
-          echo "✅ Service files and Dockerfiles generated."
-          echo "======================================================"
+          # 하드코딩 대신, SSH 설정 파일에 이미 해당 서버 접속 정보가 등록되어 있다고 가정합니다.
+          echo "SSH 접속 정보가 환경에 설정되어 있다고 가정하고 진행합니다."
 
-      # ===========================================================================
-      # 2. PYTHON SERVICE PROVISIONING, SECURITY & DOCKER BUILD
-      # ===========================================================================
-      - name: Set up Python
-        id: setup-python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ inputs.python_version || '3.11' }}
-          cache: 'pip'
-          cache-dependency-path: mcp-python-server/requirements.txt
-          
-      - name: Restore Python Compiled Artifact Cache
-        id: cache-restore-pyc
-        uses: actions/cache/restore@v4
-        with:
-          path: mcp-python-server/__pycache__
-          key: ${{ env.CACHE_KEY_PREFIX }}-pyc-${{ hashFiles('mcp-python-server/server_mcp.py') }}
-          
-      - name: Install Python dependencies & Security Tools
-        run: |
-          echo "======================================================"
-          echo "  🐍 [PHASE 2.1] PYTHON DEPENDENCY & TOOL INSTALL"
-          echo "======================================================"
-          pip install -r mcp-python-server/requirements.txt
-          pip install pytest bandit pip-audit # Installed security tools
-          python -m compileall mcp-python-server
-          echo "✅ Python dependencies and security tools installed."
 
-      - name: Run Python security and quality checks (Bandit/pip-audit)
+      # ----------------------------------------------------------------------
+      # 1단계: 🛡️ 백업 및 스키마 관리 (Guardrail)
+      # ----------------------------------------------------------------------
+      # SSH 접속이 아닌, Self-Hosted Runner가 ETL 서버 자체라고 가정하고 Local 명령 실행
+      - name: A1_Backup_Cleanup_2_Days_Retention
         run: |
-          echo "======================================================"
-          echo "  🛡️ [PHASE 2.2] PYTHON SECURITY GATE START"
-          echo "======================================================"
-          echo "🐍 Running Bandit (Security Static Analysis)..."
-          bandit -r mcp-python-server -ll -x mcp-python-server/tests > $MCP_ARTIFACTS/python_bandit_report.txt
-          
-          echo "🚨 Running pip-audit (Dependency Vulnerability Scan)..."
-          pip-audit --local || echo "⚠️ Vulnerabilities found, but continuing build."
-          echo "✅ Python security checks complete."
-          
-      - name: Build Python Docker Image
-        run: |
-          echo "🔨 Building Python Docker Image..."
-          docker build -t mcp-python-server:${{ github.sha }} -f $MCP_CONFIG/docker/python.Dockerfile .
-          echo "✅ Python image built and tagged."
+          echo "2일 초과 Vertica 백업 정리 중..."
+          # Self-Hosted Runner가 ETL 서버이므로 Local 명령 실행
+          find /mnt/backup_repo/vertica/ -maxdepth 1 -type d -name "vertica_backup_*" -mtime +2 -exec rm -rf {} \;
+          echo '백업 정리 완료.'
 
-      # ===========================================================================
-      # 3. NODE.JS SERVICE PROVISIONING, SECURITY & DOCKER BUILD
-      # ===========================================================================
-      - name: Restore Node.js Dependencies (Explicit Path Restore)
-        id: cache-restore-node-modules
-        # ... (Node cache restore logic remains unchanged) ...
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            mcp-node-service/node_modules
-            mcp-security/node_modules
-          key: ${{ env.CACHE_KEY_PREFIX }}-npm-modules-${{ hashFiles('mcp-node-service/package.json', 'mcp-security/package.json') }}
-          
-      - name: Set up Node.js tooling
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node_version || '20' }}
-          
-      - name: Install Node.js dependencies (All Services) & ESLint
+      - name: A2_Vertica_Backup_Creation
         run: |
-          echo "======================================================"
-          echo "  🟢 [PHASE 3.1] NODE.JS INSTALL & QUALITY TOOLING"
-          echo "======================================================"
-          npm install -g eslint @cyclonedx/bom # Install global tools
-          
-          # Install dependencies for Core Service
-          cd mcp-node-service
-          npm ci # Install if cache missed
-          cd ..
-          
-          # Install dependencies for Security Service
-          cd mcp-security
-          npm ci # Install if cache missed
-          cd ..
-          echo "✅ Node.js dependencies installed."
-          
-      - name: Run Node.js security and quality checks (ESLint/npm audit/SBOM)
+          echo "Vertica 백업 생성 중..."
+          # Self-Hosted Runner가 ETL 서버이므로 Local 명령 실행
+          /opt/vertica/bin/vbr.py --task backup --config-file /opt/vertica/config/vbr_backup.ini
+          echo '백업 재생성 완료.'
+
+      - name: A3_A4_PG_DDL_Detect_and_Apply
         run: |
-          echo "======================================================"
-          echo "  🛡️ [PHASE 3.2] NODE.JS SECURITY GATE START"
-          echo "======================================================"
-          
-          echo "📝 Running ESLint (Static Analysis) on Core Service..."
-          # Mock ESLint execution
-          echo "ESLint analysis passed for Node Core." > $NODE_ARTIFACTS/node_eslint_report.txt
-          
-          echo "🚨 Running npm audit (Vulnerability Scan)..."
-          # Execute npm audit from the root to scan all installed packages
-          npm audit --json > $NODE_ARTIFACTS/npm_audit_report.json || echo "⚠️ npm audit found issues, proceeding."
-          
-          echo "📝 Generating Node.js Software Bill of Materials (SBOM)..."
-          cyclonedx-npm --output $NODE_ARTIFACTS/node_sbom.json
-          echo "✅ Node.js security checks complete."
-          
-      - name: Build Node.js Docker Image
+          echo "PG DDL 감지 및 Vertica 반영 스크립트 실행 중..."
+          # DB 자격 증명은 스크립트 내부 파일에 저장되거나 (보안 위험) 환경 변수에서 가져와야 함.
+          /opt/etl/scripts/run_ddl_sync.sh
+      
+      # ----------------------------------------------------------------------
+      # 2단계: 🔄 ETL 프로세스 실행 (Data Flow)
+      # ----------------------------------------------------------------------
+      - name: B_ETL_Execution (Extract, Transform, Load)
         run: |
-          echo "🔨 Building Node Docker Image..."
-          docker build -t mcp-node-service:${{ github.sha }} -f $MCP_CONFIG/docker/node.Dockerfile .
-          echo "✅ Node image built and tagged."
+          echo "ETL (Extract, Transform, Load) 파이프라인 시작..."
+          # 스크립트 내부에서 DB 접속 정보 (하드코딩된 값 또는 파일) 사용
+          /opt/etl/scripts/run_etl_pipeline.sh
 
-      # ===========================================================================
-      # 4. JAVA SERVICE PROVISIONING, BUILDING & DOCKER BUILD
-      # ===========================================================================
-      - name: Restore Java Maven Cache (Explicit)
-        id: cache-restore-maven
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.m2/repository
-          key: ${{ env.CACHE_KEY_PREFIX }}-maven-${{ hashFiles('mcp-java-server/pom.xml') }}
-          
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ inputs.java_version || '17' }}
-          distribution: 'temurin'
-          cache: 'maven'
-
-      - name: Build Java server, archive artifacts & Build Docker Image
+      # ----------------------------------------------------------------------
+      # 3단계: ✅ 최종 반영 및 모니터링 (Finalization)
+      # ----------------------------------------------------------------------
+      - name: C1_Final_Merge_to_Production
         run: |
-          echo "======================================================"
-          echo "  ☕ [PHASE 4.1] JAVA SERVICE BUILD & DOCKER START"
-          echo "======================================================"
-          echo "🏗️ Building Java server with Maven..."
-          cd mcp-java-server
-          # Mock Java Code Quality Check (e.g., SonarQube preparation)
-          echo "📝 Running Maven Build and Mock Quality Gate..."
-          mvn clean package -DskipTests
-          
-          echo "📦 Archiving Java artifacts (.jar) to ${{ env.JAVA_ARTIFACTS }}..."
-          find target -name "*.jar" -exec cp {} "${{ env.JAVA_ARTIFACTS }}/" \;
-          
-          echo "📝 Generating Maven dependency tree log..."
-          mvn dependency:tree > "${{ env.JAVA_ARTIFACTS }}/maven_dependencies.log"
-          cd ..
-          
-          echo "🔨 Building Java Docker Image..."
-          docker build --build-arg JAR_FILE_PATH=mcp-java-server/target/java-mcp-server-1.0.0.jar \
-            -t mcp-java-server:${{ github.sha }} -f $MCP_CONFIG/docker/java.Dockerfile .
-          
-          echo "✅ Java server build complete. Artifacts stored."
-          echo "======================================================"
+          echo "최종 데이터 Merge/Swap 반영 중..."
+          # Vertica CLI 사용 (DB 자격 증명은 환경 변수/파일에 저장되어야 함)
+          /opt/vertica/bin/vsql -c "MERGE INTO public.target_data AS target USING public.target_data_staging ...;"
 
-      # ===========================================================================
-      # 5. DEPLOYMENT PREP & CONTEXT SYNC (Orchestration & SBOM)
-      # ===========================================================================
-      - name: Generate Deployment Orchestration and SBOM Artifacts
+      - name: C2_Run_Vertica_Analyze
         run: |
-          echo "======================================================"
-          echo "  📋 [PHASE 5.1] DEPLOYMENT ARTIFACTS GENERATION START"
-          echo "======================================================"
-          
-          # 📝 Generate Docker Compose File (NEW)
-          echo "📝 Generating Docker Compose Blueprint (docker-compose.yml)..."
-          cat <<'YAML' > $MCP_ARTIFACTS/docker-compose.yml
-          version: '3.8'
-          services:
-            python-api:
-              image: mcp-python-server:${{ github.sha }}
-              ports: ["8000:8000"]
-              depends_on: [java-backend]
-            
-            node-core:
-              image: mcp-node-service:${{ github.sha }}
-              ports: ["3000:3000"]
-              
-            java-backend:
-              image: mcp-java-server:${{ github.sha }}
-              # Placeholder for environment variables
-              environment:
-                - JAVA_OPTS=-Xmx512m
-          YAML
-          
-          # 📝 Generate final Copilot summary file (NEW)
-          PYTHON_VER="${{ steps.setup-python.outputs.python-version || inputs.python_version || '3.11' }}"
-          NODE_VER="${{ inputs.node_version || '20' }}"
-          JAVA_VER="${{ inputs.java_version || '17' }}"
-          
-          cat <<MD > "$COPILOT_DIR/mcp-server-omniservice-context.md"
-          # MCP Omniservice Provisioning Context (v3.0 - DEPLOYMENT READY)
-          
-          ## 🌐 Environment Summary
-          - Workflow: \`${{ github.workflow }}\`
-          - Run: \`${{ github.run_id }}\`
-          - **Python/Bandit:** \`${PYTHON_VER}\`
-          - **Node/ESLint:** \`${NODE_VER}\`
-          - **Java/Maven:** \`${JAVA_VER}\`
-          
-          ## 📦 Deployment Artifacts
-          - **Docker Images:** 3 images tagged with \`${{ github.sha }}\`
-          - **Orchestration:** \`docker-compose.yml\` generated.
-          - **SBOM:** Vulnerability report (npm audit) and CycloneDX SBOM generated.
-          MD
-          echo "✅ Deployment artifacts and Copilot context generated."
+          echo "Vertica 통계 분석 실행..."
+          /opt/vertica/bin/vsql -c 'SELECT ANALYZE_STATISTICS();'
 
-      - name: Upload MCP artifacts (Full Workspace)
-        uses: actions/upload-artifact@v4
-        with:
-          name: mcp-server-omniservice-workspace
-          path: |
-            ${{ env.MCP_WORKSPACE }}
-          retention-days: 7
-          
-      - name: Upload Copilot hints as artifact
-        if: ${{ inputs.generate_copilot_summary != 'false' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: copilot-context-omniservice
-          path: ${{ env.COPILOT_DIR }}/mcp-server-omniservice-context.md
-          retention-days: 7
-          
-      - name: Final Artifact Upload Log
+      - name: C3_Send_Success_Notification
+        if: success()
         run: |
-          echo "✅ Final artifacts uploaded successfully."
-          echo "======================================================"
-
-      # ===========================================================================
-      # 6. CACHING & DOCUMENTATION (Save updated)
-      # ===========================================================================
-      - name: Cache MCP dependencies snapshot (Save)
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.npm
-            ~/.m2/repository
-            mcp-python-server/__pycache__ 
-          key: ${{ env.CACHE_KEY_PREFIX }}-${{ hashFiles('mcp-python-server/requirements.txt', 'mcp-node-service/package.json', 'mcp-security/package.json', 'mcp-java-server/pom.xml') }}-${{ inputs.node_version || '20' }}-${{ inputs.python_version || '3.11' }}-${{ inputs.java_version || '17' }}
-
-      - name: Record installation details & Commit Log
-        run: |
-          echo "======================================================"
-          echo "  📝 [PHASE 6.1] INSTALLATION LOGGING START"
-          echo "======================================================"
-          mkdir -p docs
-          LOG_FILE="docs/copilot_install_log.md"
-          
-          DATE=$(date '+%Y-%m-%d %H:%M:%S KST')
-          PYTHON_VER="${{ steps.setup-python.outputs.python-version || inputs.python_version || '3.11' }}"
-          NODE_VER="${{ inputs.node_version || '20' }}"
-          JAVA_VER="${{ inputs.java_version || '17' }}"
-          STATUS="Success (Deployment Ready)"
-          
-          if [ ! -f "$LOG_FILE" ]; then
-            echo "# Copilot Server Installation Log" > "$LOG_FILE"
-            echo "| Date | Run ID | Python Version | Node Version | Java Version | Status |" >> "$LOG_FILE"
-            echo "|---|---|---|---|---|---|" >> "$LOG_FILE"
-          fi
-          echo "| $DATE | ${{ github.run_id }} | $PYTHON_VER | $NODE_VER | $JAVA_VER | $STATUS |" >> "$LOG_FILE"
-          echo "✅ Installation log file updated."
-
-      - name: Commit and Push Log
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "docs(log): Update Copilot Omniservice installation log (v3.0)"
-          file_pattern: docs/copilot_install_log.md
+          echo "ETL 워크플로우 성공적으로 완료됨. 날짜: ${{ github.event.schedule }}"
