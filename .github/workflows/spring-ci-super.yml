@@ -1,15 +1,13 @@
-name: Spring Boot Super CI/CD Pipeline (Maven) 🚀
+name: Spring Boot Final CI/CD Pipeline (Maven) 🚀✅
 
 # 1. 워크플로우 실행 조건 정의 (Trigger Configuration)
-# main 또는 develop 브랜치에 코드가 푸시되거나, 이 브랜치로 PR이 들어올 때 트리거됩니다.
 on:
   push:
-    branches: [ "main", "develop" ]
+    branches: [ "main", "develop" ] # main 또는 develop 브랜치에 푸시될 때
   pull_request:
-    branches: [ "main", "develop" ]
+    branches: [ "main", "develop" ] # 해당 브랜치로 PR이 생성/업데이트될 때
 
 # 2. 작업 권한 정의
-# GitHub Actions가 코드를 읽고(read) 아티팩트를 업로드(write) 할 수 있도록 권한을 설정합니다.
 permissions:
   contents: read
   packages: write
@@ -28,38 +26,49 @@ jobs:
       # 3-1. 소스 코드 체크아웃 (최신 코드 확보)
       - name: 1. Checkout Code (최신 소스코드 확보)
         uses: actions/checkout@v4
-        
+
       # 3-2. Java 환경 설정 (JDK 17 설정 및 Maven 캐시)
       - name: 2. Set up JDK 17 Environment (Adoptium/Temurin)
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin' 
-          # Maven 의존성 캐시를 활성화하여 빌드 시간 단축
+          # Maven 의존성 캐시를 활성화하여 빌드 시간 단축 및 최신 리소스 로딩 지원
           cache: 'maven'
 
-      # 3-3. Maven 빌드 및 테스트 실행 (가장 중요한 단계)
-      - name: 3. Maven Build & Comprehensive Test Execution
-        # 'clean verify'를 사용하여 테스트 실패 시 즉시 빌드 중단
-        # 'package'는 'verify' 단계 후에 실행되어 JAR 파일을 생성합니다.
-        run: mvn clean verify package
+      # 3-3. Maven Wrapper 권한 부여 (실행 가능하도록 설정)
+      - name: 3. Grant execute permission to mvnw
+        run: chmod +x mvnw
         
-      # 3-4. 최종 JAR 파일 이름 추출
-      # target 디렉토리에서 생성된 .jar 파일의 이름을 동적으로 추출합니다.
-      - name: 4. Extract JAR File Name
+      # 3-4. Maven 빌드 및 테스트 실행 (최신 리소스 컴파일 및 강력한 테스트)
+      - name: 4. Maven Build & Comprehensive Test Execution (CLEAN PACKAGE)
+        # -B: Batch mode (Non-interactive)
+        # -DskipTests=false: 테스트 실행을 명시적으로 보장
+        # 'clean verify package'를 통해 테스트가 실패하면 JAR 파일 생성 불가
+        run: mvn -B clean verify package -DskipTests=false
+        
+      # 3-5. **[경고 메시지 해결]** 최종 JAR 파일 이름 추출
+      # spring-boot-maven-plugin에 의해 생성된 최종 실행 가능한 JAR 파일만 정확하게 찾아냅니다.
+      - name: 5. Extract Final Executable JAR File Name (Warning Fix)
         id: jar_file
         run: |
-          JAR_FILE=$(find target/ -name "*.jar" | head -n 1)
+          # spring-boot-maven-plugin이 생성한 *-exec.jar 또는 *SNAPSHOT.jar 파일을 우선적으로 찾습니다.
+          JAR_FILE=$(find target/ -name "*-exec.jar" -o -name "*SNAPSHOT.jar" | grep -v original | head -n 1)
+          if [ -z "$JAR_FILE" ]; then
+            echo "Error: Executable JAR file not found in target directory!"
+            exit 1
+          fi
           echo "jar_path=$JAR_FILE" >> $GITHUB_OUTPUT
-        
-      # 3-5. 빌드 결과물 아티팩트 저장 (CD를 위한 JAR 파일 준비)
-      - name: 5. Upload Deployable JAR Artifact
+          echo "Final JAR Path: $JAR_FILE"
+
+      # 3-6. 빌드 결과물 아티팩트 저장 (CD를 위한 JAR 파일 준비)
+      - name: 6. Upload Deployable JAR Artifact (경고 없이 최종 파일만)
         uses: actions/upload-artifact@v4
         with:
           name: spring-boot-app-deployable-jar
-          # 3-4 단계에서 추출한 동적 파일 경로 사용
+          # 정확하게 추출된 최종 JAR 파일 경로만 사용
           path: ${{ steps.jar_file.outputs.jar_path }}
-          retention-days: 7 # 아티팩트 보존 기간 7일 설정 (운영 정책에 따라 변경 가능)
+          retention-days: 7 
 
 # 4. 배포 작업 (CD Place Holder)
 # 이 작업은 CI(통합)가 성공해야만 실행됩니다.
@@ -69,18 +78,16 @@ jobs:
     needs: build_and_test # build_and_test Job이 성공했을 때만 실행
     
     steps:
-      - name: Download JAR Artifact
+      - name: 1. Download JAR Artifact
         uses: actions/download-artifact@v4
         with:
           name: spring-boot-app-deployable-jar
           path: ./downloaded-artifact
 
-      - name: Deployment Placeholder
+      - name: 2. Deployment Placeholder (배포 실행)
         run: |
           echo "---------------------------------------------------------"
           echo "CI 성공! 이제 다음 단계인 서버 배포(CD)를 시작할 수 있습니다."
-          echo "다운로드된 JAR 파일은 './downloaded-artifact'에 위치합니다."
+          echo "다운로드된 JAR 파일은 './downloaded-artifact'에 위치하며, 즉시 실행 가능합니다."
           echo "---------------------------------------------------------"
-          # 실제 배포 명령어 (예: SCP, SSH를 통해 AWS EC2 또는 GCP VM으로 배포)를 여기에 추가합니다.
-          # 예시: scp ./downloaded-artifact/*.jar user@your-server-ip:/path/to/app/
-          # 예시: ssh user@your-server-ip "sudo systemctl restart spring-app"
+          # 여기에 실제 배포 로직 (예: SSH, SCP, Docker push 등)을 추가하세요.
