@@ -1,311 +1,44 @@
-name: "🚀 MCP Server Install & Context Sync v2.9 (FINAL-RUNTIME-CONTEXT-FIX)"
+name: "🔄 DR Ops: Restore from Backup"
 
 on:
-  push:
-    paths:
-      - 'mcp-python-server/**'
-      - 'mcp-java-server/**'
-      - 'mcp-node-service/**'
-      - 'mcp-security/**' 
-      - '.mcp.json'
-      - 'config/copilot/**'
   workflow_dispatch:
     inputs:
-      python_version:
-        description: 'Python version for MCP server validation'
-        required: false
-        default: '3.11'
-      node_version:
-        description: 'Node.js version for auxiliary MCP tooling'
-        required: false
-        default: '20'
-      java_version:
-        description: 'Java version for MCP server validation'
-        required: false
-        default: '17'
-      generate_copilot_summary:
-        description: 'Also publish Copilot context summary as workflow output'
-        type: boolean
-        default: true
-
-permissions:
-  contents: write
-  actions: read
-  checks: write
-
-env:
-  TZ: Asia/Seoul
-  MCP_WORKSPACE: .github/mcp-workspace
-  MCP_ARTIFACTS: .github/mcp-workspace/artifacts
-  MCP_CONFIG: .github/mcp-workspace/config
-  COPILOT_DIR: .github/copilot
+      backup_id:
+        description: '복원할 백업 ID (GitHub Artifact Name)'
+        required: true
+        default: 'finance-ops-backup'
 
 jobs:
-  provision-omniservice:
-    name: "Provision MCP Omniservice (Validated Runtime)"
-    runs-on: ubuntu-24.04
-    
-    # FIX: Removed the invalid Job-level env block here.
-      
+  disaster-recovery:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ===========================================================================
-      # 1. CORE WORKSPACE PREPARATION (FIXED: Runtime Context Export)
-      # ===========================================================================
-      - name: Prepare workspace directories and service files
-        run: |
-          echo "======================================================"
-          echo "  🌐 [PHASE 1] WORKSPACE SETUP & FILE GENERATION START"
-          echo "======================================================"
-          set -Eeuo pipefail
-          
-          # CRITICAL FIX: Define RUNTIME CONTEXT (runner.os) via GITHUB_ENV
-          echo "CACHE_KEY_PREFIX=mcp-omniservice-${{ runner.os }}" >> $GITHUB_ENV
-          echo "Setting RUNTIME CACHE_KEY_PREFIX..."
-          
-          # Define and Export derived paths
-          JAVA_ARTIFACTS="$MCP_ARTIFACTS/java"
-          NODE_ARTIFACTS="$MCP_ARTIFACTS/node"
-          echo "Setting JAVA_ARTIFACTS=$JAVA_ARTIFACTS"
-          echo "Setting NODE_ARTIFACTS=$NODE_ARTIFACTS"
-          echo "JAVA_ARTIFACTS=$JAVA_ARTIFACTS" >> $GITHUB_ENV
-          echo "NODE_ARTIFACTS=$NODE_ARTIFACTS" >> $GITHUB_ENV
-          
-          # [File Creation Code Remains]
-          # ... (creation of directories, requirements.txt, package.json, pom.xml, bootstrap.json) ...
-
-          echo "✅ Initial workspace setup and core service files created."
-          echo "======================================================"
-
-      # ===========================================================================
-      # 2. PYTHON SERVICE PROVISIONING & TESTING (Cache Update)
-      # ===========================================================================
-      - name: Set up Python
-        id: setup-python
-        uses: actions/setup-python@v5
+      - name: 📥 Download Backup Data
+        uses: actions/download-artifact@v4
         with:
-          python-version: ${{ inputs.python_version || '3.11' }}
-          cache: 'pip'
-          cache-dependency-path: mcp-python-server/requirements.txt
-          
-      - name: Restore Python Compiled Artifact Cache (NEW)
-        id: cache-restore-pyc
-        uses: actions/cache/restore@v4
-        with:
-          path: mcp-python-server/__pycache__
-          key: ${{ env.CACHE_KEY_PREFIX }}-pyc-${{ hashFiles('mcp-python-server/server_mcp.py') }}
-          
-      - name: Install Python dependencies
-        run: |
-          echo "======================================================"
-          echo "  🐍 [PHASE 2.1] PYTHON DEPENDENCY INSTALL START"
-          echo "======================================================"
-          echo "📦 Installing Python packages from requirements.txt..."
-          python -m pip install --upgrade pip
-          pip install -r mcp-python-server/requirements.txt
-          pip install pytest 
-          echo "✅ Python dependencies installed."
-          
-      - name: Compile MCP server modules (Restored from v1.x)
-        run: |
-          echo "🔨 Compiling Python server modules..."
-          python -m compileall mcp-python-server
-          
-      - name: Run Python server smoke tests
-        run: |
-          echo "======================================================"
-          echo "  🧪 [PHASE 2.2] PYTHON SMOKE TESTS START"
-          echo "======================================================"
-          echo "🧪 Running smoke tests for mcp-python-server..."
-          echo "Test passed for dummy Python server." 
-          echo "✅ Python smoke tests complete."
-          echo "======================================================"
+          name: ${{ github.event.inputs.backup_id }}
+          path: ./restore-point
 
-      # ===========================================================================
-      # 3. NODE.JS SERVICE PROVISIONING (Cache Update)
-      # ===========================================================================
-      - name: Restore Node.js NPM Cache (Explicit)
-        id: cache-restore-npm
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.npm
-          key: ${{ env.CACHE_KEY_PREFIX }}-npm-${{ hashFiles('mcp-node-service/package.json', 'mcp-security/package.json') }}
-          
-      - name: Set up Node.js tooling
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ inputs.node_version || '20' }}
-          cache: 'npm' 
-          cache-dependency-path: |
-            mcp-node-service/package.json
-            mcp-security/package.json
-          
-      - name: Install Node.js dependencies (Core Service)
-        working-directory: mcp-node-service
+      - name: 🔓 Unpack & Restore Environment
         run: |
-          echo "======================================================"
-          echo "  🟢 [PHASE 3.1] NODE.JS CORE SERVICE INSTALL START"
-          echo "======================================================"
-          echo "📦 Installing mcp-node-service packages..."
-          npm install
-          echo "✅ Node.js Core dependencies installed."
+          echo "Restoring System from Backup..."
+          mkdir -p ./restored-workspace
           
-      - name: Install Node.js dependencies (Security Service)
-        working-directory: mcp-security
+          # 압축 해제
+          tar -xzf ./restore-point/*.tar.gz -C ./restored-workspace
+          
+          echo "✅ Filesystem Restored."
+          ls -R ./restored-workspace
+
+      - name: 🐳 Restore & Run Containers
         run: |
-          echo "======================================================"
-          echo "  🛡️ [PHASE 3.2] NODE.JS SECURITY SERVICE INSTALL START"
-          echo "======================================================"
-          echo "📦 Installing mcp-security packages..."
-          npm install
-          echo "✅ Node.js Security dependencies installed."
+          # 복구된 이미지가 있다면 로드 (예시 로직)
+          find ./restored-workspace -name "*.tar" | while read image; do
+            echo "Loading image: $image"
+            docker load -i "$image"
+          done
           
-      - name: Archive Node.js dependency trees
-        run: |
-          echo "======================================================"
-          echo "  📦 [PHASE 3.3] NODE.JS ARTIFACT ARCHIVE START"
-          echo "======================================================"
-          echo "📦 Archiving Node.js dependency trees to ${{ env.NODE_ARTIFACTS }}..."
-          
-          # Execute npm ls inside the correct service directory
-          cd mcp-node-service
-          npm ls --json > "${{ env.NODE_ARTIFACTS }}/core_dependencies.json"
-          cd ..
-          
-          cd mcp-security
-          npm ls --json > "${{ env.NODE_ARTIFACTS }}/security_dependencies.json"
-          cd ..
-          
-          echo "✅ Node.js dependency trees archived successfully."
-          echo "======================================================"
+          # 서비스 긴급 재가동
+          docker run -d --name recovered-service finance-service-app:latest || echo "Image load required first"
 
-      # ===========================================================================
-      # 4. JAVA SERVICE PROVISIONING & BUILDING (Cache Update)
-      # ===========================================================================
-      - name: Restore Java Maven Cache (Explicit)
-        id: cache-restore-maven
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.m2/repository
-          key: ${{ env.CACHE_KEY_PREFIX }}-maven-${{ hashFiles('mcp-java-server/pom.xml') }}
-          
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ inputs.java_version || '17' }}
-          distribution: 'temurin'
-          cache: 'maven' 
-
-      - name: Build Java server and archive artifacts
-        run: |
-          echo "======================================================"
-          echo "  ☕ [PHASE 4.1] JAVA SERVICE BUILD START"
-          echo "======================================================"
-          echo "🏗️ Building Java server with Maven..."
-          cd mcp-java-server
-          mvn clean package -DskipTests
-          
-          echo "📦 Archiving Java artifacts (.jar) to ${{ env.JAVA_ARTIFACTS }}..."
-          find target -name "*.jar" -exec cp {} "${{ env.JAVA_ARTIFACTS }}/" \;
-          
-          echo "📝 Generating Maven dependency tree log..."
-          mvn dependency:tree > "${{ env.JAVA_ARTIFACTS }}/maven_dependencies.log"
-          cd ..
-          echo "✅ Java server build complete. Artifacts stored."
-          echo "======================================================"
-
-      # ===========================================================================
-      # 5. CONTEXT SYNC & ARTIFACT UPLOAD 
-      # ===========================================================================
-      - name: Generate Copilot summary file
-        run: |
-          echo "======================================================"
-          echo "  📋 [PHASE 5.1] COPILOT CONTEXT GENERATION START"
-          echo "======================================================"
-          PYTHON_VER="${{ steps.setup-python.outputs.python-version || inputs.python_version || '3.11' }}"
-          NODE_VER="${{ inputs.node_version || '20' }}"
-          JAVA_VER="${{ inputs.java_version || '17' }}"
-          
-          cat <<MD > "$COPILOT_DIR/mcp-server-omniservice-context.md"
-          # MCP Omniservice Provisioning Context (v2.9)
-          
-          ## 🌐 Environment Summary
-          - Workflow: \`${{ github.workflow }}\`
-          - Run: \`${{ github.run_id }}\`
-          - **Python Version:** \`${PYTHON_VER}\`
-          - **Node.js Version:** \`${NODE_VER}\`
-          - **Java Version:** \`${JAVA_VER}\`
-          
-          ## 📦 Artifacts & Services
-          - **Artifacts Root:** \`${{ env.MCP_ARTIFACTS }}\`
-          - **Bootstrap Config:** \`${{ env.MCP_CONFIG }}/bootstrap.json\`
-          - **Java Service:** Packaged JAR available in \`${{ env.JAVA_ARTIFACTS }}\`.
-
-          ---
-          *This summary provides GitHub Copilot with fresh context about all provisioned assets and dependencies for follow-up automation.*
-          MD
-          echo "✅ Copilot context file generated."
-          
-      - name: Upload MCP artifacts (Full Workspace)
-        uses: actions/upload-artifact@v4
-        with:
-          name: mcp-server-omniservice-workspace
-          path: |
-            ${{ env.MCP_WORKSPACE }}
-          retention-days: 7
-          
-      - name: Upload Copilot hints as artifact
-        if: ${{ inputs.generate_copilot_summary != 'false' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: copilot-context-omniservice
-          path: ${{ env.COPILOT_DIR }}/mcp-server-omniservice-context.md
-          retention-days: 7
-
-      - name: Final Artifact Upload Log
-        run: |
-          echo "✅ Copilot hints artifact uploaded."
-          echo "======================================================"
-
-      # ===========================================================================
-      # 6. CACHING & DOCUMENTATION (Save updated)
-      # ===========================================================================
-      - name: Cache MCP dependencies snapshot (Save)
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.npm
-            ~/.m2/repository
-            mcp-python-server/__pycache__ 
-          key: ${{ env.CACHE_KEY_PREFIX }}-${{ hashFiles('mcp-python-server/requirements.txt', 'mcp-node-service/package.json', 'mcp-security/package.json', 'mcp-java-server/pom.xml') }}-${{ inputs.node_version || '20' }}-${{ inputs.python_version || '3.11' }}-${{ inputs.java_version || '17' }}
-
-      - name: Record installation details & Commit Log
-        run: |
-          echo "======================================================"
-          echo "  📝 [PHASE 6.1] INSTALLATION LOGGING START"
-          echo "======================================================"
-          mkdir -p docs
-          LOG_FILE="docs/copilot_install_log.md"
-          
-          DATE=$(date '+%Y-%m-%d %H:%M:%S KST')
-          PYTHON_VER="${{ steps.setup-python.outputs.python-version || inputs.python_version || '3.11' }}"
-          NODE_VER="${{ inputs.node_version || '20' }}"
-          JAVA_VER="${{ inputs.java_version || '17' }}"
-          STATUS="Success (Omniservice)"
-          
-          if [ ! -f "$LOG_FILE" ]; then
-            echo "# Copilot Server Installation Log" > "$LOG_FILE"
-            echo "| Date | Run ID | Python Version | Node Version | Java Version | Status |" >> "$LOG_FILE"
-            echo "|---|---|---|---|---|---|" >> "$LOG_FILE"
-          fi
-          echo "| $DATE | ${{ github.run_id }} | $PYTHON_VER | $NODE_VER | $JAVA_VER | $STATUS |" >> "$LOG_FILE"
-          echo "✅ Installation log file updated."
-
-      - name: Commit and Push Log
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "docs(log): Update Copilot Omniservice installation log"
-          file_pattern: docs/copilot_install_log.md
+      - name: 📢 Notify Recovery Status
+        run: echo "System restored from ${{ github.event.inputs.backup_id }}"
