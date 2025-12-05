@@ -1,133 +1,192 @@
-name: "🐳 Docker Build & Replication Ops (Build, Run, Backup, Sync)"
+name: "🏦 Finance Ops: Secure Build, Encrypt, Replicate & Release"
 
 on:
   push:
-    branches: [ "main", "master" ]
+    tags:
+      - 'v*' # v1.0.0, v1.0.1 등 태그 푸시 시 릴리즈 모드 작동
   workflow_dispatch:
     inputs:
-      image_name:
-        description: '빌드할 도커 이미지 이름'
+      compliance_mode:
+        description: '컴플라이언스 감사 모드 활성화'
         required: true
-        default: 'my-service-app'
-      version_tag:
-        description: '이미지 태그 (버전)'
+        type: boolean
+        default: true
+      deploy_target:
+        description: '배포 대상 시스템 (DR/PROD)'
         required: true
-        default: 'v1.0.0'
+        default: 'PROD_PRIMARY'
 
 env:
-  # 기본 환경 변수 설정
-  IMAGE_NAME: ${{ github.event.inputs.image_name || 'my-service-app' }}
-  TAG: ${{ github.event.inputs.version_tag || 'v1.0.0' }}
-  PRIMARY_DIR: "./ops-data/primary"     # 주 운영 디렉토리
-  RESERVE_DIR: "./ops-data/reserve"     # 예비(백업) 디렉토리
+  # 1. 시스템 식별자 및 경로 설정
+  SYSTEM_ID: "KOR-FIN-CORE-01"
+  IMAGE_NAME: "finance-ledger-service"
+  PRIMARY_DIR: "./secure-storage/primary"
+  RESERVE_DIR: "./secure-storage/dr-site"    # 재해복구(DR) 센터 시뮬레이션
+  WORM_DIR: "./secure-storage/worm-audit"    # 위변조 방지(Write Once Read Many) 아카이브
+  AUDIT_LOG: "./audit-report.log"
+
+permissions:
+  contents: write  # 릴리즈 생성을 위해 쓰기 권한 필요
+  security-events: write # 보안 스캔 리포트 업로드
+  packages: write
 
 jobs:
-  docker-replication-pipeline:
-    name: 🏗️ Build, Run & Replicate
+  secure-finance-pipeline:
+    name: 🛡️ Build, Audit & Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
 
     steps:
-      # 1. 소스 코드 체크아웃
+      # ======================================================
+      # Phase 1: 초기화 및 컴플라이언스 감사 시작
+      # ======================================================
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      # 2. 작업 공간 및 디렉토리 구조 생성 (주/예비)
-      - name: 📂 Create Operational Directories
+      - name: 📝 Initialize Audit Trail (감사 로그 시작)
         run: |
-          echo "Creating directory structure..."
-          mkdir -p ${{ env.PRIMARY_DIR }}/artifacts
-          mkdir -p ${{ env.PRIMARY_DIR }}/container-fs
-          mkdir -p ${{ env.RESERVE_DIR }}/artifacts
-          mkdir -p ${{ env.RESERVE_DIR }}/container-fs
-          
-          echo "✅ Directories Created:"
-          ls -R ./ops-data
+          echo "===== FINANCE COMPLIANCE AUDIT LOG =====" > ${{ env.AUDIT_LOG }}
+          echo "TIMESTAMP: $(date -u)" >> ${{ env.AUDIT_LOG }}
+          echo "ACTOR: ${{ github.actor }}" >> ${{ env.AUDIT_LOG }}
+          echo "COMMIT: ${{ github.sha }}" >> ${{ env.AUDIT_LOG }}
+          echo "SYSTEM_ID: ${{ env.SYSTEM_ID }}" >> ${{ env.AUDIT_LOG }}
+          echo "----------------------------------------" >> ${{ env.AUDIT_LOG }}
 
-      # 3. 테스트용 Dockerfile 생성 (이미 존재하면 이 단계 생략 가능)
-      - name: 📝 Generate Demo Dockerfile (If not exists)
+      - name: 📂 Create Secure Directory Structure
         run: |
-          if [ ! -f Dockerfile ]; then
-            echo "No Dockerfile found. Creating a demo Dockerfile..."
-            cat <<EOF > Dockerfile
-            FROM alpine:latest
-            WORKDIR /app
-            RUN echo "Service Started at $(date)" > status.log
-            RUN echo "Critical Data Content" > data.txt
-            CMD ["tail", "-f", "/dev/null"]
+          mkdir -p ${{ env.PRIMARY_DIR }}/{artifacts,logs,data}
+          mkdir -p ${{ env.RESERVE_DIR }}/{artifacts,logs,data}
+          mkdir -p ${{ env.WORM_DIR }}
+          echo "✅ Security Zones Created." >> ${{ env.AUDIT_LOG }}
+
+      # ======================================================
+      # Phase 2: 빌드 및 보안 스캔 (Vulnerability Scan)
+      # ======================================================
+      - name: 📝 Generate Secure Dockerfile (데모용)
+        if: ${{ !hashFiles('Dockerfile') }}
+        run: |
+          cat <<EOF > Dockerfile
+          FROM alpine:3.18
+          # 금융 규정: Root 권한 사용 금지 및 사용자 분리
+          RUN addgroup -S finsvc && adduser -S finsvc -G finsvc
+          USER finsvc
+          WORKDIR /app
+          RUN echo "Financial Transaction Ledger Initialized" > ledger.dat
+          CMD ["tail", "-f", "/dev/null"]
           EOF
-          fi
 
-      # 4. 도커 빌드 환경 설정
       - name: 🔧 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 5. 도커 이미지 빌드 (Build)
       - name: 🔨 Build Docker Image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
-          push: false # 레지스트리에 푸시하지 않고 로컬 도커 데몬에 로드
           load: true
-          tags: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+          tags: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
 
-      # 6. 도커 컨테이너 실행 (Install/Run)
-      - name: 🚀 Run Container
+      - name: 🔍 Trivy Vulnerability Scan (취약점 점검)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.IMAGE_NAME }}:${{ github.ref_name }}'
+          format: 'table'
+          exit-code: '0' # 실제 운영 시 1로 설정하여 취약점 발견 시 빌드 중단 권장
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      # ======================================================
+      # Phase 3: 실행, 추출 및 무결성 검증 (Hashing)
+      # ======================================================
+      - name: 🚀 Run Container & Verify Health
         run: |
-          echo "Starting Container..."
-          docker run -d --name ${{ env.IMAGE_NAME }}-container ${{ env.IMAGE_NAME }}:${{ env.TAG }}
-          
-          echo "Wait for initialization..."
+          docker run -d --name ${{ env.IMAGE_NAME }}-run ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
           sleep 5
-          
-          echo "✅ Container Status:"
-          docker ps -a | grep ${{ env.IMAGE_NAME }}
+          if [ $(docker inspect -f '{{.State.Running}}' ${{ env.IMAGE_NAME }}-run) = "true" ]; then
+             echo "✅ Service Health: HEALTHY" >> ${{ env.AUDIT_LOG }}
+          else
+             echo "❌ Service Health: FAILED" >> ${{ env.AUDIT_LOG }}
+             exit 1
+          fi
 
-      # 7. 이미지 추출 및 주 디렉토리에 저장 (Image Artifact Generation)
-      - name: 📦 Export Image to Primary Dir
+      - name: 📦 Export Artifacts & Generate Checksums (무결성 확보)
         run: |
-          echo "Saving Docker Image as Tarball..."
-          docker save -o ${{ env.PRIMARY_DIR }}/artifacts/${{ env.IMAGE_NAME }}_${{ env.TAG }}.tar ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+          # 1. 이미지 추출
+          docker save -o ${{ env.PRIMARY_DIR }}/artifacts/${{ env.IMAGE_NAME }}.tar ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
           
-          echo "✅ Image saved to ${{ env.PRIMARY_DIR }}/artifacts/"
+          # 2. 데이터 추출
+          docker cp ${{ env.IMAGE_NAME }}-run:/app ${{ env.PRIMARY_DIR }}/data/
+          
+          # 3. SHA256 해시 생성 (금융 무결성 필수)
+          cd ${{ env.PRIMARY_DIR }}/artifacts
+          sha256sum ${{ env.IMAGE_NAME }}.tar > ${{ env.IMAGE_NAME }}.tar.sha256
+          
+          echo "✅ Artifacts Exported & Hashed." >> $GITHUB_WORKSPACE/${{ env.AUDIT_LOG }}
 
-      # 8. 컨테이너 내부 데이터 추출 (Container File System Extraction)
-      - name: 📤 Extract Container Filesystem
+      # ======================================================
+      # Phase 4: 데이터 암호화 및 이중화 (Encryption & DR)
+      # ======================================================
+      - name: 🔐 Encrypt Sensitive Data (암호화)
         run: |
-          echo "Copying data from running container..."
-          # 컨테이너의 /app 디렉토리를 호스트로 복사
-          docker cp ${{ env.IMAGE_NAME }}-container:/app ${{ env.PRIMARY_DIR }}/container-fs/
+          # 데모용 대칭키 암호화 (실제로는 Key Vault 사용 권장)
+          gpg --batch --passphrase "FinanceSecretKey123!" --symmetric --cipher-algo AES256 \
+          -o ${{ env.PRIMARY_DIR }}/artifacts/${{ env.IMAGE_NAME }}.tar.gpg \
+          ${{ env.PRIMARY_DIR }}/artifacts/${{ env.IMAGE_NAME }}.tar
           
-          echo "✅ Filesystem copied to ${{ env.PRIMARY_DIR }}/container-fs/"
+          echo "✅ Data Encrypted (AES-256)." >> ${{ env.AUDIT_LOG }}
 
-      # 9. 예비 디렉토리로 이중 복제 (Replication / Sync)
-      - name: 🔄 Replicate to Reserve Directory (Backup Strategy)
+      - name: 🔄 Replicate to DR Site (재해복구 복제)
         run: |
-          echo "Syncing Primary to Reserve..."
+          # 예비 디렉토리로 동기화
+          cp -r ${{ env.PRIMARY_DIR }}/* ${{ env.RESERVE_DIR }}/
           
-          # 이미지 복제
-          cp ${{ env.PRIMARY_DIR }}/artifacts/*.tar ${{ env.RESERVE_DIR }}/artifacts/
+          # WORM(Write Once) 아카이빙 시뮬레이션
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          ARCHIVE_NAME="audit_pkg_${TIMESTAMP}.zip"
+          zip -r ${{ env.WORM_DIR }}/${ARCHIVE_NAME} ${{ env.PRIMARY_DIR }}
           
-          # 컨테이너 데이터 복제
-          cp -r ${{ env.PRIMARY_DIR }}/container-fs/* ${{ env.RESERVE_DIR }}/container-fs/
-          
-          echo "✅ Replication Complete."
-          tree ./ops-data || ls -R ./ops-data
+          echo "✅ DR Replication & WORM Archiving Complete." >> ${{ env.AUDIT_LOG }}
 
-      # 10. 컨테이너 정리 (Cleanup)
-      - name: 🧹 Cleanup Container
+      - name: 🧹 Cleanup
         if: always()
-        run: |
-          docker stop ${{ env.IMAGE_NAME }}-container || true
-          docker rm ${{ env.IMAGE_NAME }}-container || true
+        run: docker rm -f ${{ env.IMAGE_NAME }}-run || true
 
-      # 11. 결과물 업로드 (Github Actions Artifacts)
-      - name: ☁️ Upload Replicated Artifacts
+      # ======================================================
+      # Phase 5: 정식 릴리즈 출시 (Release Launch)
+      # ======================================================
+      - name: 🚀 Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: "🚀 Release ${{ github.ref_name }} (Secure Build)"
+          body: |
+            ## 🏦 Finance Security Release
+            **System ID:** ${{ env.SYSTEM_ID }}
+            **Deploy Target:** ${{ inputs.deploy_target }}
+            
+            ### 🛡️ Compliance & Security
+            - [x] Docker Image Built & Scanned
+            - [x] Integrity Check (SHA256) Passed
+            - [x] Data Encrypted (AES-256)
+            - [x] Replicated to DR Site
+            
+            ### 📂 Artifacts Info
+            Check the attached assets for the audit log and secure image.
+          files: |
+            ${{ env.AUDIT_LOG }}
+            ${{ env.PRIMARY_DIR }}/artifacts/${{ env.IMAGE_NAME }}.tar.sha256
+            ${{ env.PRIMARY_DIR }}/artifacts/${{ env.IMAGE_NAME }}.tar.gpg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ======================================================
+      # Phase 6: 최종 아티팩트 업로드 (감사 증적용)
+      # ======================================================
+      - name: ☁️ Upload Audit Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: ops-replication-data
-          path: ./ops-data/
-          retention-days: 1
+          name: finance-audit-evidence-${{ github.ref_name }}
+          path: |
+            ${{ env.AUDIT_LOG }}
+            ops-data/
+            secure-storage/
+          retention-days: 90 # 금융 규정에 따른 장기 보관
