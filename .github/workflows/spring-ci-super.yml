@@ -127,7 +127,7 @@ jobs:
           fi
 
       # [FIXED] 구문 에러 수정: 따옴표(")로 감싸서 YAML 파싱 에러 방지
-      - name: 💊 Self-Heal: Recover Missing Data
+      - name: 💊 Self-Heal:Recover Missing Data
         if: "${{ steps.verify_file.outputs.file_exists == 'false' }}"
         run: |
           echo "⚠️ Triggering Self-Healing Protocol..."
