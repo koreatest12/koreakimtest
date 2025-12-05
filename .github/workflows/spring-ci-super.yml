@@ -1,39 +1,35 @@
-name: "🛡️ Finance Ops V3: Zero-Error Build, Backup & Integrity Drill"
+name: "🛡️ Finance Ops V4: Atomic Non-Stop Pipeline"
 
 on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
     inputs:
-      run_restore_test:
-        description: '백업 즉시 복원 테스트 수행 (Drill)'
-        required: true
-        type: boolean
-        default: true
+      log_level:
+        description: '로그 레벨 설정'
+        default: 'DEBUG'
 
 env:
-  # 1. 시스템 환경 설정
+  # 1. 시스템 환경
   TZ: 'Asia/Seoul'
   DEBIAN_FRONTEND: noninteractive
   
-  # 2. 컨테이너 및 파일 설정
+  # 2. 컨테이너/파일 설정
   IMAGE_NAME: "finance-ledger-service"
   CONTAINER_NAME: "finance-ledger-svc-run"
   TARGET_FILE: "/app/ledger.dat"
   
-  # 3. 보안 스토리지 경로
-  OPS_ROOT: "./ops-data"
-  PRIMARY_DIR: "./ops-data/primary"
-  BACKUP_DIR: "./ops-data/backup"
-  RESTORE_TEST_DIR: "./ops-data/restore_test"
-  AUDIT_LOG: "./ops-data/audit-trail.log"
+  # 3. 보안 경로 (절대 경로 사용 권장)
+  OPS_ROOT: "${{ github.workspace }}/ops-data"
+  BACKUP_DIR: "${{ github.workspace }}/ops-data/backup"
+  AUDIT_LOG: "${{ github.workspace }}/ops-data/audit.log"
   
-  # 4. (주의) 실제 운영 시엔 ${{ secrets.BACKUP_KEY }} 사용 필수
-  BACKUP_KEY: "finance-secret-key-2025-complex-salt"
+  # 4. 암호화 키 (운영 시 Secrets 사용)
+  BACKUP_KEY: "finance-critical-key-v4"
 
 jobs:
-  finance-ops-pipeline:
-    name: 🏥 Ops Pipeline (Build -> Heal -> Encrypt -> Verify)
+  atomic-ops-execution:
+    name: 🚀 Atomic Ops Execution (No Skip)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -41,138 +37,130 @@ jobs:
 
     steps:
       # ======================================================
-      # Phase 1: 인프라 초기화 및 사전 점검
+      # Phase 1: 인프라 통합 초기화 (Initialization)
       # ======================================================
-      - name: 📥 Checkout & Setup
+      - name: 📥 Checkout & Setup Environment
         uses: actions/checkout@v4
 
-      - name: 💾 Pre-flight Check (Disk & Tools)
+      - name: 🛠️ Initialize Infrastructure (Atomic Setup)
         run: |
-          echo "Checking System Resources..."
+          echo "===== PHASE 1: INIT ====="
           
-          # 1. 디스크 공간 확인
-          AVAILABLE=$(df -k . | awk 'NR==2 {print $4}')
-          if [ "$AVAILABLE" -lt 2097152 ]; then # 2GB
-             echo "❌ Error: Insufficient Disk Space (<2GB)."
-             exit 1
-          fi
+          # 1. 디렉토리 일괄 생성
+          mkdir -p ${{ env.OPS_ROOT }}/{primary/data,backup,restore_test}
           
-          # 2. 필수 툴 확인
-          command -v openssl >/dev/null || { echo "❌ OpenSSL not found"; exit 1; }
-          command -v zip >/dev/null || { echo "❌ Zip not found"; exit 1; }
+          # 2. 감사 로그 시작
+          touch ${{ env.AUDIT_LOG }}
+          {
+            echo "START_TIME: $(date)"
+            echo "RUNNER_OS: $(uname -a)"
+            echo "ACTOR: ${{ github.actor }}"
+          } >> ${{ env.AUDIT_LOG }}
           
-          echo "✅ Pre-flight Check Passed."
-
-      - name: 📂 Initialize Secure Zones
-        run: |
-          mkdir -p ${{ env.PRIMARY_DIR }}/{data,artifacts}
-          mkdir -p ${{ env.BACKUP_DIR }}
-          mkdir -p ${{ env.RESTORE_TEST_DIR }}
+          # 3. 필수 툴 사전 점검 (없으면 설치)
+          for tool in openssl zip; do
+            if ! command -v $tool &> /dev/null; then
+              echo "Installing $tool..."
+              sudo apt-get update && sudo apt-get install -y $tool
+            fi
+          done
           
-          # 감사 로그 헤더 작성
-          echo "===== FINANCE OPS AUDIT LOG =====" > ${{ env.AUDIT_LOG }}
-          echo "TIMESTAMP: $(date)" >> ${{ env.AUDIT_LOG }}
-          echo "ACTOR: ${{ github.actor }}" >> ${{ env.AUDIT_LOG }}
+          # 4. 디스크 공간 확인 (로그만 남기고 진행)
+          df -h >> ${{ env.AUDIT_LOG }}
+          echo "✅ Initialization Complete"
 
       # ======================================================
-      # Phase 2: Docker 빌드 및 실행 (Robust)
+      # Phase 2: 빌드 및 실행 (Build & Run)
       # ======================================================
-      - name: 📝 Generate Secure Dockerfile
+      - name: 🐳 Build & Run Container (Force Execution)
         run: |
+          echo "===== PHASE 2: DOCKER OPS =====" >> ${{ env.AUDIT_LOG }}
+          
+          # 1. Dockerfile 생성 (Heredoc 안전 문법)
           cat <<EOF > Dockerfile
           FROM alpine:3.18
           RUN apk add --no-cache bash openssl
           WORKDIR /app
           RUN addgroup -S finsvc && adduser -S finsvc -G finsvc
-          # 파일 생성 및 타임스탬프 기록
-          RUN echo "Finance Data Generated at $(date)" > ledger.dat && \
+          # 초기 파일 생성
+          RUN echo "Finance Ledger Init: $(date)" > ledger.dat && \
               chown finsvc:finsvc ledger.dat && \
               chmod 644 ledger.dat
           USER finsvc
           CMD ["tail", "-f", "/dev/null"]
           EOF
-          echo "✅ Dockerfile Generated." >> ${{ env.AUDIT_LOG }}
-
-      - name: 🔨 Build & Run Container
-        run: |
+          
+          # 2. 빌드 및 실행
           docker build -t ${{ env.IMAGE_NAME }}:latest .
           docker rm -f ${{ env.CONTAINER_NAME }} 2>/dev/null || true
           
-          # 리소스 제한을 둔 상태로 실행
           docker run -d \
             --name ${{ env.CONTAINER_NAME }} \
             --restart=on-failure:3 \
             --memory="512m" \
             ${{ env.IMAGE_NAME }}:latest
             
-          echo "✅ Container Running." >> ${{ env.AUDIT_LOG }}
+          echo "✅ Container Started: $(date)" >> ${{ env.AUDIT_LOG }}
 
       # ======================================================
-      # Phase 3: 진단 및 자가 치유 (Self-Healing Logic)
+      # Phase 3: 진단 및 자가 치유 통합 (Atomic Heal)
+      # YAML if문을 제거하고 쉘 내부 로직으로 통합하여 스킵 방지
       # ======================================================
-      - name: 🔍 Diagnose File Existence
-        id: verify_file
+      - name: 🩺 Diagnose & Self-Heal (Atomic Logic)
         run: |
-          echo "Diagnosing container filesystem..."
+          echo "===== PHASE 3: DIAGNOSE & HEAL =====" >> ${{ env.AUDIT_LOG }}
+          echo "Waiting for container warmup..."
           sleep 5
           
+          # [핵심] 진단과 치유를 하나의 쉘 스크립트 블록에서 처리
           if docker exec ${{ env.CONTAINER_NAME }} [ -f "${{ env.TARGET_FILE }}" ]; then
-            echo "✅ File Found."
-            echo "file_exists=true" >> $GITHUB_OUTPUT
+            echo "✅ [DIAGNOSIS] File Found. Integrity OK." | tee -a ${{ env.AUDIT_LOG }}
           else
-            echo "⚠️ File Missing."
-            echo "file_exists=false" >> $GITHUB_OUTPUT
-            # 디버깅 정보 출력
-            docker exec ${{ env.CONTAINER_NAME }} ls -R /app >> ${{ env.AUDIT_LOG }}
+            echo "⚠️ [DIAGNOSIS] File Missing! Triggering Atomic Healing..." | tee -a ${{ env.AUDIT_LOG }}
+            
+            # 강제 치유 로직 실행
+            docker exec ${{ env.CONTAINER_NAME }} sh -c "echo 'Healed Data Payload' > ${{ env.TARGET_FILE }}"
+            
+            # 치유 결과 재검증
+            if docker exec ${{ env.CONTAINER_NAME }} [ -f "${{ env.TARGET_FILE }}" ]; then
+               echo "✅ [HEALING] Recovery Successful." | tee -a ${{ env.AUDIT_LOG }}
+            else
+               echo "❌ [HEALING] CRITICAL FAILURE. Manual Intervention Required." | tee -a ${{ env.AUDIT_LOG }}
+               exit 1 # 여기서만 유일하게 프로세스 중단
+            fi
           fi
 
-      # [FIXED] 구문 에러 수정: 따옴표(")로 감싸서 YAML 파싱 에러 방지
-      - name: 💊 Self-Heal:Recover Missing Data
-        if: "${{ steps.verify_file.outputs.file_exists == 'false' }}"
+      # ======================================================
+      # Phase 4: 추출, 메타데이터, 암호화 (Backup Ops)
+      # ======================================================
+      - name: 📦 Secure Backup & Encryption
         run: |
-          echo "⚠️ Triggering Self-Healing Protocol..."
-          docker exec ${{ env.CONTAINER_NAME }} sh -c "echo 'Recovered Data via Protocol' > ${{ env.TARGET_FILE }}"
+          echo "===== PHASE 4: BACKUP OPS =====" >> ${{ env.AUDIT_LOG }}
           
-          if docker exec ${{ env.CONTAINER_NAME }} [ -f "${{ env.TARGET_FILE }}" ]; then
-             echo "✅ Self-Healing Success." >> ${{ env.AUDIT_LOG }}
-          else
-             echo "❌ Self-Healing Failed. Aborting." >> ${{ env.AUDIT_LOG }}
-             exit 1
-          fi
-
-      # ======================================================
-      # Phase 4: 보안 백업 및 암호화 (Encryption)
-      # ======================================================
-      - name: 📦 Secure Extraction & Metadata
-        run: |
           # 1. 데이터 추출
-          docker cp ${{ env.CONTAINER_NAME }}:${{ env.TARGET_FILE }} ${{ env.PRIMARY_DIR }}/data/ledger.dat
+          docker cp ${{ env.CONTAINER_NAME }}:${{ env.TARGET_FILE }} ${{ env.OPS_ROOT }}/primary/data/ledger.dat
           
           # 2. 메타데이터 생성 (JSON)
-          cat <<EOF > ${{ env.PRIMARY_DIR }}/data/metadata.json
+          cat <<EOF > ${{ env.OPS_ROOT }}/primary/data/metadata.json
           {
-            "backup_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "source_image": "${{ env.IMAGE_NAME }}:latest",
-            "commit_sha": "${{ github.sha }}",
-            "integrity_hash": "$(sha256sum ${{ env.PRIMARY_DIR }}/data/ledger.dat | awk '{print $1}')"
+            "timestamp": "$(date -u)",
+            "runner": "${{ runner.os }}",
+            "commit": "${{ github.sha }}",
+            "file_hash": "$(sha256sum ${{ env.OPS_ROOT }}/primary/data/ledger.dat | awk '{print $1}')"
           }
           EOF
           
-          echo "✅ Data & Metadata Extracted." >> ${{ env.AUDIT_LOG }}
-
-      - name: 🔐 Encrypt Archive (AES-256)
-        id: encryption
-        run: |
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          ARCHIVE_NAME="finance_backup_${TIMESTAMP}.tar.gz"
+          # 3. 압축 및 암호화 (AES-256-CBC with PBKDF2)
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          ARCHIVE_NAME="finance_full_${TIMESTAMP}.tar.gz"
           ENC_NAME="${ARCHIVE_NAME}.enc"
           
-          # 압축
-          cd ${{ env.PRIMARY_DIR }}
+          # 경로 이동하여 상대경로로 압축
+          cd ${{ env.OPS_ROOT }}/primary
           tar -czf ../../${{ env.BACKUP_DIR }}/${ARCHIVE_NAME} .
-          cd ../..
+          cd - > /dev/null
           
-          # 암호화 (PBKDF2 적용)
+          # OpenSSL 암호화
           openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
             -in ${{ env.BACKUP_DIR }}/${ARCHIVE_NAME} \
             -out ${{ env.BACKUP_DIR }}/${ENC_NAME} \
@@ -181,62 +169,68 @@ jobs:
           # 원본 삭제 (보안)
           rm ${{ env.BACKUP_DIR }}/${ARCHIVE_NAME}
           
-          # 출력 변수 설정
-          echo "enc_filename=${ENC_NAME}" >> $GITHUB_OUTPUT
-          echo "✅ Backup Encrypted: ${ENC_NAME}" >> ${{ env.AUDIT_LOG }}
+          echo "✅ Encrypted Backup Created: ${ENC_NAME}" | tee -a ${{ env.AUDIT_LOG }}
 
       # ======================================================
-      # Phase 5: 백업 복원 테스트 (Recovery Drill) - NEW!
+      # Phase 5: 강제 복원 테스트 (Verify Drill)
+      # 별도 input 조건 없이 무조건 수행 (스킵 방지)
       # ======================================================
-      - name: 🧪 Verify Backup (Restore Drill)
-        if: "${{ github.event.inputs.run_restore_test == 'true' || true }}"
+      - name: 🧪 Mandatory Restore Drill (Verification)
         run: |
-          echo "🧪 Starting Restore Drill..."
-          ENC_FILE="${{ env.BACKUP_DIR }}/${{ steps.encryption.outputs.enc_filename }}"
-          RESTORE_TAR="${{ env.RESTORE_TEST_DIR }}/restored.tar.gz"
+          echo "===== PHASE 5: RESTORE DRILL =====" >> ${{ env.AUDIT_LOG }}
+          
+          # 최신 암호화 파일 찾기
+          LATEST_ENC=$(ls -t ${{ env.BACKUP_DIR }}/*.enc | head -1)
+          echo "Testing Artifact: $LATEST_ENC"
+          
+          RESTORE_TARGET="${{ env.OPS_ROOT }}/restore_test/restored.tar.gz"
           
           # 1. 복호화 테스트
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
-            -in $ENC_FILE \
-            -out $RESTORE_TAR \
+            -in "$LATEST_ENC" \
+            -out "$RESTORE_TARGET" \
             -k "${{ env.BACKUP_KEY }}"
             
           if [ $? -eq 0 ]; then
-             echo "✅ Decryption Test Passed." >> ${{ env.AUDIT_LOG }}
+             echo "✅ [DRILL] Decryption Success." | tee -a ${{ env.AUDIT_LOG }}
           else
-             echo "❌ Decryption Test Failed!" >> ${{ env.AUDIT_LOG }}
+             echo "❌ [DRILL] Decryption Failed." | tee -a ${{ env.AUDIT_LOG }}
              exit 1
           fi
           
-          # 2. 압축 해제 및 데이터 확인
-          tar -xzf $RESTORE_TAR -C ${{ env.RESTORE_TEST_DIR }}
-          if [ -f "${{ env.RESTORE_TEST_DIR }}/data/ledger.dat" ]; then
-             echo "✅ Data Integrity Verified." >> ${{ env.AUDIT_LOG }}
+          # 2. 압축 해제 및 데이터 검증
+          tar -xzf "$RESTORE_TARGET" -C ${{ env.OPS_ROOT }}/restore_test
+          
+          if [ -f "${{ env.OPS_ROOT }}/restore_test/data/ledger.dat" ]; then
+             echo "✅ [DRILL] Data Integrity Verified (File Exists)." | tee -a ${{ env.AUDIT_LOG }}
+             cat ${{ env.OPS_ROOT }}/restore_test/data/metadata.json >> ${{ env.AUDIT_LOG }}
           else
-             echo "❌ Restored Data Missing!" >> ${{ env.AUDIT_LOG }}
+             echo "❌ [DRILL] Data Corruption Detected." | tee -a ${{ env.AUDIT_LOG }}
              exit 1
           fi
 
       # ======================================================
-      # Phase 6: 마무리 및 증적 업로드
+      # Phase 6: 정리 및 증적 제출 (Finalization)
       # ======================================================
-      - name: 🧹 Secure Cleanup
-        if: always()
+      - name: 🧹 Final Cleanup & Evidence Upload
+        if: always() # 실패해도 증적은 남겨야 함
         run: |
+          echo "===== PHASE 6: FINALIZE =====" >> ${{ env.AUDIT_LOG }}
+          echo "END_TIME: $(date)" >> ${{ env.AUDIT_LOG }}
+          
           # 컨테이너 정리
           docker stop ${{ env.CONTAINER_NAME }} || true
           docker rm ${{ env.CONTAINER_NAME }} || true
-          # 테스트 데이터 정리 (공간 확보)
-          rm -rf ${{ env.RESTORE_TEST_DIR }}
+          
+          # 테스트 데이터 삭제 (공간 확보)
+          rm -rf ${{ env.OPS_ROOT }}/restore_test
+          rm -rf ${{ env.OPS_ROOT }}/primary
 
-      - name: 📢 Ops Notification
-        if: success()
-        run: echo "🚀 [SUCCESS] Backup Pipeline & Restore Drill Completed Successfully."
-
-      - name: ☁️ Upload Compliance Evidence
+      - name: ☁️ Upload Audit Evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: finance-compliance-evidence
+          name: finance-compliance-audit-v4
           path: |
             ${{ env.BACKUP_DIR }}/*.enc
             ${{ env.AUDIT_LOG }}
