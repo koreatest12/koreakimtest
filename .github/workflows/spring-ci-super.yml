@@ -1,4 +1,4 @@
-name: "🛡️ Finance Ops: Zero-Error Build & Backup System"
+name: "🛡️ Finance Ops: Zero-Error Build, Encrypt & Backup System v2"
 
 on:
   push:
@@ -6,35 +6,51 @@ on:
   workflow_dispatch:
     inputs:
       debug_trace:
-        description: '상세 디버깅 모드'
+        description: '상세 디버깅 모드 활성화'
         required: true
         type: boolean
         default: true
 
 env:
-  # 컨테이너 및 경로 설정
+  # 시스템 설정
+  TZ: 'Asia/Seoul'  # 한국 시간대 설정
   IMAGE_NAME: "finance-ledger-service"
   CONTAINER_NAME: "finance-ledger-svc-run"
-  # 타겟 파일 경로 (컨테이너 내부)
   TARGET_FILE: "/app/ledger.dat"
   
-  # 호스트 저장 경로
+  # 저장 경로
   PRIMARY_DIR: "./ops-data/primary"
   BACKUP_DIR: "./ops-data/backup"
   AUDIT_LOG: "./ops-data/audit-trail.log"
+  
+  # (데모용) 백업 암호화 키 - 실제 운영시엔 Secrets 사용 권장
+  BACKUP_KEY: "finance-secret-key-2025"
 
 jobs:
   diagnostic-pipeline:
-    name: 🏥 Build, Diagnose & Backup
+    name: 🏥 Build, Diagnose, Encrypt & Backup
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
 
     steps:
-      # 1. 환경 초기화
+      # ======================================================
+      # Phase 1: 환경 점검 및 초기화
+      # ======================================================
       - name: 📥 Checkout & Setup
         uses: actions/checkout@v4
+
+      - name: 💾 Check Disk Space (Pre-flight Check)
+        run: |
+          echo "Checking available disk space..."
+          df -h
+          AVAILABLE=$(df -k . | awk 'NR==2 {print $4}')
+          if [ "$AVAILABLE" -lt 1048576 ]; then
+             echo "❌ Error: Not enough disk space (<1GB)."
+             exit 1
+          fi
+          echo "✅ Disk Space Check Passed."
 
       - name: 📂 Initialize Secure Storage
         run: |
@@ -43,140 +59,129 @@ jobs:
           touch ${{ env.AUDIT_LOG }}
           echo "[INFO] Pipeline Started: $(date)" >> ${{ env.AUDIT_LOG }}
 
-      # 2. Dockerfile 강제 재생성 (캐시 문제 해결)
+      # ======================================================
+      # Phase 2: Docker 환경 구성 (Robust Build)
+      # ======================================================
       - name: 📝 Force-Generate Correct Dockerfile
         run: |
           echo "Overwriting Dockerfile to ensure file existence..."
           
           cat <<EOF > Dockerfile
           FROM alpine:3.18
-          
-          # 1. 필요한 패키지 설치
-          RUN apk add --no-cache bash
-          
-          # 2. 작업 디렉토리 설정
+          RUN apk add --no-cache bash openssl
           WORKDIR /app
-          
-          # 3. 유저 및 권한 설정
           RUN addgroup -S finsvc && adduser -S finsvc -G finsvc
-          
-          # 4. [중요] 파일 명시적 생성 및 권한 부여
-          # 빌드 시점에 파일 생성 확인을 위해 echo 출력
-          RUN echo "Finance Ledger Data - Created at Build Time" > ledger.dat && \
+          # [중요] 파일 생성 및 권한 설정
+          RUN echo "Finance Ledger Data - Created at Build Time: $(date)" > ledger.dat && \
               chown finsvc:finsvc ledger.dat && \
-              chmod 644 ledger.dat && \
-              ls -l /app/ledger.dat
-          
-          # 5. 유저 전환
+              chmod 644 ledger.dat
           USER finsvc
-          
-          # 6. 프로세스 유지 (Crash 방지)
           CMD ["tail", "-f", "/dev/null"]
           EOF
           
-          echo "✅ Dockerfile regenerated."
+          echo "✅ Dockerfile regenerated." >> ${{ env.AUDIT_LOG }}
 
-      # 3. 빌드 및 실행
       - name: 🔨 Build & Run Container
         run: |
-          # 빌드
           docker build -t ${{ env.IMAGE_NAME }}:latest .
-          
-          # 기존 컨테이너 정리
           docker rm -f ${{ env.CONTAINER_NAME }} 2>/dev/null || true
           
-          # 실행 (볼륨 마운트가 기존 파일을 덮어쓰지 않도록 주의)
           docker run -d \
             --name ${{ env.CONTAINER_NAME }} \
             --restart=on-failure:3 \
             ${{ env.IMAGE_NAME }}:latest
             
-          echo "✅ Container Started."
+          echo "✅ Container Started." >> ${{ env.AUDIT_LOG }}
 
-      # 4. [핵심 수정] 파일 존재 여부 선제적 확인 (Pre-check)
+      # ======================================================
+      # Phase 3: 진단 및 자가 치유 (Diagnosis & Self-Healing)
+      # ======================================================
       - name: 🔍 Verify File Existence (Diagnostic)
         id: verify_file
         run: |
           echo "Checking if file exists inside container..."
-          
-          # 5초 대기 (컨테이너 초기화 시간)
           sleep 5
           
-          # 파일 확인 명령 실행
           if docker exec ${{ env.CONTAINER_NAME }} [ -f "${{ env.TARGET_FILE }}" ]; then
             echo "✅ File FOUND at ${{ env.TARGET_FILE }}"
             echo "file_exists=true" >> $GITHUB_OUTPUT
+            echo "[INFO] File check passed." >> ${{ env.AUDIT_LOG }}
           else
             echo "❌ File NOT FOUND at ${{ env.TARGET_FILE }}"
             echo "file_exists=false" >> $GITHUB_OUTPUT
+            echo "[WARN] File check failed. Triggering Self-Healing." >> ${{ env.AUDIT_LOG }}
             
-            # [디버깅] 파일 시스템 구조 출력
-            echo "==== CONTAINER FILE STRUCTURE ===="
-            docker exec ${{ env.CONTAINER_NAME }} ls -R /app || echo "Container might be dead."
-            echo "=================================="
-            
-            # 컨테이너 상태 확인
-            docker ps -a
+            echo "==== CONTAINER DEBUG INFO ===="
+            docker exec ${{ env.CONTAINER_NAME }} ls -R /app || echo "Container Dead"
           fi
 
-      # 5. [자가 치유] 파일이 없으면 런타임에 생성 (Self-Healing)
+      # [FIXED] 문법 에러 수정 완료 (${{ }} 적용)
       - name: 💊 Self-Heal: Generate Data if Missing
-        if: steps.verify_file.outputs.file_exists == 'false'
+        if: ${{ steps.verify_file.outputs.file_exists == 'false' }}
         run: |
           echo "⚠️ Attempting Self-Healing: Generating file at runtime..."
+          docker exec ${{ env.CONTAINER_NAME }} sh -c "echo 'Recovered Data via Self-Heal' > ${{ env.TARGET_FILE }}"
           
-          # 런타임에 파일 강제 생성 시도
-          docker exec ${{ env.CONTAINER_NAME }} sh -c "echo 'Recovered Data' > ${{ env.TARGET_FILE }}"
-          
-          # 재확인
           if docker exec ${{ env.CONTAINER_NAME }} [ -f "${{ env.TARGET_FILE }}" ]; then
-             echo "✅ Self-Healing SUCCESS."
+             echo "✅ Self-Healing SUCCESS." >> ${{ env.AUDIT_LOG }}
           else
-             echo "❌ Self-Healing FAILED. Container filesystem is likely Read-Only or Crashed."
+             echo "❌ Self-Healing FAILED." >> ${{ env.AUDIT_LOG }}
              exit 1
           fi
 
-      # 6. 안전한 복사 (Secure Copy)
+      # ======================================================
+      # Phase 4: 보안 백업 및 암호화 (Backup & Security)
+      # ======================================================
       - name: 📦 Secure Copy & Backup
         run: |
-          echo "Copying data from container..."
-          
-          # 파일 복사 수행
+          echo "Copying data..."
           docker cp ${{ env.CONTAINER_NAME }}:${{ env.TARGET_FILE }} ${{ env.PRIMARY_DIR }}/data/ledger_backup.dat
           
-          # 복사 확인
           if [ -f "${{ env.PRIMARY_DIR }}/data/ledger_backup.dat" ]; then
             echo "✅ Copy Successful."
-            ls -l ${{ env.PRIMARY_DIR }}/data/
           else
-            echo "❌ Copy Failed locally."
+            echo "❌ Local Copy Failed."
             exit 1
           fi
 
-      # 7. 무결성 검증 및 아카이빙
-      - name: 🔐 Integrity Check & Archive
+      - name: 🔐 Encrypt & Archive (AES-256)
         run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BACKUP_FILE="${{ env.BACKUP_DIR }}/finance-backup-${TIMESTAMP}.tar.gz"
+          ENC_FILE="${BACKUP_FILE}.enc"
+          
+          echo "Compressing..."
+          tar -czf $BACKUP_FILE ${{ env.PRIMARY_DIR }}
+          
+          echo "Encrypting (AES-256)..."
+          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 10000 \
+            -in $BACKUP_FILE \
+            -out $ENC_FILE \
+            -k "${{ env.BACKUP_KEY }}"
+            
+          # 원본 압축파일 삭제 (보안상 암호화 파일만 남김)
+          rm $BACKUP_FILE
+          
           # 해시 생성
-          sha256sum ${{ env.PRIMARY_DIR }}/data/ledger_backup.dat > ${{ env.PRIMARY_DIR }}/data/checksum.sha256
+          sha256sum $ENC_FILE > ${ENC_FILE}.sha256
           
-          # 전체 백업 압축
-          tar -czf ${{ env.BACKUP_DIR }}/finance-backup-$(date +%Y%m%d).tar.gz ${{ env.PRIMARY_DIR }}
-          
-          echo "✅ Backup Pipeline Complete."
+          echo "✅ Backup Encrypted & Secured: $ENC_FILE" >> ${{ env.AUDIT_LOG }}
 
-      # 8. 클린업 (항상 실행)
+      # ======================================================
+      # Phase 5: 정리 및 리포팅
+      # ======================================================
       - name: 🧹 Cleanup Environment
         if: always()
         run: |
           docker stop ${{ env.CONTAINER_NAME }} || true
           docker rm ${{ env.CONTAINER_NAME }} || true
 
-      # 9. 결과 업로드
       - name: ☁️ Upload Audit Evidence
         uses: actions/upload-artifact@v4
         with:
-          name: finance-audit-evidence
+          name: finance-secure-evidence
           path: |
-            ${{ env.PRIMARY_DIR }}
-            ${{ env.BACKUP_DIR }}
+            ${{ env.BACKUP_DIR }}/*.enc
+            ${{ env.BACKUP_DIR }}/*.sha256
             ${{ env.AUDIT_LOG }}
+          retention-days: 30
