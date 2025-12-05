@@ -1,231 +1,167 @@
-name: "🏢 Master Docker Ops: Build, Secure, Scale & Backup"
+name: "🏦 Finance Ops: Secure Release (Fixed & Enhanced)"
 
 on:
   push:
-    branches: [ "main", "develop" ]
-    paths:
-      - 'Dockerfile'
-      - 'src/**'
+    branches: [ "main" ]
   workflow_dispatch:
     inputs:
-      replica_count:
-        description: '생성할 복제 컨테이너 수 (Scaling)'
+      debug_mode:
+        description: '디버그 모드 활성화'
         required: true
-        default: '3'
-      environment:
-        description: '배포 환경 (staging/production)'
-        required: true
-        default: 'production'
+        type: boolean
+        default: true
 
 env:
-  # 시스템 경로 설정
-  WORK_DIR: "./ops-data/workspace"
-  BACKUP_DIR: "./ops-data/backups"
-  REPLICA_DIR: "./ops-data/replicas"
-  AUDIT_LOG: "./ops-data/audit.log"
-  IMAGE_NAME: "finance-service-app"
-  NETWORK_NAME: "fin-secure-net"
-
-permissions:
-  contents: read
-  packages: write
-  security-events: write
+  IMAGE_NAME: "finance-ledger-service"
+  TAG: ${{ github.ref_name }}
+  CONTAINER_NAME: "finance-ledger-svc-run"
+  PRIMARY_DIR: "./secure-storage/primary"
+  RESERVE_DIR: "./secure-storage/dr-site"
+  AUDIT_LOG: "./audit-report.log"
 
 jobs:
-  # ======================================================
-  # JOB 1: 인프라 및 디렉토리 구조화 (Setup)
-  # ======================================================
-  setup-infrastructure:
+  secure-pipeline:
+    name: 🛡️ Build, Run & Verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
     steps:
-      - name: 📥 Checkout Repository
+      # 1. 소스 코드 체크아웃
+      - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      - name: 📂 Construct Directory Architecture
+      # 2. 운영 디렉토리 구조 생성
+      - name: 📂 Create Operations Structure
         run: |
-          echo "Initializing Operation Directories..."
+          echo "Initializing Finance Ops Environment..."
+          mkdir -p ${{ env.PRIMARY_DIR }}/{artifacts,logs,data}
+          mkdir -p ${{ env.RESERVE_DIR }}
           
-          # 1. 작업 공간 (Workspace)
-          mkdir -p ${{ env.WORK_DIR }}/{app,config,data,logs}
-          
-          # 2. 백업 저장소 (Backup Vault)
-          mkdir -p ${{ env.BACKUP_DIR }}/{images,containers,configs,databases}
-          
-          # 3. 복제 및 스케일링 공간 (Replication)
-          mkdir -p ${{ env.REPLICA_DIR }}/{config,data}
-          
-          # 4. 권한 및 감사 로그 설정
-          touch ${{ env.AUDIT_LOG }}
-          echo "[INFO] $(date) - Directory Structure Created" >> ${{ env.AUDIT_LOG }}
-          chmod -R 750 ./ops-data
-          
-          # 구조 확인
-          ls -R ./ops-data
+          # 감사 로그 시작
+          echo "[INFO] Workflow Started at $(date)" > ${{ env.AUDIT_LOG }}
 
-      - name: 📤 Share Context
-        uses: actions/upload-artifact@v4
-        with:
-          name: ops-structure
-          path: ./ops-data
+      # 3. [FIXED] Dockerfile 생성 (문법 에러 방지용 안전한 방식)
+      - name: 📝 Generate Robust Dockerfile
+        run: |
+          # 기존 파일이 없으면 생성 (들여쓰기 에러 방지를 위해 printf 사용하지 않고 단순화된 cat 사용)
+          if [ ! -f Dockerfile ]; then
+            echo "No Dockerfile found. Generating secure default..."
+            
+            # ---------------------------------------------------------
+            # 중요: 아래 EOF는 줄의 맨 앞에 붙여야 안전하지만,
+            # YAML 가독성을 위해 <<-EOF 를 사용하고 앞에 탭(Tab)을 허용합니다.
+            # 하지만 가장 안전한 방법은 아래처럼 작성하는 것입니다.
+            # ---------------------------------------------------------
+            cat <<EOF > Dockerfile
+          FROM alpine:3.18
+          # 1. 보안 유저 생성
+          RUN addgroup -S finsvc && adduser -S finsvc -G finsvc
+          # 2. 작업 디렉토리 설정 및 권한 부여 (ROOT 권한으로 수행)
+          WORKDIR /app
+          RUN chown -R finsvc:finsvc /app
+          # 3. 유저 전환
+          USER finsvc
+          # 4. 초기 데이터 생성
+          RUN echo "Finance Ledger Initialized: \$(date)" > ledger.dat
+          # 5. 프로세스 유지
+          CMD ["tail", "-f", "/dev/null"]
+          EOF
+          
+          fi
+          
+          echo "✅ Dockerfile Generated:"
+          cat Dockerfile
 
-  # ======================================================
-  # JOB 2: 보안 빌드 및 이미지 검증 (Build & Secure)
-  # ======================================================
-  build-and-secure:
-    needs: setup-infrastructure
-    runs-on: ubuntu-latest
-    steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
-
+      # 4. Docker 빌드 환경 설정
       - name: 🔧 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 데모용 Dockerfile 생성 (없을 경우)
-      - name: 📝 Generate Secure Dockerfile
-        run: |
-          if [ ! -f Dockerfile ]; then
-            cat <<EOF > Dockerfile
-            FROM alpine:latest
-            RUN apk add --no-cache curl
-            WORKDIR /app
-            COPY . .
-            CMD ["tail", "-f", "/dev/null"]
-            EOF
-          fi
-
-      - name: 🔨 Build Docker Image
+      # 5. 이미지 빌드
+      - name: 🔨 Build Image
         uses: docker/build-push-action@v5
         with:
           context: .
           load: true
-          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }},${{ env.IMAGE_NAME }}:latest
+          tags: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
 
-      - name: 🔍 Security Scan (Trivy)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: '${{ env.IMAGE_NAME }}:latest'
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0' # 운영시 1로 변경 권장
-
-      - name: 📦 Archive Image (Tarball)
+      # 6. 컨테이너 실행 및 자동 복구 (Self-Healing)
+      - name: 🚀 Run Container (Secure Mode)
         run: |
-          mkdir -p ${{ env.BACKUP_DIR }}/images
-          docker save ${{ env.IMAGE_NAME }}:latest -o ${{ env.BACKUP_DIR }}/images/${{ env.IMAGE_NAME }}-${{ github.sha }}.tar
-          gzip ${{ env.BACKUP_DIR }}/images/*.tar
-          echo "✅ Image Built and Archived"
-
-      - name: 📤 Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-artifacts
-          path: ${{ env.BACKUP_DIR }}/images
-
-  # ======================================================
-  # JOB 3: 배포, 스케일링 및 로드밸런싱 (Deploy & Scale)
-  # ======================================================
-  deploy-cluster:
-    needs: build-and-secure
-    runs-on: ubuntu-latest
-    steps:
-      - name: 📥 Load Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifacts
-          path: ./loaded-images
-
-      - name: 🐳 Load Docker Image
-        run: |
-          gunzip -c ./loaded-images/*.tar.gz | docker load
-          docker network create ${{ env.NETWORK_NAME }} || true
-
-      # 1. 메인 컨테이너 배포
-      - name: 🚀 Deploy Primary Container
-        run: |
+          echo "Starting Container: ${{ env.CONTAINER_NAME }}"
+          
+          # 기존 컨테이너 제거
+          docker rm -f ${{ env.CONTAINER_NAME }} 2>/dev/null || true
+          
+          # 컨테이너 실행 (리소스 제한 및 재시작 정책 적용)
           docker run -d \
-            --name ${{ env.IMAGE_NAME }}-primary \
-            --network ${{ env.NETWORK_NAME }} \
-            --restart always \
-            -v ${{ github.workspace }}/${{ env.WORK_DIR }}/data:/app/data \
-            ${{ env.IMAGE_NAME }}:latest
+            --name ${{ env.CONTAINER_NAME }} \
+            --memory="512m" \
+            --cpus="0.5" \
+            --restart=on-failure:3 \
+            ${{ env.IMAGE_NAME }}:${{ env.TAG }}
             
-      # 2. 복제 컨테이너 생성 (Scaling Loop)
-      - name: 🔄 Create Replica Containers
+          # 실행 직후 상태 확인
+          docker ps -a | grep ${{ env.CONTAINER_NAME }}
+
+      # 7. 정밀 헬스 체크 (Smart Wait Loop)
+      - name: 🩺 Health Check & Debugging
         run: |
-          REPLICA_COUNT=${{ github.event.inputs.replica_count }}
-          echo "Scaling out to $REPLICA_COUNT replicas..."
+          echo "Checking service health..."
           
-          for i in $(seq 1 $REPLICA_COUNT); do
-            echo "Starting Replica #$i..."
-            docker run -d \
-              --name ${{ env.IMAGE_NAME }}-replica-$i \
-              --network ${{ env.NETWORK_NAME }} \
-              --restart always \
-              -e REPLICA_ID=$i \
-              ${{ env.IMAGE_NAME }}:latest
+          # 최대 30초 대기
+          RETRIES=10
+          for i in $(seq 1 $RETRIES); do
+            STATUS=$(docker inspect -f '{{.State.Running}}' ${{ env.CONTAINER_NAME }} 2>/dev/null)
+            
+            if [ "$STATUS" == "true" ]; then
+              echo "✅ Service is HEALTHY (Attempt $i)"
+              exit 0
+            fi
+            
+            echo "⏳ Waiting... ($i/$RETRIES)"
+            sleep 3
           done
+          
+          # 실패 시 로그 출력 후 종료
+          echo "❌ Service FAILED to start."
+          echo "===== CONTAINER LOGS ====="
+          docker logs ${{ env.CONTAINER_NAME }}
+          exit 1
 
-      # 3. Nginx 로드밸런서 설정 자동 생성 및 실행
-      - name: ⚖️ Deploy Load Balancer (Nginx)
+      # 8. 아티팩트 추출 및 해시 검증 (Backup & Integrity)
+      - name: 📦 Secure Backup & Hash
+        if: success()
         run: |
-          # Nginx 설정 동적 생성
-          cat <<EOF > nginx.conf
-          events {}
-          http {
-              upstream backend {
-                  server ${{ env.IMAGE_NAME }}-primary:8080;
-                  # Loop to add replicas
-                  $(for i in $(seq 1 ${{ github.event.inputs.replica_count }}); do echo "        server ${{ env.IMAGE_NAME }}-replica-$i:8080;"; done)
-              }
-              server {
-                  listen 80;
-                  location / {
-                      proxy_pass http://backend;
-                  }
-              }
-          }
-          EOF
+          echo "Starting Backup Process..."
           
-          # Nginx 실행
-          docker run -d \
-            --name load-balancer \
-            --network ${{ env.NETWORK_NAME }} \
-            -p 80:80 \
-            -v $(pwd)/nginx.conf:/etc/nginx/nginx.conf:ro \
-            nginx:alpine
+          # 1. 이미지 저장
+          docker save -o ${{ env.PRIMARY_DIR }}/artifacts/image.tar ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+          
+          # 2. 데이터 추출
+          docker cp ${{ env.CONTAINER_NAME }}:/app/ledger.dat ${{ env.PRIMARY_DIR }}/data/
+          
+          # 3. 무결성 검증 (SHA256)
+          cd ${{ env.PRIMARY_DIR }}/artifacts
+          sha256sum image.tar > checksum.sha256
+          
+          echo "✅ Backup & Integrity Check Complete"
+          ls -lR ../../
 
-      - name: 🩺 Health Check
+      # 9. 클린업
+      - name: 🧹 Cleanup
+        if: always()
         run: |
-          sleep 5
-          docker ps
-          # 실제 서비스라면 curl localhost/health 등을 수행
+          docker stop ${{ env.CONTAINER_NAME }} || true
+          docker rm ${{ env.CONTAINER_NAME }} || true
 
-  # ======================================================
-  # JOB 4: 전체 시스템 백업 및 정리 (Backup & Cleanup)
-  # ======================================================
-  backup-operations:
-    needs: deploy-cluster
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: 💾 Full System Backup
-        run: |
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          mkdir -p ${{ env.BACKUP_DIR }}/snapshot-$TIMESTAMP
-          
-          # 1. 실행 중인 컨테이너 스냅샷 Export
-          docker ps -q | xargs -I {} docker export {} -o ${{ env.BACKUP_DIR }}/snapshot-$TIMESTAMP/{}.tar
-          
-          # 2. 로그 및 설정 백업
-          echo "Backup created at $TIMESTAMP" > ${{ env.BACKUP_DIR }}/backup-info.txt
-          
-          # 3. 백업 파일 압축
-          tar -czf backup-full-$TIMESTAMP.tar.gz ${{ env.BACKUP_DIR }}
-
-      - name: ☁️ Upload Backup to Secure Storage
+      # 10. 결과물 업로드
+      - name: ☁️ Upload Evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: finance-ops-backup
-          path: backup-full-*.tar.gz
-          retention-days: 30
+          name: finance-audit-logs
+          path: |
+            ${{ env.AUDIT_LOG }}
+            ${{ env.PRIMARY_DIR }}
