@@ -1,15 +1,14 @@
-name: "🚀 Spring Super CI: Auto-Update, Provision, Build & Backup Core"
+name: "🚀 Spring Super CI V6: MB-Optimized & Size Aware"
 
 on:
   push:
     branches: [ "main", "develop" ]
   schedule:
-    - cron: '0 0 * * 0' # 매주 일요일 자정: 정기 풀 백업 및 업데이트 점검
+    - cron: '0 0 * * 0'
   workflow_dispatch:
     inputs:
       force_update:
-        description: '강제 종속성 업데이트 실행 (Maven/Gradle)'
-        required: true
+        description: '강제 종속성 업데이트'
         type: boolean
         default: false
       backup_retention:
@@ -21,124 +20,153 @@ env:
   APP_NAME: "finance-core-system"
   JAVA_VERSION: '17'
   DISTRIBUTION: 'temurin'
-  
-  # 2. 서비스 버전 관리 (이곳에서 모든 서비스 버전 통제)
+  TZ: 'Asia/Seoul'
+
+  # 2. 서비스 정의
   SERVICE_POSTGRES: "postgres:15-alpine"
   SERVICE_REDIS: "redis:7-alpine"
   SERVICE_KAFKA: "apache/kafka:latest"
   SERVICE_NGINX: "nginx:stable-alpine"
-  
-  # 3. 경로 설정
-  ARTIFACT_DIR: "./super-artifacts"
-  SERVICE_DIR: "./super-artifacts/services"
-  BACKUP_DIR: "./super-artifacts/backup"
-  AUDIT_LOG: "./audit-system.log"
+
+  # 3. 절대 경로 설정 (안전성)
+  ROOT_DIR: "${{ github.workspace }}"
+  ARTIFACT_DIR: "${{ github.workspace }}/super-artifacts"
+  SERVICE_DIR: "${{ github.workspace }}/super-artifacts/services"
+  BACKUP_DIR: "${{ github.workspace }}/super-artifacts/backup"
+  AUDIT_LOG: "${{ github.workspace }}/audit-system.log"
+  SIZE_REPORT: "${{ github.workspace }}/size_report_mb.txt"
 
 permissions:
-  contents: write  # 업데이트된 dependency를 커밋하기 위해 필요
+  contents: write
   packages: write
 
 jobs:
   # ======================================================
-  # JOB 1: 서비스 다운로드 및 적재 (Provisioning Layer)
+  # JOB 1: 서비스 다운로드, 압축 및 MB 리포팅
   # ======================================================
-  provision-services:
-    name: 📥 Provision & Cache Services
+  provision-services-mb:
+    name: 📥 Provision Services (MB Optimized)
     runs-on: ubuntu-latest
     steps:
-      - name: 📝 Initialize Audit Log
+      - name: 📝 Initialize Logs & Directories
         run: |
-          echo "[START] Workflow Initiated at $(date)" > ${{ env.AUDIT_LOG }}
-          mkdir -p ${{ env.SERVICE_DIR }}
+          mkdir -p "${{ env.SERVICE_DIR }}"
+          echo "[START] Workflow Initiated at $(date)" > "${{ env.AUDIT_LOG }}"
+          echo "===== SIZE REPORT (MB) =====" > "${{ env.SIZE_REPORT }}"
 
-      - name: 🐳 Download Service Containers (Pre-loading)
+      - name: 🐳 Download & Compress Services (MB Check)
         run: |
-          echo "Downloading Core Services for Offline Deployment..."
+          echo "Downloading and Compressing Services..."
           
-          # 서비스 리스트 정의
           IMAGES=("${{ env.SERVICE_POSTGRES }}" "${{ env.SERVICE_REDIS }}" "${{ env.SERVICE_KAFKA }}" "${{ env.SERVICE_NGINX }}")
           
+          total_size=0
+          
           for img in "${IMAGES[@]}"; do
-            echo "Pulling $img..."
-            docker pull $img
+            echo "Processing: $img"
+            docker pull -q $img
             
-            # 이미지 파일명 안전하게 변환 (/: -> _)
+            # 파일명 변환
             SAFE_NAME=$(echo $img | tr '/:' '_')
+            TARGET_FILE="${{ env.SERVICE_DIR }}/${SAFE_NAME}.tar.gz"
             
-            # 이미지 저장 (tar 아카이브)
-            echo "Saving $img to artifacts..."
-            docker save $img -o ${{ env.SERVICE_DIR }}/${SAFE_NAME}.tar
+            # [최적화] docker save 결과를 바로 gzip으로 압축 (MB 절약)
+            docker save $img | gzip > "$TARGET_FILE"
             
-            # 해시 생성 (무결성 검증)
-            sha256sum ${{ env.SERVICE_DIR }}/${SAFE_NAME}.tar >> ${{ env.SERVICE_DIR }}/checksums.txt
+            # [MB 리포팅] 파일 크기 계산 (MB)
+            SIZE_MB=$(du -m "$TARGET_FILE" | cut -f1)
+            echo " - $SAFE_NAME: ${SIZE_MB} MB" >> "${{ env.SIZE_REPORT }}"
+            echo "   -> Saved & Compressed: ${SIZE_MB} MB"
+            
+            # 해시 생성
+            sha256sum "$TARGET_FILE" >> "${{ env.SERVICE_DIR }}/checksums.txt"
+            
+            total_size=$((total_size + SIZE_MB))
           done
           
-          echo "✅ All Services Provisioned & Secured." >> ${{ env.AUDIT_LOG }}
+          echo "--------------------------------" >> "${{ env.SIZE_REPORT }}"
+          echo "TOTAL SERVICE SIZE: ${total_size} MB" >> "${{ env.SIZE_REPORT }}"
+          echo "✅ Services Provisioned. Total: ${total_size} MB" >> "${{ env.AUDIT_LOG }}"
 
       - name: 📤 Upload Service Pack
         uses: actions/upload-artifact@v4
         with:
-          name: service-pack-offline
+          name: service-pack-mb
           path: ${{ env.SERVICE_DIR }}
 
   # ======================================================
-  # JOB 2: 코드 업데이트 및 빌드 (Build & Update Layer)
+  # JOB 2: 빌드, 테스트 및 아티팩트 용량 분석
   # ======================================================
-  build-and-auto-update:
-    name: 🔨 Build, Test & Auto-Update
-    needs: provision-services
+  build-and-analyze-mb:
+    name: 🔨 Build & Analyze Size
+    needs: provision-services-mb
     runs-on: ubuntu-latest
     steps:
       - name: 📥 Checkout Source
         uses: actions/checkout@v4
 
-      - name: ☕ Set up JDK ${{ env.JAVA_VERSION }}
+      - name: ☕ Set up JDK
         uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: ${{ env.DISTRIBUTION }}
           cache: 'maven'
 
-      # [자동 업데이트 기능] Maven 종속성 최신 버전 확인 및 리포트
-      - name: 🔄 Check & Update Dependencies
-        if: ${{ github.event.inputs.force_update == 'true' || github.event_name == 'schedule' }}
+      - name: 💾 Check Disk Before Build (MB)
         run: |
-          echo "Checking for library updates..."
-          
-          # 업데이트 가능한 버전 확인
+          FREE_MB=$(df -m . | awk 'NR==2 {print $4}')
+          echo "Free Disk Space: ${FREE_MB} MB"
+          echo "DISK_FREE_BEFORE: ${FREE_MB} MB" >> "${{ env.SIZE_REPORT }}"
+
+      - name: 🔄 Check Updates & Build
+        run: |
+          # 1. 의존성 업데이트 체크
           mvn versions:display-dependency-updates > dependency-report.txt
           
-          echo "==== Dependency Update Report ===="
-          cat dependency-report.txt
-          echo "=================================="
-          
-          # (선택사항) 자동으로 버전 올리기 (주의: 테스트 통과 필수)
-          # mvn versions:use-latest-releases
-
-      - name: 🏗️ Build with Maven (Skip Tests for Speed)
-        run: |
+          # 2. 빌드 (테스트 스킵)
           mvn clean package -DskipTests
-          mkdir -p ${{ env.ARTIFACT_DIR }}/jar
-          cp target/*.jar ${{ env.ARTIFACT_DIR }}/jar/
+          
+          # 3. 결과물 이동
+          mkdir -p "${{ env.ARTIFACT_DIR }}/jar"
+          cp target/*.jar "${{ env.ARTIFACT_DIR }}/jar/"
 
-      - name: 🧬 Integrity Check (Code Signing Simulation)
+      - name: 📊 Analyze Build Artifacts (MB)
         run: |
-          cd ${{ env.ARTIFACT_DIR }}/jar
+          echo "==== APP ARTIFACTS SIZES ====" >> "${{ env.SIZE_REPORT }}"
+          
+          cd "${{ env.ARTIFACT_DIR }}/jar"
+          
+          # JAR 파일 크기 MB 단위 측정
+          du -m *.jar | while read size name; do
+            echo " - $name: ${size} MB" >> "${{ env.SIZE_REPORT }}"
+          done
+          
+          TOTAL_JAR_MB=$(du -mc *.jar | tail -1 | cut -f1)
+          echo "TOTAL JAR SIZE: ${TOTAL_JAR_MB} MB" >> "${{ env.SIZE_REPORT }}"
+          
+          # 해시 생성
           sha256sum *.jar > checksum-app.sha256
-          echo "✅ Application Build Complete & Signed." >> $GITHUB_WORKSPACE/${{ env.AUDIT_LOG }}
 
       - name: 📤 Upload App Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: application-binaries
+          name: application-binaries-mb
           path: ${{ env.ARTIFACT_DIR }}/jar
 
+      - name: 📤 Upload Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: |
+            dependency-report.txt
+            ${{ env.SIZE_REPORT }}
+
   # ======================================================
-  # JOB 3: 통합 백업 및 아카이빙 (Backup Layer)
+  # JOB 3: 통합 백업 및 최종 용량 리포트
   # ======================================================
-  backup-master-system:
-    name: 💾 Master Backup & Archiving
-    needs: [provision-services, build-and-auto-update]
+  backup-master-mb:
+    name: 💾 Master Backup (MB Report)
+    needs: [provision-services-mb, build-and-analyze-mb]
     runs-on: ubuntu-latest
     steps:
       - name: 📥 Download All Artifacts
@@ -146,32 +174,47 @@ jobs:
         with:
           path: ./full-system-dump
 
-      - name: 📦 Create Disaster Recovery (DR) Snapshot
+      - name: 📝 Merge Size Reports
+        run: |
+          mkdir -p "${{ env.BACKUP_DIR }}"
+          # 각 잡에서 생성된 리포트 통합 시도 (여기서는 다운로드된 파일 기반)
+          find ./full-system-dump -name "size_report_mb.txt" -exec cat {} + > merged_size_report.txt || echo "No prior report found"
+
+      - name: 📦 Create Compressed DR Snapshot (MB Optimized)
         run: |
           TIMESTAMP=$(date +%Y%m%d_%H%M%S)
           BACKUP_NAME="DR_SNAPSHOT_${{ env.APP_NAME }}_${TIMESTAMP}.zip"
+          BACKUP_PATH="${{ env.BACKUP_DIR }}/${BACKUP_NAME}"
           
-          echo "Creating Master Backup: $BACKUP_NAME"
-          mkdir -p ${{ env.BACKUP_DIR }}
+          echo "Creating Master Backup..."
           
-          # 1. 서비스 이미지, 앱 바이너리, 로그 모두 압축
-          zip -r ${{ env.BACKUP_DIR }}/$BACKUP_NAME ./full-system-dump
+          # [최적화] zip 압축률 최대(-9) 설정
+          zip -9 -r "$BACKUP_PATH" ./full-system-dump
           
-          # 2. 메타데이터 생성
-          echo "Backup Date: $(date)" > ${{ env.BACKUP_DIR }}/meta_info.txt
-          echo "Branch: ${{ github.ref }}" >> ${{ env.BACKUP_DIR }}/meta_info.txt
-          echo "Commit: ${{ github.sha }}" >> ${{ env.BACKUP_DIR }}/meta_info.txt
+          # [MB 리포팅] 최종 백업 크기 확인
+          FINAL_SIZE_MB=$(du -m "$BACKUP_PATH" | cut -f1)
           
-          echo "✅ DR Snapshot Created."
+          echo "=================================="
+          echo "   FINAL BACKUP SIZE: ${FINAL_SIZE_MB} MB"
+          echo "=================================="
+          
+          # 메타데이터에 사이즈 기록
+          echo "Backup Date: $(date)" > "${{ env.BACKUP_DIR }}/meta_info.txt"
+          echo "Total Size: ${FINAL_SIZE_MB} MB" >> "${{ env.BACKUP_DIR }}/meta_info.txt"
+          
+          # 2GB(2048MB) 초과 시 경고
+          if [ "$FINAL_SIZE_MB" -gt 2048 ]; then
+             echo "⚠️ WARNING: Backup size exceeds 2GB!"
+          fi
 
-      - name: ☁️ Upload Secure Backup
+      - name: ☁️ Upload Final Backup
         uses: actions/upload-artifact@v4
         with:
-          name: secure-dr-backup
+          name: secure-dr-backup-mb
           path: ${{ env.BACKUP_DIR }}
           retention-days: ${{ github.event.inputs.backup_retention }}
 
-      - name: 📢 Audit Report Finalization
+      - name: 📢 Final Summary
         run: |
-          echo "Workflow Finished Successfully."
-          # 실제 환경에서는 여기서 Slack/Email 알림 전송
+          echo "✅ Workflow Completed."
+          echo "Check 'secure-dr-backup-mb' artifact for the full package."
