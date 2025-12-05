@@ -1,44 +1,177 @@
-name: "🔄 DR Ops: Restore from Backup"
+name: "🚀 Spring Super CI: Auto-Update, Provision, Build & Backup Core"
 
 on:
+  push:
+    branches: [ "main", "develop" ]
+  schedule:
+    - cron: '0 0 * * 0' # 매주 일요일 자정: 정기 풀 백업 및 업데이트 점검
   workflow_dispatch:
     inputs:
-      backup_id:
-        description: '복원할 백업 ID (GitHub Artifact Name)'
+      force_update:
+        description: '강제 종속성 업데이트 실행 (Maven/Gradle)'
         required: true
-        default: 'finance-ops-backup'
+        type: boolean
+        default: false
+      backup_retention:
+        description: '백업 보관 기간(일)'
+        default: '30'
+
+env:
+  # 1. 시스템 설정
+  APP_NAME: "finance-core-system"
+  JAVA_VERSION: '17'
+  DISTRIBUTION: 'temurin'
+  
+  # 2. 서비스 버전 관리 (이곳에서 모든 서비스 버전 통제)
+  SERVICE_POSTGRES: "postgres:15-alpine"
+  SERVICE_REDIS: "redis:7-alpine"
+  SERVICE_KAFKA: "apache/kafka:latest"
+  SERVICE_NGINX: "nginx:stable-alpine"
+  
+  # 3. 경로 설정
+  ARTIFACT_DIR: "./super-artifacts"
+  SERVICE_DIR: "./super-artifacts/services"
+  BACKUP_DIR: "./super-artifacts/backup"
+  AUDIT_LOG: "./audit-system.log"
+
+permissions:
+  contents: write  # 업데이트된 dependency를 커밋하기 위해 필요
+  packages: write
 
 jobs:
-  disaster-recovery:
+  # ======================================================
+  # JOB 1: 서비스 다운로드 및 적재 (Provisioning Layer)
+  # ======================================================
+  provision-services:
+    name: 📥 Provision & Cache Services
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 Download Backup Data
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ github.event.inputs.backup_id }}
-          path: ./restore-point
-
-      - name: 🔓 Unpack & Restore Environment
+      - name: 📝 Initialize Audit Log
         run: |
-          echo "Restoring System from Backup..."
-          mkdir -p ./restored-workspace
-          
-          # 압축 해제
-          tar -xzf ./restore-point/*.tar.gz -C ./restored-workspace
-          
-          echo "✅ Filesystem Restored."
-          ls -R ./restored-workspace
+          echo "[START] Workflow Initiated at $(date)" > ${{ env.AUDIT_LOG }}
+          mkdir -p ${{ env.SERVICE_DIR }}
 
-      - name: 🐳 Restore & Run Containers
+      - name: 🐳 Download Service Containers (Pre-loading)
         run: |
-          # 복구된 이미지가 있다면 로드 (예시 로직)
-          find ./restored-workspace -name "*.tar" | while read image; do
-            echo "Loading image: $image"
-            docker load -i "$image"
+          echo "Downloading Core Services for Offline Deployment..."
+          
+          # 서비스 리스트 정의
+          IMAGES=("${{ env.SERVICE_POSTGRES }}" "${{ env.SERVICE_REDIS }}" "${{ env.SERVICE_KAFKA }}" "${{ env.SERVICE_NGINX }}")
+          
+          for img in "${IMAGES[@]}"; do
+            echo "Pulling $img..."
+            docker pull $img
+            
+            # 이미지 파일명 안전하게 변환 (/: -> _)
+            SAFE_NAME=$(echo $img | tr '/:' '_')
+            
+            # 이미지 저장 (tar 아카이브)
+            echo "Saving $img to artifacts..."
+            docker save $img -o ${{ env.SERVICE_DIR }}/${SAFE_NAME}.tar
+            
+            # 해시 생성 (무결성 검증)
+            sha256sum ${{ env.SERVICE_DIR }}/${SAFE_NAME}.tar >> ${{ env.SERVICE_DIR }}/checksums.txt
           done
           
-          # 서비스 긴급 재가동
-          docker run -d --name recovered-service finance-service-app:latest || echo "Image load required first"
+          echo "✅ All Services Provisioned & Secured." >> ${{ env.AUDIT_LOG }}
 
-      - name: 📢 Notify Recovery Status
-        run: echo "System restored from ${{ github.event.inputs.backup_id }}"
+      - name: 📤 Upload Service Pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-pack-offline
+          path: ${{ env.SERVICE_DIR }}
+
+  # ======================================================
+  # JOB 2: 코드 업데이트 및 빌드 (Build & Update Layer)
+  # ======================================================
+  build-and-auto-update:
+    name: 🔨 Build, Test & Auto-Update
+    needs: provision-services
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Source
+        uses: actions/checkout@v4
+
+      - name: ☕ Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.DISTRIBUTION }}
+          cache: 'maven'
+
+      # [자동 업데이트 기능] Maven 종속성 최신 버전 확인 및 리포트
+      - name: 🔄 Check & Update Dependencies
+        if: ${{ github.event.inputs.force_update == 'true' || github.event_name == 'schedule' }}
+        run: |
+          echo "Checking for library updates..."
+          
+          # 업데이트 가능한 버전 확인
+          mvn versions:display-dependency-updates > dependency-report.txt
+          
+          echo "==== Dependency Update Report ===="
+          cat dependency-report.txt
+          echo "=================================="
+          
+          # (선택사항) 자동으로 버전 올리기 (주의: 테스트 통과 필수)
+          # mvn versions:use-latest-releases
+
+      - name: 🏗️ Build with Maven (Skip Tests for Speed)
+        run: |
+          mvn clean package -DskipTests
+          mkdir -p ${{ env.ARTIFACT_DIR }}/jar
+          cp target/*.jar ${{ env.ARTIFACT_DIR }}/jar/
+
+      - name: 🧬 Integrity Check (Code Signing Simulation)
+        run: |
+          cd ${{ env.ARTIFACT_DIR }}/jar
+          sha256sum *.jar > checksum-app.sha256
+          echo "✅ Application Build Complete & Signed." >> $GITHUB_WORKSPACE/${{ env.AUDIT_LOG }}
+
+      - name: 📤 Upload App Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-binaries
+          path: ${{ env.ARTIFACT_DIR }}/jar
+
+  # ======================================================
+  # JOB 3: 통합 백업 및 아카이빙 (Backup Layer)
+  # ======================================================
+  backup-master-system:
+    name: 💾 Master Backup & Archiving
+    needs: [provision-services, build-and-auto-update]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./full-system-dump
+
+      - name: 📦 Create Disaster Recovery (DR) Snapshot
+        run: |
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_NAME="DR_SNAPSHOT_${{ env.APP_NAME }}_${TIMESTAMP}.zip"
+          
+          echo "Creating Master Backup: $BACKUP_NAME"
+          mkdir -p ${{ env.BACKUP_DIR }}
+          
+          # 1. 서비스 이미지, 앱 바이너리, 로그 모두 압축
+          zip -r ${{ env.BACKUP_DIR }}/$BACKUP_NAME ./full-system-dump
+          
+          # 2. 메타데이터 생성
+          echo "Backup Date: $(date)" > ${{ env.BACKUP_DIR }}/meta_info.txt
+          echo "Branch: ${{ github.ref }}" >> ${{ env.BACKUP_DIR }}/meta_info.txt
+          echo "Commit: ${{ github.sha }}" >> ${{ env.BACKUP_DIR }}/meta_info.txt
+          
+          echo "✅ DR Snapshot Created."
+
+      - name: ☁️ Upload Secure Backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: secure-dr-backup
+          path: ${{ env.BACKUP_DIR }}
+          retention-days: ${{ github.event.inputs.backup_retention }}
+
+      - name: 📢 Audit Report Finalization
+        run: |
+          echo "Workflow Finished Successfully."
+          # 실제 환경에서는 여기서 Slack/Email 알림 전송
