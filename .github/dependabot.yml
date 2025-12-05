@@ -1,393 +1,106 @@
-# Dependabot configuration for multi-project monorepo
-# Documentation: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
 version: 2
+
+# ======================================================
+# 🛡️ Global Configuration
+# ======================================================
+# 모든 업데이트 작업에 공통으로 적용되는 설정입니다.
+registries:
+  dockerhub:
+    type: docker-registry
+    url: registry.hub.docker.com
+    # 비공개 레지스트리 사용 시 아래 주석 해제 후 secrets 등록 필요
+    # username: ${{ secrets.DOCKER_USERNAME }}
+    # password: ${{ secrets.DOCKER_PASSWORD }}
+
 updates:
-  # Node.js Projects
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "npm"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "npm"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-    versioning-strategy: increase
-
-  - package-ecosystem: "npm"
-    directory: "/anthropic-cost-tracker/nodejs"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "npm(cost-tracker)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "npm"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-    versioning-strategy: increase
-
-  - package-ecosystem: "npm"
-    directory: "/mcp-hello-js"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "npm(mcp-hello-js)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "npm"
-      - "security"
-    versioning-strategy: increase
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-
-  - package-ecosystem: "npm"
-    directory: "/mcp-fs"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "npm(mcp-fs)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "npm"
-      - "security"
-    versioning-strategy: increase
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-
-  # Python Projects
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    pip_requirements:
-      - "requirements.txt"
-      - "requirements-cli.txt"
-      - "requirements-lag-features.txt"
-      - "requirements-secure-backup.txt"
-      - "requirements-security.txt"
-    commit-message:
-      prefix: "pip"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "python"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-    versioning-strategy: increase
-
-  - package-ecosystem: "pip"
-    directory: "/anthropic-cost-tracker/python"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "pip(cost-tracker)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "python"
-      - "security"
-    versioning-strategy: increase
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-
-  - package-ecosystem: "pip"
-    directory: "/mcp-hello-py"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "pip(mcp-hello-py)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "python"
-      - "security"
-    versioning-strategy: increase
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-
-  - package-ecosystem: "pip"
-    directory: "/mcp-python-server"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "pip(mcp-python)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "python"
-      - "security"
-    versioning-strategy: increase
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-
-  - package-ecosystem: "pip"
-    directory: "/mcp-apache-server"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "pip(mcp-apache)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "python"
-      - "security"
-    versioning-strategy: increase
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-
-  - package-ecosystem: "pip"
-    directory: "/sql/teradata/dependencies"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "pip(teradata)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "python"
-      - "teradata"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-    versioning-strategy: increase
-
-  - package-ecosystem: "pip"
-    directory: "/banking_pipeline"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "pip(banking-pipeline)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "python"
-      - "banking"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-    versioning-strategy: increase
-
-  # Maven (Java) Projects
-  - package-ecosystem: "maven"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      day: "wednesday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "maven"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "java"
-      - "maven"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-    versioning-strategy: increase
-
-  - package-ecosystem: "maven"
-    directory: "/mcp-hello-java"
-    schedule:
-      interval: "weekly"
-      day: "wednesday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 10
-    commit-message:
-      prefix: "maven(mcp-hello-java)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "java"
-      - "maven"
-      - "security"
-    versioning-strategy: increase
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
-
-  # GitHub Actions
+  # ======================================================
+  # 1. GitHub Actions Workflows (CI/CD 파이프라인)
+  # ======================================================
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "thursday"
-      time: "09:00"
+      interval: "daily"   # 매일 점검
+      time: "00:00"       # 한국 시간 오전 9시 (UTC 00:00)
       timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "ci"
-      include: "scope"
+    open-pull-requests-limit: 10
     labels:
-      - "dependencies"
-      - "github-actions"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
+      - "ci-cd"
+      - "actions"
+      - "automated-update"
+    groups:
+      github-actions:
+        patterns:
+          - "*" # 모든 액션 업데이트를 하나의 PR로 묶음 (노이즈 감소)
 
-  # Docker
+  # ======================================================
+  # 2. Docker (Dockerfile & Kubernetes Manifests)
+  # ======================================================
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "friday"
-      time: "09:00"
+      interval: "daily"
+      time: "00:00"
       timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "docker"
-      include: "scope"
+    open-pull-requests-limit: 10
     labels:
-      - "dependencies"
       - "docker"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
+      - "container"
+      - "infrastructure"
+    # Docker 태그 전략 (SemVer 준수)
+    versioning-strategy: increase-if-necessary
 
-  - package-ecosystem: "docker"
-    directory: "/docker/ubi"
+  # ======================================================
+  # 3. Java / Maven (Spring Boot Backend)
+  # ======================================================
+  - package-ecosystem: "maven"
+    directory: "/"
     schedule:
-      interval: "weekly"
-      day: "friday"
-      time: "09:00"
+      interval: "daily"
+      time: "00:00"
       timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "docker(ubi)"
-      include: "scope"
+    open-pull-requests-limit: 10
+    target-branch: "main"
     labels:
-      - "dependencies"
-      - "docker"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
+      - "java"
+      - "spring-boot"
+      - "backend"
+    # 그룹화: 스프링 관련 라이브러리는 한 번에 업데이트
+    groups:
+      spring-boot:
+        patterns:
+          - "org.springframework.boot:*"
+          - "org.springframework:*"
+      junit:
+        patterns:
+          - "org.junit.jupiter:*"
+          - "org.mockito:*"
 
-  - package-ecosystem: "docker"
-    directory: "/docker/ubuntu"
+  # ======================================================
+  # 4. Python / Pip (Data Pipeline)
+  # ======================================================
+  - package-ecosystem: "pip"
+    directory: "/" # requirements.txt 위치
     schedule:
-      interval: "weekly"
-      day: "friday"
-      time: "09:00"
+      interval: "daily"
+      time: "00:00"
       timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "docker(ubuntu)"
-      include: "scope"
+    open-pull-requests-limit: 10
     labels:
-      - "dependencies"
-      - "docker"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
+      - "python"
+      - "data-pipeline"
+    groups:
+      data-science:
+        patterns:
+          - "pandas"
+          - "numpy"
+          - "scikit-learn"
 
-  - package-ecosystem: "docker"
-    directory: "/docker/scala-runtime"
-    schedule:
-      interval: "weekly"
-      day: "friday"
-      time: "09:00"
-      timezone: "Asia/Seoul"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "docker(scala-runtime)"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "docker"
-      - "scala"
-      - "security"
-    reviewers:
-      - "koreatest12"
-    assignees:
-      - "koreatest12"
+  # ======================================================
+  # 5. Gradle (Optional: Gradle 사용 시 활성화)
+  # ======================================================
+  # - package-ecosystem: "gradle"
+  #   directory: "/"
+  #   schedule:
+  #     interval: "daily"
+  #     time: "00:00"
+  #     timezone: "Asia/Seoul"
