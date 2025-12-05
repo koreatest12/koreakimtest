@@ -1,242 +1,133 @@
-name: Spring Boot Ultra CI/CD (Fixed Semantic Release) 🚀🛡️📄
+name: "🐳 Docker Build & Replication Ops (Build, Run, Backup, Sync)"
 
 on:
   push:
-    branches: [ "main", "develop" ]
-  pull_request:
-    branches: [ "main", "develop" ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
+    inputs:
+      image_name:
+        description: '빌드할 도커 이미지 이름'
+        required: true
+        default: 'my-service-app'
+      version_tag:
+        description: '이미지 태그 (버전)'
+        required: true
+        default: 'v1.0.0'
 
-permissions:
-  contents: write      # Semantic Release 태그 생성 및 커밋
-  packages: write      # GHCR 이미지 업로드
-  actions: write
-  checks: write
-  security-events: write
-  issues: write
-  pull-requests: write
+env:
+  # 기본 환경 변수 설정
+  IMAGE_NAME: ${{ github.event.inputs.image_name || 'my-service-app' }}
+  TAG: ${{ github.event.inputs.version_tag || 'v1.0.0' }}
+  PRIMARY_DIR: "./ops-data/primary"     # 주 운영 디렉토리
+  RESERVE_DIR: "./ops-data/reserve"     # 예비(백업) 디렉토리
 
 jobs:
-  # ==================================================================================
-  # JOB 1: 빌드, 테스트, 정적/보안 분석 + [보고서]
-  # ==================================================================================
-  build_analyze_secure:
-    name: 1. Build & Secure
+  docker-replication-pipeline:
+    name: 🏗️ Build, Run & Replicate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with: { java-version: '17', distribution: 'temurin', cache: 'maven' }
-
-      - name: Ensure Maven Wrapper
-        run: |
-          if [ ! -f mvnw ]; then mvn -N io.takari:maven:wrapper; fi
-          chmod +x mvnw
-
-      - name: Build with Maven
-        run: ./mvnw -B clean verify package -DskipTests=false
-
-      - name: Trivy Security Scan
-        uses: aquasecurity/trivy-action@master
-        with: { scan-type: 'fs', ignore-unfixed: true, format: 'table', severity: 'CRITICAL,HIGH' }
-
-      - name: Extract JAR
-        id: jar_file
-        run: |
-          JAR_FILE=$(find target/ -name "*.jar" | grep -v "original" | head -n 1)
-          echo "jar_path=$JAR_FILE" >> $GITHUB_OUTPUT
-
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
-        with: { name: spring-boot-app-deployable-jar, path: ${{ steps.jar_file.outputs.jar_path }} }
-
-      # [보고서 1]
-      - name: 📝 Generate Build Report
-        run: |
-          echo "# 🏗️ CI/CD Execution Report" > report_1_build.md
-          echo "### 1. Build & Security" >> report_1_build.md
-          echo "- **Result**: ✅ Success" >> report_1_build.md
-          echo "- **Artifact**: $(basename ${{ steps.jar_file.outputs.jar_path }})" >> report_1_build.md
-          echo "---" >> report_1_build.md
-
-      - name: Upload Report 1
-        uses: actions/upload-artifact@v4
-        with: { name: report-fragment-1, path: report_1_build.md }
-
-  # ==================================================================================
-  # JOB 2: 부하 테스트 + [보고서]
-  # ==================================================================================
-  performance_test:
-    name: 2. Load Test (k6)
-    runs-on: ubuntu-latest
-    needs: build_analyze_secure
-    steps:
-      - name: Download Artifact
-        uses: actions/download-artifact@v4
-        with: { name: spring-boot-app-deployable-jar, path: ./target }
-      
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with: { java-version: '17', distribution: 'temurin' }
-
-      - name: Start App & Create Script
-        run: |
-          nohup java -jar ./target/*.jar &
-          echo 'import http from "k6/http"; import { sleep } from "k6"; export const options = { vus: 5, duration: "3s" }; export default function () { http.get("http://localhost:8080"); sleep(1); }' > load-test.js
-          sleep 15
-
-      - name: Run k6
-        uses: grafana/k6-action@v0.3.0
-        with: { filename: load-test.js }
-
-      # [보고서 2]
-      - name: 📝 Generate Perf Report
-        run: |
-          echo "### 2. Performance Test" > report_2_perf.md
-          echo "- **Status**: ✅ Passed (k6)" >> report_2_perf.md
-          echo "---" >> report_2_perf.md
-
-      - name: Upload Report 2
-        uses: actions/upload-artifact@v4
-        with: { name: report-fragment-2, path: report_2_perf.md }
-
-  # ==================================================================================
-  # JOB 3: 백업 및 DB 덤프 + [보고서]
-  # ==================================================================================
-  backup_and_dump:
-    name: 3. Backup & Dump
-    runs-on: ubuntu-latest
-    needs: build_analyze_secure
-    steps:
-      - name: Download Artifact
-        uses: actions/download-artifact@v4
-        with: { name: spring-boot-app-deployable-jar, path: ./backup-staging }
-
-      - name: Generate Timestamp
-        id: time
-        run: echo "timestamp=$(date +'%Y%m%d_%H%M%S')" >> $GITHUB_OUTPUT
-
-      - name: Backup & Dump
-        run: |
-          mkdir -p ./final_backups
-          cp ./backup-staging/*.jar ./final_backups/app_backup_${{ steps.time.outputs.timestamp }}.jar
-          echo "INSERT INTO logs VALUES ('Backup');" > ./final_backups/db_dump_${{ steps.time.outputs.timestamp }}.sql
-
-      - name: Upload Backup
-        uses: actions/upload-artifact@v4
-        with: { name: service-backup, path: ./final_backups/*, retention-days: 30 }
-
-      # [보고서 3]
-      - name: 📝 Generate Backup Report
-        run: |
-          echo "### 3. Backup" > report_3_backup.md
-          echo "- **Time**: ${{ steps.time.outputs.timestamp }}" >> report_3_backup.md
-          echo "- **Files**: JAR & SQL Dump saved." >> report_3_backup.md
-          echo "---" >> report_3_backup.md
-
-      - name: Upload Report 3
-        uses: actions/upload-artifact@v4
-        with: { name: report-fragment-3, path: report_3_backup.md }
-
-  # ==================================================================================
-  # JOB 4: 시맨틱 릴리스 (NPM 에러 수정 버전) + [보고서]
-  # ==================================================================================
-  semantic_release:
-    name: 4. Semantic Release (Fix)
-    runs-on: ubuntu-latest
-    needs: [build_analyze_secure, performance_test]
-    if: github.ref == 'refs/heads/main'
-    steps:
-      - name: Checkout Code
+      # 1. 소스 코드 체크아웃
+      - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      # [핵심 수정] .releaserc.json 파일 생성
-      # NPM 플러그인을 제거하고 GitHub 플러그인만 사용하여 NPM_TOKEN 에러를 방지합니다.
-      - name: Create Release Config (Disable NPM)
+      # 2. 작업 공간 및 디렉토리 구조 생성 (주/예비)
+      - name: 📂 Create Operational Directories
         run: |
-          cat <<EOF > .releaserc.json
-          {
-            "branches": ["main"],
-            "plugins": [
-              "@semantic-release/commit-analyzer",
-              "@semantic-release/release-notes-generator",
-              "@semantic-release/github"
-            ]
-          }
+          echo "Creating directory structure..."
+          mkdir -p ${{ env.PRIMARY_DIR }}/artifacts
+          mkdir -p ${{ env.PRIMARY_DIR }}/container-fs
+          mkdir -p ${{ env.RESERVE_DIR }}/artifacts
+          mkdir -p ${{ env.RESERVE_DIR }}/container-fs
+          
+          echo "✅ Directories Created:"
+          ls -R ./ops-data
+
+      # 3. 테스트용 Dockerfile 생성 (이미 존재하면 이 단계 생략 가능)
+      - name: 📝 Generate Demo Dockerfile (If not exists)
+        run: |
+          if [ ! -f Dockerfile ]; then
+            echo "No Dockerfile found. Creating a demo Dockerfile..."
+            cat <<EOF > Dockerfile
+            FROM alpine:latest
+            WORKDIR /app
+            RUN echo "Service Started at $(date)" > status.log
+            RUN echo "Critical Data Content" > data.txt
+            CMD ["tail", "-f", "/dev/null"]
           EOF
-          echo "✅ .releaserc.json created without npm plugin."
-
-      - name: Semantic Release
-        id: semantic
-        uses: cycjimmy/semantic-release-action@v4
-        with:
-          semantic_version: 19
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # [보고서 4]
-      - name: 📝 Generate Release Report
-        run: |
-          echo "### 4. Release Info" > report_4_release.md
-          if [ "${{ steps.semantic.outputs.new_release_published }}" == "true" ]; then
-            echo "- **New Version**: ${{ steps.semantic.outputs.new_release_version }}" >> report_4_release.md
-            echo "- **Status**: 🚀 Published to GitHub" >> report_4_release.md
-          else
-            echo "- **Status**: No new release (no relevant changes)." >> report_4_release.md
           fi
-          echo "---" >> report_4_release.md
 
-      - name: Upload Report 4
-        uses: actions/upload-artifact@v4
-        with: { name: report-fragment-4, path: report_4_release.md }
+      # 4. 도커 빌드 환경 설정
+      - name: 🔧 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-  # ==================================================================================
-  # JOB 5: 최종 보고서 통합
-  # ==================================================================================
-  generate_final_report:
-    name: 5. Generate Final Report
-    runs-on: ubuntu-latest
-    needs: [build_analyze_secure, performance_test, backup_and_dump, semantic_release]
-    if: always()
-    steps:
-      - name: Download All Reports
-        uses: actions/download-artifact@v4
+      # 5. 도커 이미지 빌드 (Build)
+      - name: 🔨 Build Docker Image
+        uses: docker/build-push-action@v5
         with:
-          pattern: report-fragment-*
-          merge-multiple: true
-          path: ./reports
+          context: .
+          file: ./Dockerfile
+          push: false # 레지스트리에 푸시하지 않고 로컬 도커 데몬에 로드
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:${{ env.TAG }}
 
-      - name: Combine Reports
+      # 6. 도커 컨테이너 실행 (Install/Run)
+      - name: 🚀 Run Container
         run: |
-          cat ./reports/report_1_build.md > FINAL_REPORT.md
-          echo "" >> FINAL_REPORT.md
-          cat ./reports/report_2_perf.md >> FINAL_REPORT.md
-          echo "" >> FINAL_REPORT.md
-          cat ./reports/report_3_backup.md >> FINAL_REPORT.md
-          echo "" >> FINAL_REPORT.md
-          if [ -f ./reports/report_4_release.md ]; then
-            cat ./reports/report_4_release.md >> FINAL_REPORT.md
-          else
-            echo "### 4. Release Info" >> FINAL_REPORT.md
-            echo "- Skipped (Not main branch)" >> FINAL_REPORT.md
-          fi
-          cat FINAL_REPORT.md
+          echo "Starting Container..."
+          docker run -d --name ${{ env.IMAGE_NAME }}-container ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+          
+          echo "Wait for initialization..."
+          sleep 5
+          
+          echo "✅ Container Status:"
+          docker ps -a | grep ${{ env.IMAGE_NAME }}
 
-      - name: Upload Final Report
+      # 7. 이미지 추출 및 주 디렉토리에 저장 (Image Artifact Generation)
+      - name: 📦 Export Image to Primary Dir
+        run: |
+          echo "Saving Docker Image as Tarball..."
+          docker save -o ${{ env.PRIMARY_DIR }}/artifacts/${{ env.IMAGE_NAME }}_${{ env.TAG }}.tar ${{ env.IMAGE_NAME }}:${{ env.TAG }}
+          
+          echo "✅ Image saved to ${{ env.PRIMARY_DIR }}/artifacts/"
+
+      # 8. 컨테이너 내부 데이터 추출 (Container File System Extraction)
+      - name: 📤 Extract Container Filesystem
+        run: |
+          echo "Copying data from running container..."
+          # 컨테이너의 /app 디렉토리를 호스트로 복사
+          docker cp ${{ env.IMAGE_NAME }}-container:/app ${{ env.PRIMARY_DIR }}/container-fs/
+          
+          echo "✅ Filesystem copied to ${{ env.PRIMARY_DIR }}/container-fs/"
+
+      # 9. 예비 디렉토리로 이중 복제 (Replication / Sync)
+      - name: 🔄 Replicate to Reserve Directory (Backup Strategy)
+        run: |
+          echo "Syncing Primary to Reserve..."
+          
+          # 이미지 복제
+          cp ${{ env.PRIMARY_DIR }}/artifacts/*.tar ${{ env.RESERVE_DIR }}/artifacts/
+          
+          # 컨테이너 데이터 복제
+          cp -r ${{ env.PRIMARY_DIR }}/container-fs/* ${{ env.RESERVE_DIR }}/container-fs/
+          
+          echo "✅ Replication Complete."
+          tree ./ops-data || ls -R ./ops-data
+
+      # 10. 컨테이너 정리 (Cleanup)
+      - name: 🧹 Cleanup Container
+        if: always()
+        run: |
+          docker stop ${{ env.IMAGE_NAME }}-container || true
+          docker rm ${{ env.IMAGE_NAME }}-container || true
+
+      # 11. 결과물 업로드 (Github Actions Artifacts)
+      - name: ☁️ Upload Replicated Artifacts
         uses: actions/upload-artifact@v4
-        with: { name: 00-FINAL-EXECUTION-REPORT, path: FINAL_REPORT.md, retention-days: 90 }
-
-  # ==================================================================================
-  # JOB 6: 배포
-  # ==================================================================================
-  deploy:
-    name: 6. Deployment
-    needs: [generate_final_report]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Execute Deployment
-        run: echo "🚀 Deployment Started (See Final Report for details)"
+        with:
+          name: ops-replication-data
+          path: ./ops-data/
+          retention-days: 1
