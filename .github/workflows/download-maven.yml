@@ -1,223 +1,150 @@
-name: "🇰🇷 Korea Finance — OMNIVERSE ETERNITY v18.2 (ECHO-OBSERVABILITY)"
+name: "📦 Maven Manual Setup & Project Generator"
 
 on:
-  schedule:
-    - cron: '0 0 * * *'
-  workflow_dispatch:
-    inputs:
-      active_customer_count:
-        description: "Active Customers (Target: 1M)"
-        default: "500000"
-        required: true
-      deploy_env:
-        description: "Deployment Target"
-        default: "production-echo-log"
-
-permissions:
-  contents: write
+  workflow_dispatch: # 수동 실행 버튼 활성화
+  push:
+    branches: [ "main" ]
 
 env:
-  TZ: Asia/Seoul
-  # Paths
-  LOG_DIR: .github/logs
-  ARTIFACT_DIR: artifacts
-  VAULT_DIR: artifacts/vault
-  BUILD_DIR: service_build 
-  # Security Keys
-  PG_USER: postgres
-  PG_PASS: postgres_secret_v18
-  KEK_KEY: "korea-fin-master-kek-v18" 
-  # Docker Images
-  ANALYTICS_IMAGE: eternity-analytics-svc:latest
+  MAVEN_VERSION: '3.9.6'
+  JAVA_VERSION: '17'
+  PROJECT_ROOT: 'generated-project'
 
 jobs:
-  eternity-zero-trust-build:
-    name: "🛡️ ZERO-TRUST PII Pipeline Build (ECHO ON)"
+  maven-setup-and-generate:
     runs-on: ubuntu-latest
-    
+    name: 🛠️ Setup Maven & Generate Files
+
     steps:
-      # ===========================================================================
-      # 0) HYPER-INITIALIZATION & CONTAINER BUILD
-      # ===========================================================================
-      - name: "🔧 Init System & Build Service Container"
-        run: |
-          echo "======================================================"
-          echo "  🚀 [PHASE 0] INITIALIZATION & IMAGE BUILD START"
-          echo "======================================================"
-          mkdir -p ${LOG_DIR} ${ARTIFACT_DIR} ${VAULT_DIR} ${BUILD_DIR}
-          
-          echo "📦 Installing Host Dependencies..."
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client python3-pip
-          pip3 install pandas scikit-learn faker cryptography psycopg2-binary
-          echo "✅ Host Dependencies installed."
-          
-          echo "🔨 Defining and building ${ANALYTICS_IMAGE}..."
-          # ... (analytics_svc.py and Dockerfile definitions remain) ...
-          
-          # [BUILD SCRIPT: analytics_svc.py 및 Dockerfile 생성 코드]
-          cat <<EOF > ${BUILD_DIR}/analytics_svc.py
-          # Full analytics_svc.py script content from v18.1...
-          # (Script is fully defined here, including Decryption, FDS, BI logic)
-          EOF
-          cat <<EOF > ${BUILD_DIR}/Dockerfile
-          # Dockerfile content from v18.1...
-          EOF
-          
-          docker build -t ${ANALYTICS_IMAGE} ${BUILD_DIR}
-          echo "✅ Analytics Service Image Built: ${ANALYTICS_IMAGE}"
-          echo "======================================================"
+      # 1. 체크아웃 (기본)
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
 
-      # ===========================================================================
-      # 1) HYBRID DATA CLUSTER BOOT
-      # ===========================================================================
-      - name: "🐘⚡ Boot Hybrid Cluster"
-        run: |
-          echo "======================================================"
-          echo "  🐘 [PHASE 1] CLUSTER BOOTSTRAP START"
-          echo "======================================================"
-          echo "🐘 Starting PostgreSQL (OLTP) on port 5432..."
-          docker run -d --name pg_core -e POSTGRES_PASSWORD=${{ env.PG_PASS }} -p 5432:5432 postgres:16-alpine
-          echo "⚡ Starting ClickHouse (OLAP) on port 8123/9000..."
-          docker run -d --name ch_analytics --ulimit nofile=262144:262144 -p 8123:8123 clickhouse/clickhouse-server:latest
-          echo "⏳ Waiting 10 seconds for service warm-up..."
-          sleep 10
-          echo "✅ Cluster Boot complete (Health checks omitted for brevity but assumed success)."
-          echo "======================================================"
-
-      # ===========================================================================
-      # 2) PII GENERATION & KEY GENERATION
-      # ===========================================================================
-      - name: "💳 Generate PII & Dynamic Key"
-        env:
-          PGPASSWORD: ${{ env.PG_PASS }}
-          INPUT_ROWS: ${{ inputs.active_customer_count }}
-        run: |
-          echo "======================================================"
-          echo "  🔑 [PHASE 2] DATA INGESTION & PII GENERATION START"
-          echo "======================================================"
-          
-          # ... (pii_generator.py definition and execution remains) ...
-          
-          # [PII Generation script: pii_generator.py definition and execution]
-          
-          echo "👥 Target Rows: ${INPUT_ROWS}. Injecting PII and financial data into PostgreSQL..."
-          # ... (pii_generator.py execution) ...
-          
-          echo "🔑 Generating One-Time Session Key (DEK) for PII encryption..."
-          openssl rand -base64 32 | tr -d '\n' > ${VAULT_DIR}/session.key
-          echo "✅ Session Key (DEK) created and stored in VAULT_DIR."
-          echo "======================================================"
-
-      # ===========================================================================
-      # 3) ENCRYPTION SERVICE (ETL)
-      # ===========================================================================
-      - name: "🔒 ETL Stream & PII Encryption"
-        env:
-          PGPASSWORD: ${{ env.PG_PASS }}
-          DEK: $(cat ${VAULT_DIR}/session.key)
-        run: |
-          echo "======================================================"
-          echo "  🔄 [PHASE 3] ETL & ENCRYPTION SERVICE START"
-          echo "======================================================"
-          echo "🏗️ Updating ClickHouse schema to hold ENCRYPTED BLOBs..."
-          # ... (ClickHouse schema creation remains) ...
-          
-          # [Encryption ETL script: encryption_etl.py definition and execution]
-          cat <<EOF > encryption_etl.py
-          # ... (encryption_etl.py content remains) ...
-          EOF
-          
-          echo "⚠️ Running CONCEPTUAL PII FIELD-LEVEL ENCRYPTION via Python Script..."
-          python3 encryption_etl.py
-          echo "✅ ETL complete. PII is now encrypted at rest in ClickHouse."
-          echo "======================================================"
-
-      # ===========================================================================
-      # 4) ANALYTICS & DECRYPTION TEST SERVICE (Containerized)
-      # ===========================================================================
-      - name: "🧠 Run Containerized Analytics & Decryption Verification"
-        env:
-          DEK: $(cat ${VAULT_DIR}/session.key)
-        run: |
-          echo "======================================================"
-          echo "  🧠 [PHASE 4] ANALYTICS SERVICE CONTAINER EXECUTION START"
-          echo "======================================================"
-          echo "🏃 Starting container ${ANALYTICS_IMAGE} for Decryption and FDS analysis..."
-          echo "   -> PII Decryption Verification (Inside Container) will be executed."
-          
-          # Execute the built image
-          docker run --rm --network host \
-            -e DEK=${{ env.DEK }} \
-            -e PGPASSWORD=${{ env.PG_PASS }} \
-            -v $(pwd)/${ARTIFACT_DIR}/:${ARTIFACT_DIR}/ \
-            -v $(pwd)/${VAULT_DIR}/:${VAULT_DIR}/ \
-            ${ANALYTICS_IMAGE}
-            
-          echo "✅ Containerized Analytics Complete. FDS Report generated."
-          echo "======================================================"
-
-      # ===========================================================================
-      # 5) SERVICE MESH CONFIGURATION & ARTIFACT PREP
-      # ===========================================================================
-      - name: "🏗️ Configure Service Mesh"
-        run: |
-          echo "======================================================"
-          echo "  ⚙️ [PHASE 5] SERVICE MESH CONFIGURATION START"
-          echo "======================================================"
-          echo "📝 Generating configuration for Data Ingestion Worker..."
-          # ... (Ingestion Worker Config remains) ...
-          echo "📝 Generating configuration for Analytics / BI Worker..."
-          # ... (Analytics Worker Config remains) ...
-          echo "📝 Generating configuration for FDS Worker..."
-          # ... (FDS Worker Config remains) ...
-          
-          echo "✅ Service Mesh Configurations Generated."
-          echo "======================================================"
-
-      # ===========================================================================
-      # 6) ZERO-TRUST SECURITY VAULT (KEK/DEK Key Management)
-      # ===========================================================================
-      - name: "🔒 Key Encryption Key (KEK) Management & Vault"
-        run: |
-          echo "======================================================"
-          echo "  🛡️ [PHASE 6] SECURITY & KEY MANAGEMENT START"
-          echo "======================================================"
-          
-          echo "🕵️ Running ClamAV Scan on temporary artifacts..."
-          # ... (ClamAV execution remains) ...
-
-          echo "🔐 Encrypting Data Encryption Key (DEK) using Master Key (KEK)..."
-          openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 \
-            -in ${VAULT_DIR}/session.key \
-            -out ${VAULT_DIR}/encrypted_session.key.enc \
-            -k "${{ env.KEK_KEY }}"
-            
-          echo "🗑️ Destroying plaintext DEK for Zero-Trust compliance..."
-          rm ${VAULT_DIR}/session.key
-          
-          echo "✅ Security Vault procedures complete."
-          echo "======================================================"
-
-      - name: "🚀 GitHub Release v18.2"
-        run: |
-          echo "======================================================"
-          echo "  📦 [PHASE 7] RELEASE START"
-          echo "======================================================"
-        uses: ncipollo/release-action@v1
+      # 2. JDK 설정 (Maven 실행을 위해 필수)
+      - name: ☕ Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v18.2-echo-observability"
-          name: "🇰🇷 ETERNITY v18.2 (ECHO-OBSERVABILITY & Log Verbosity)"
-          body: |
-            ## 🇰🇷 v18.2 ECHO-OBSERVABILITY UPDATE
-            
-            **Enhancement:**
-            - 📣 **ECHO-OBSERVABILITY:** Added verbose logging (`echo` commands) to every service phase for real-time monitoring and easier debugging.
-            
-            **Core Features:**
-            - ⚙️ Full Containerization.
-            - 🔒 Zero-Trust PII Encryption (KEK/DEK).
-            - 🔄 Decryption Verification.
-          artifacts: "artifacts/**/*"
-          allowUpdates: true
-          makeLatest: true
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      # 3. Maven 수동 다운로드 및 설치
+      # GitHub Runner에 기본 Maven이 있지만, 요청하신 대로 직접 다운로드/설치 과정을 구현합니다.
+      - name: ⬇️ Download & Install Apache Maven
+        run: |
+          echo "Downloading Maven ${MAVEN_VERSION}..."
+          wget -q https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz
+          
+          echo "Extracting Maven..."
+          tar -xzf apache-maven-${MAVEN_VERSION}-bin.tar.gz
+          
+          echo "Setting up Path..."
+          # 현재 Job에서 사용할 수 있도록 환경변수 설정
+          echo "$(pwd)/apache-maven-${MAVEN_VERSION}/bin" >> $GITHUB_PATH
+          
+          # 설치 확인
+          export PATH="$(pwd)/apache-maven-${MAVEN_VERSION}/bin:$PATH"
+          mvn -version
+
+      # 4. 필수 디렉토리 구조 대량 생성
+      # Maven의 표준 디렉토리 구조를 생성합니다.
+      - name: 📂 Create Directory Structure
+        run: |
+          echo "Creating project directories under ${PROJECT_ROOT}..."
+          
+          # 메인 소스 및 리소스 디렉토리
+          mkdir -p ${PROJECT_ROOT}/src/main/java/com/example/demo
+          mkdir -p ${PROJECT_ROOT}/src/main/resources
+          
+          # 테스트 소스 디렉토리
+          mkdir -p ${PROJECT_ROOT}/src/test/java/com/example/demo
+          
+          # 로그 및 빌드 아티팩트용 디렉토리 (예시)
+          mkdir -p ${PROJECT_ROOT}/logs
+          mkdir -p ${PROJECT_ROOT}/config
+          mkdir -p ${PROJECT_ROOT}/scripts
+          
+          echo "✅ Directories created:"
+          find ${PROJECT_ROOT} -maxdepth 4 -type d
+
+      
+
+      # 5. 필수 파일 생성 (pom.xml)
+      # 빌드에 필요한 핵심 설정 파일을 동적으로 생성합니다.
+      - name: 📄 Generate pom.xml
+        run: |
+          cat <<EOF > ${PROJECT_ROOT}/pom.xml
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+              <modelVersion>4.0.0</modelVersion>
+          
+              <groupId>com.example</groupId>
+              <artifactId>demo-project</artifactId>
+              <version>1.0.0-SNAPSHOT</version>
+          
+              <properties>
+                  <maven.compiler.source>${JAVA_VERSION}</maven.compiler.source>
+                  <maven.compiler.target>${JAVA_VERSION}</maven.compiler.target>
+                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+              </properties>
+
+              <dependencies>
+                  <dependency>
+                      <groupId>org.slf4j</groupId>
+                      <artifactId>slf4j-api</artifactId>
+                      <version>2.0.9</version>
+                  </dependency>
+              </dependencies>
+          </project>
+          EOF
+          echo "✅ pom.xml generated."
+
+      # 6. Java 소스 파일 생성
+      # 컴파일 테스트를 위한 간단한 Main 클래스를 생성합니다.
+      - name: 📝 Generate Java Source Code
+        run: |
+          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/example/demo/App.java
+          package com.example.demo;
+
+          public class App {
+              public static void main(String[] args) {
+                  System.out.println("🚀 Maven Build Success via GitHub Actions!");
+                  System.out.println("System Time: " + java.time.LocalDateTime.now());
+              }
+          }
+          EOF
+          echo "✅ Java source file generated."
+
+      # 7. 설정 파일 생성 (settings.xml 등)
+      - name: ⚙️ Generate Config Files
+        run: |
+          # 애플리케이션 설정 파일 예시
+          echo "app.env=production" > ${PROJECT_ROOT}/src/main/resources/application.properties
+          
+          # 스크립트 파일 예시
+          echo "#!/bin/bash" > ${PROJECT_ROOT}/scripts/run.sh
+          echo "java -cp target/demo-project-1.0.0-SNAPSHOT.jar com.example.demo.App" >> ${PROJECT_ROOT}/scripts/run.sh
+          chmod +x ${PROJECT_ROOT}/scripts/run.sh
+          
+          echo "✅ Config files generated."
+
+      # 8. Maven 빌드 실행
+      # 위에서 생성한 파일들을 기반으로 실제 빌드를 수행합니다.
+      - name: 🏗️ Run Maven Build
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          mvn clean package -B
+          
+      # 9. 결과 확인 (Java 실행)
+      - name: 🚀 Verify Artifact
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          echo "Executing the built JAR..."
+          java -cp target/demo-project-1.0.0-SNAPSHOT.jar com.example.demo.App
+
+      # 10. 결과물 업로드 (선택 사항)
+      - name: 📤 Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-jar
+          path: ${{ env.PROJECT_ROOT }}/target/*.jar
