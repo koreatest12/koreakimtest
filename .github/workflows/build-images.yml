@@ -213,8 +213,6 @@ jobs:
           echo "✨ Total 50 customer images generated successfully."
           ls -lh $IMAGE_DIR | head -n 10
 
-      [Image of customer profile dummy data card]
-
       # ----------------------------------------------------------------
       # 5. 소스 코드 백업 (이미지 포함)
       # ----------------------------------------------------------------
