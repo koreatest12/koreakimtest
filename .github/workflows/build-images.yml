@@ -1,14 +1,12 @@
-name: "🚀 Auto-Generate, Upload & Deploy Pipeline"
+name: "🚀 Auto-Gen, Backup, Dump & Deploy"
 
 on:
-  workflow_dispatch: # 수동 실행
+  workflow_dispatch:
   push:
     branches: [ "main" ]
-    paths-ignore: # 무한 루프 방지: 생성된 파일 변경 시에는 트리거되지 않음
-      - 'enterprise-app/**'
-      - 'README.md'
+    paths-ignore:
+      - 'enterprise-app/**' # 무한 루프 방지
 
-# [핵심] 저장소에 코드를 푸시(Upload)하기 위해 write 권한 필수
 permissions:
   contents: write
   packages: write
@@ -18,22 +16,23 @@ permissions:
 env:
   MAVEN_VERSION: '3.9.6'
   JAVA_VERSION: '17'
-  PROJECT_ROOT: 'enterprise-app' # 생성될 프로젝트 폴더명
+  PROJECT_ROOT: 'enterprise-app'
   DOCKER_IMAGE_NAME: 'enterprise-demo'
+  BACKUP_DIR: 'backups'
 
 jobs:
-  generate-upload-deploy:
+  full-execution:
     runs-on: ubuntu-latest
-    name: 🛠️ Gen, Push, Build & Deploy
+    name: 🛠️ Gen, Backup, Build & Dump
 
     steps:
       # ----------------------------------------------------------------
-      # 1. 초기 설정 및 캐싱 (Cache)
+      # 1. 환경 설정 및 캐시
       # ----------------------------------------------------------------
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Git Push를 위해 전체 히스토리 가져오기
+          fetch-depth: 0
 
       - name: ☕ Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -41,7 +40,6 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
 
-      # [요청사항] Maven 의존성 캐싱 강화
       - name: 💾 Cache Maven Packages
         uses: actions/cache@v4
         with:
@@ -62,137 +60,76 @@ jobs:
           export PATH="$(pwd)/apache-maven-${MAVEN_VERSION}/bin:$PATH"
 
       # ----------------------------------------------------------------
-      # 3. 파일 및 XML 대량 생성 (업그레이드)
+      # 3. 프로젝트 파일 생성 (소스, XML, Docker, K8s)
       # ----------------------------------------------------------------
       - name: 📂 Generate All Project Files
         run: |
-          echo "🛠️ Creating directory structure..."
-          # 소스 및 리소스 폴더
+          echo "🛠️ Generating Enterprise Project Structure..."
           mkdir -p ${PROJECT_ROOT}/src/main/java/com/company/core
           mkdir -p ${PROJECT_ROOT}/src/test/java/com/company/core
           mkdir -p ${PROJECT_ROOT}/src/main/resources
-          # K8s 및 설정 폴더
           mkdir -p ${PROJECT_ROOT}/k8s
-          mkdir -p ${PROJECT_ROOT}/.github
+          mkdir -p ${PROJECT_ROOT}/${BACKUP_DIR} # 백업 저장용 폴더 생성
 
-          # -----------------------------------------------------------
-          # [3-1] pom.xml 생성 (필수 XML)
-          # -----------------------------------------------------------
+          # [3-1] pom.xml
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
-          <project xmlns="http://maven.apache.org/POM/4.0.0"
-                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
               <modelVersion>4.0.0</modelVersion>
               <groupId>com.company</groupId>
               <artifactId>enterprise-core</artifactId>
               <version>1.0.0</version>
-              
               <properties>
                   <maven.compiler.source>${JAVA_VERSION}</maven.compiler.source>
                   <maven.compiler.target>${JAVA_VERSION}</maven.compiler.target>
                   <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
               </properties>
-
               <dependencies>
-                  <dependency>
-                      <groupId>org.slf4j</groupId>
-                      <artifactId>slf4j-api</artifactId>
-                      <version>2.0.9</version>
-                  </dependency>
-                  <dependency>
-                      <groupId>ch.qos.logback</groupId>
-                      <artifactId>logback-classic</artifactId>
-                      <version>1.4.11</version>
-                  </dependency>
-                  <dependency>
-                      <groupId>org.junit.jupiter</groupId>
-                      <artifactId>junit-jupiter-api</artifactId>
-                      <version>5.10.0</version>
-                      <scope>test</scope>
-                  </dependency>
-                  <dependency>
-                      <groupId>org.junit.jupiter</groupId>
-                      <artifactId>junit-jupiter-engine</artifactId>
-                      <version>5.10.0</version>
-                      <scope>test</scope>
-                  </dependency>
+                  <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>2.0.9</version></dependency>
+                  <dependency><groupId>ch.qos.logback</groupId><artifactId>logback-classic</artifactId><version>1.4.11</version></dependency>
+                  <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter-api</artifactId><version>5.10.0</version><scope>test</scope></dependency>
+                  <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter-engine</artifactId><version>5.10.0</version><scope>test</scope></dependency>
               </dependencies>
-
               <build>
                   <plugins>
+                      <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.1.2</version></plugin>
                       <plugin>
-                          <groupId>org.apache.maven.plugins</groupId>
-                          <artifactId>maven-surefire-plugin</artifactId>
-                          <version>3.1.2</version>
-                      </plugin>
-                      <plugin>
-                          <groupId>org.apache.maven.plugins</groupId>
-                          <artifactId>maven-javadoc-plugin</artifactId>
-                          <version>3.6.3</version>
-                          <configuration>
-                              <encoding>UTF-8</encoding>
-                              <doclint>none</doclint>
-                              <failOnError>false</failOnError>
-                          </configuration>
+                          <groupId>org.apache.maven.plugins</groupId><artifactId>maven-javadoc-plugin</artifactId><version>3.6.3</version>
+                          <configuration><encoding>UTF-8</encoding><doclint>none</doclint><failOnError>false</failOnError></configuration>
                       </plugin>
                   </plugins>
               </build>
           </project>
           EOF
 
-          # -----------------------------------------------------------
-          # [3-2] logback.xml 생성 (추가 XML: 로깅 설정)
-          # -----------------------------------------------------------
+          # [3-2] logback.xml
           cat <<EOF > ${PROJECT_ROOT}/src/main/resources/logback.xml
           <configuration>
             <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
-              <encoder>
-                <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
-              </encoder>
+              <encoder><pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern></encoder>
             </appender>
-            <root level="INFO">
-              <appender-ref ref="STDOUT" />
-            </root>
+            <root level="INFO"><appender-ref ref="STDOUT" /></root>
           </configuration>
           EOF
 
-          # -----------------------------------------------------------
-          # [3-3] settings.xml 생성 (추가 XML: Maven 사용자 설정)
-          # -----------------------------------------------------------
+          # [3-3] settings.xml
           cat <<EOF > ${PROJECT_ROOT}/settings.xml
-          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                     xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
-            <localRepository/>
-            <interactiveMode>true</interactiveMode>
-            <offline>false</offline>
+            <localRepository/><interactiveMode>true</interactiveMode><offline>false</offline>
           </settings>
           EOF
 
-          # -----------------------------------------------------------
-          # [3-4] Java Source 생성
-          # -----------------------------------------------------------
+          # [3-4] Java Source
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/company/core/Application.java
           package com.company.core;
-          import org.slf4j.Logger;
-          import org.slf4j.LoggerFactory;
-          
-          /**
-           * Enterprise Application Entry Point.
-           */
+          import org.slf4j.Logger; import org.slf4j.LoggerFactory;
+          /** Enterprise App Entry Point */
           public class Application {
               private static final Logger logger = LoggerFactory.getLogger(Application.class);
-              
-              /**
-               * Get app status.
-               * @return status string
-               */
+              /** @return status string */
               public String getStatus() { return "Active"; }
-              
-              /**
-               * Main execution.
-               * @param args arguments
-               */
+              /** @param args arguments */
               public static void main(String[] args) {
                   logger.info("Starting Enterprise Service...");
                   logger.info("System Status: " + new Application().getStatus());
@@ -202,21 +139,13 @@ jobs:
 
           cat <<EOF > ${PROJECT_ROOT}/src/test/java/com/company/core/ApplicationTest.java
           package com.company.core;
-          import org.junit.jupiter.api.Test;
-          import static org.junit.jupiter.api.Assertions.*;
+          import org.junit.jupiter.api.Test; import static org.junit.jupiter.api.Assertions.*;
           class ApplicationTest {
-              @Test
-              void testStatus() {
-                  Application app = new Application();
-                  assertEquals("Active", app.getStatus());
-              }
+              @Test void testStatus() { assertEquals("Active", new Application().getStatus()); }
           }
           EOF
 
-          # -----------------------------------------------------------
-          # [3-5] Dockerfile 및 K8s 설정 생성
-          # -----------------------------------------------------------
-          # Dockerfile (호환성 개선 버전)
+          # [3-5] Dockerfile & K8s
           cat <<EOF > ${PROJECT_ROOT}/Dockerfile
           FROM eclipse-temurin:17-jre
           WORKDIR /app
@@ -224,67 +153,92 @@ jobs:
           ENTRYPOINT ["java", "-jar", "app.jar"]
           EOF
 
-          # K8s Deployment Template
           cat <<EOF > ${PROJECT_ROOT}/k8s/deployment.template.yaml
           apiVersion: apps/v1
           kind: Deployment
-          metadata:
-            name: enterprise-app
+          metadata: { name: enterprise-app }
           spec:
             replicas: 2
-            selector:
-              matchLabels:
-                app: enterprise-app
+            selector: { matchLabels: { app: enterprise-app } }
             template:
-              metadata:
-                labels:
-                  app: enterprise-app
+              metadata: { labels: { app: enterprise-app } }
               spec:
                 containers:
                 - name: enterprise-app
                   image: GHCR_IMAGE_PLACEHOLDER
-                  ports:
-                  - containerPort: 8080
-                  livenessProbe:
-                    exec:
-                      command: ["java", "-version"]
-                    initialDelaySeconds: 15
+                  ports: [{ containerPort: 8080 }]
+                  livenessProbe: { exec: { command: ["java", "-version"] }, initialDelaySeconds: 15 }
           EOF
 
-          echo "✅ All XML and Source files generated."
+          echo "✅ Project files generated."
 
       # ----------------------------------------------------------------
-      # 4. [NEW] 생성된 파일을 GitHub 저장소에 업로드 (Commit & Push)
+      # 4. [NEW] 소스 코드 백업 (Source Backup)
       # ----------------------------------------------------------------
-      - name: 🚀 Commit & Push Generated Files
+      - name: 📦 Backup Source Code
         run: |
-          # Git 사용자 설정
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_FILE="source_backup_${TIMESTAMP}.tar.gz"
+          
+          echo "🗄️ Creating Source Backup: $BACKUP_FILE"
+          
+          # enterprise-app 폴더 전체를 압축 (target 폴더 등 빌드 산출물 제외 가능)
+          tar --exclude='target' -czf $BACKUP_FILE ${PROJECT_ROOT}
+          
+          echo "SOURCE_BACKUP_NAME=$BACKUP_FILE" >> $GITHUB_ENV
+          
+          # 백업 파일 크기 확인
+          ls -lh $BACKUP_FILE
+
+      # 백업 파일을 GitHub Artifact로 업로드 (즉시 다운로드 가능하도록)
+      - name: 📤 Upload Source Backup Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Source-Backup-${{ github.run_id }}
+          path: ${{ env.SOURCE_BACKUP_NAME }}
+          retention-days: 30 # 30일간 보관
+
+      # ----------------------------------------------------------------
+      # 5. Git Commit & Push (GitHub 저장소에 반영)
+      # ----------------------------------------------------------------
+      - name: 🚀 Commit & Push to Repository
+        run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # 생성된 폴더 추가
           git add ${PROJECT_ROOT}
           
-          # 변경사항이 있을 경우에만 커밋
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            echo "Committing generated files..."
-            # [skip ci]를 추가하여 커밋으로 인해 워크플로우가 무한 반복되는 것을 방지
-            git commit -m "🚀 Auto-generated project files by GitHub Actions [skip ci]"
+            git commit -m "🚀 Auto-gen: Update project source [skip ci]"
             git push
-            echo "✅ Upload complete!"
+            echo "✅ Git Push complete!"
           fi
 
       # ----------------------------------------------------------------
-      # 5. 빌드 및 테스트 (업로드된 파일 기반)
+      # 6. 빌드 실행 (Maven Build)
       # ----------------------------------------------------------------
       - name: 🏗️ Maven Build & Verify
         working-directory: ${{ env.PROJECT_ROOT }}
         run: mvn clean verify -B -s settings.xml
 
       # ----------------------------------------------------------------
-      # 6. 아티팩트 및 테스트 결과 처리
+      # 7. [NEW] 빌드 결과 및 로그 덤프 (Dump Artifacts & Logs)
+      # ----------------------------------------------------------------
+      - name: 💾 Dump Build Artifacts & Logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Dump-${{ github.run_id }}
+          path: |
+            ${{ env.PROJECT_ROOT }}/target/*.jar
+            ${{ env.PROJECT_ROOT }}/target/maven-archiver/*.properties
+            ${{ env.PROJECT_ROOT }}/pom.xml
+            ${{ env.PROJECT_ROOT }}/settings.xml
+            ${{ env.PROJECT_ROOT }}/src/main/resources/*.xml
+          retention-days: 90 # 결과물은 90일간 보관
+
+      # ----------------------------------------------------------------
+      # 8. 보안 스캔 및 결과 리포팅
       # ----------------------------------------------------------------
       - name: 📊 Publish Test Results
         uses: EnricoMi/publish-unit-test-result-action@v2
@@ -302,12 +256,9 @@ jobs:
           severity: 'CRITICAL,HIGH'
 
       # ----------------------------------------------------------------
-      # 7. Docker 및 K8s 배포 준비
+      # 9. Docker 배포 및 K8s 설정 생성
       # ----------------------------------------------------------------
-      - name: 🐳 Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: 🐳 Login to GitHub Container Registry
+      - name: 🐳 Login & Build Docker Image
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -321,13 +272,13 @@ jobs:
           push: true
           tags: ghcr.io/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:latest
 
-      - name: ☸️ Generate Final K8s Manifest
+      - name: ☸️ Generate K8s Manifest
         run: |
           IMAGE_TAG="ghcr.io/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:latest"
           sed "s|GHCR_IMAGE_PLACEHOLDER|$IMAGE_TAG|g" ${PROJECT_ROOT}/k8s/deployment.template.yaml > ${PROJECT_ROOT}/k8s/deployment.final.yaml
 
-      - name: 📤 Upload K8s Manifest
+      - name: 📤 Dump K8s Manifest
         uses: actions/upload-artifact@v4
         with:
-          name: k8s-manifests
+          name: K8s-Manifest-Dump
           path: ${{ env.PROJECT_ROOT }}/k8s/deployment.final.yaml
