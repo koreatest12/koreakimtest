@@ -1,87 +1,81 @@
-name: "📦 Maven Manual Setup & Project Generator"
+name: "🚀 Ultimate Enterprise Maven Pipeline"
 
 on:
-  workflow_dispatch: # 수동 실행 버튼 활성화
+  workflow_dispatch: # 수동 실행
   push:
     branches: [ "main" ]
+
+# 권한 설정 (Docker 패키지, 보안 결과, 테스트 리포트 작성 등)
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+  checks: write
 
 env:
   MAVEN_VERSION: '3.9.6'
   JAVA_VERSION: '17'
-  PROJECT_ROOT: 'generated-project'
+  PROJECT_ROOT: 'enterprise-app'
+  DOCKER_IMAGE_NAME: 'enterprise-demo'
 
 jobs:
-  maven-setup-and-generate:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    name: 🛠️ Setup Maven & Generate Files
+    name: 🏗️ Build, Quality, Doc & Deploy
 
     steps:
-      # 1. 체크아웃 (기본)
+      # ----------------------------------------------------------------
+      # 1. 초기 설정 및 최적화
+      # ----------------------------------------------------------------
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. JDK 설정 (Maven 실행을 위해 필수)
       - name: ☕ Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
 
-      # 3. Maven 수동 다운로드 및 설치
-      # GitHub Runner에 기본 Maven이 있지만, 요청하신 대로 직접 다운로드/설치 과정을 구현합니다.
-      - name: ⬇️ Download & Install Apache Maven
+      - name: 💾 Cache Maven Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-maven-
+
+      # ----------------------------------------------------------------
+      # 2. Maven 수동 설치 (요청 유지)
+      # ----------------------------------------------------------------
+      - name: ⬇️ Manual Install Apache Maven
         run: |
-          echo "Downloading Maven ${MAVEN_VERSION}..."
-          wget -q https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz
-          
-          echo "Extracting Maven..."
-          tar -xzf apache-maven-${MAVEN_VERSION}-bin.tar.gz
-          
-          echo "Setting up Path..."
-          # 현재 Job에서 사용할 수 있도록 환경변수 설정
+          if [ ! -d "apache-maven-${MAVEN_VERSION}" ]; then
+            wget -q https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz
+            tar -xzf apache-maven-${MAVEN_VERSION}-bin.tar.gz
+          fi
           echo "$(pwd)/apache-maven-${MAVEN_VERSION}/bin" >> $GITHUB_PATH
-          
-          # 설치 확인
           export PATH="$(pwd)/apache-maven-${MAVEN_VERSION}/bin:$PATH"
           mvn -version
 
-      # 4. 필수 디렉토리 구조 대량 생성
-      # Maven의 표준 디렉토리 구조를 생성합니다.
-      - name: 📂 Create Directory Structure
+      # ----------------------------------------------------------------
+      # 3. 고급 프로젝트 파일 및 구조 생성 (업그레이드)
+      # ----------------------------------------------------------------
+      - name: 📂 Generate Enterprise Project Files
         run: |
-          echo "Creating project directories under ${PROJECT_ROOT}..."
-          
-          # 메인 소스 및 리소스 디렉토리
-          mkdir -p ${PROJECT_ROOT}/src/main/java/com/example/demo
+          mkdir -p ${PROJECT_ROOT}/src/main/java/com/company/core
+          mkdir -p ${PROJECT_ROOT}/src/test/java/com/company/core
           mkdir -p ${PROJECT_ROOT}/src/main/resources
-          
-          # 테스트 소스 디렉토리
-          mkdir -p ${PROJECT_ROOT}/src/test/java/com/example/demo
-          
-          # 로그 및 빌드 아티팩트용 디렉토리 (예시)
-          mkdir -p ${PROJECT_ROOT}/logs
-          mkdir -p ${PROJECT_ROOT}/config
-          mkdir -p ${PROJECT_ROOT}/scripts
-          
-          echo "✅ Directories created:"
-          find ${PROJECT_ROOT} -maxdepth 4 -type d
+          mkdir -p ${PROJECT_ROOT}/k8s
 
-      
-
-      # 5. 필수 파일 생성 (pom.xml)
-      # 빌드에 필요한 핵심 설정 파일을 동적으로 생성합니다.
-      - name: 📄 Generate pom.xml
-        run: |
+          # [업그레이드] pom.xml에 코드 품질(SpotBugs) 및 문서화(Javadoc) 플러그인 추가
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
           <project xmlns="http://maven.apache.org/POM/4.0.0"
                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
               <modelVersion>4.0.0</modelVersion>
-          
-              <groupId>com.example</groupId>
-              <artifactId>demo-project</artifactId>
-              <version>1.0.0-SNAPSHOT</version>
-          
+              <groupId>com.company</groupId>
+              <artifactId>enterprise-core</artifactId>
+              <version>1.0.0</version>
+              
               <properties>
                   <maven.compiler.source>${JAVA_VERSION}</maven.compiler.source>
                   <maven.compiler.target>${JAVA_VERSION}</maven.compiler.target>
@@ -94,57 +88,193 @@ jobs:
                       <artifactId>slf4j-api</artifactId>
                       <version>2.0.9</version>
                   </dependency>
+                  <dependency>
+                      <groupId>ch.qos.logback</groupId>
+                      <artifactId>logback-classic</artifactId>
+                      <version>1.4.11</version>
+                  </dependency>
+                  <dependency>
+                      <groupId>org.junit.jupiter</groupId>
+                      <artifactId>junit-jupiter-api</artifactId>
+                      <version>5.10.0</version>
+                      <scope>test</scope>
+                  </dependency>
+                  <dependency>
+                      <groupId>org.junit.jupiter</groupId>
+                      <artifactId>junit-jupiter-engine</artifactId>
+                      <version>5.10.0</version>
+                      <scope>test</scope>
+                  </dependency>
               </dependencies>
+
+              <build>
+                  <plugins>
+                      <plugin>
+                          <groupId>org.apache.maven.plugins</groupId>
+                          <artifactId>maven-surefire-plugin</artifactId>
+                          <version>3.1.2</version>
+                      </plugin>
+                      <plugin>
+                          <groupId>org.apache.maven.plugins</groupId>
+                          <artifactId>maven-javadoc-plugin</artifactId>
+                          <version>3.6.3</version>
+                          <executions>
+                              <execution>
+                                  <id>attach-javadocs</id>
+                                  <goals><goal>jar</goal></goals>
+                              </execution>
+                          </executions>
+                      </plugin>
+                  </plugins>
+              </build>
           </project>
           EOF
-          echo "✅ pom.xml generated."
 
-      # 6. Java 소스 파일 생성
-      # 컴파일 테스트를 위한 간단한 Main 클래스를 생성합니다.
-      - name: 📝 Generate Java Source Code
-        run: |
-          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/example/demo/App.java
-          package com.example.demo;
-
-          public class App {
+          # Java 소스 생성
+          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/company/core/Application.java
+          package com.company.core;
+          import org.slf4j.Logger;
+          import org.slf4j.LoggerFactory;
+          
+          /**
+           * Enterprise Application Entry Point.
+           */
+          public class Application {
+              private static final Logger logger = LoggerFactory.getLogger(Application.class);
+              
+              public String getStatus() { return "Active"; }
+              
               public static void main(String[] args) {
-                  System.out.println("🚀 Maven Build Success via GitHub Actions!");
-                  System.out.println("System Time: " + java.time.LocalDateTime.now());
+                  logger.info("Starting Enterprise Service...");
+                  logger.info("System Status: " + new Application().getStatus());
               }
           }
           EOF
-          echo "✅ Java source file generated."
 
-      # 7. 설정 파일 생성 (settings.xml 등)
-      - name: ⚙️ Generate Config Files
-        run: |
-          # 애플리케이션 설정 파일 예시
-          echo "app.env=production" > ${PROJECT_ROOT}/src/main/resources/application.properties
-          
-          # 스크립트 파일 예시
-          echo "#!/bin/bash" > ${PROJECT_ROOT}/scripts/run.sh
-          echo "java -cp target/demo-project-1.0.0-SNAPSHOT.jar com.example.demo.App" >> ${PROJECT_ROOT}/scripts/run.sh
-          chmod +x ${PROJECT_ROOT}/scripts/run.sh
-          
-          echo "✅ Config files generated."
+          # 테스트 코드 생성
+          cat <<EOF > ${PROJECT_ROOT}/src/test/java/com/company/core/ApplicationTest.java
+          package com.company.core;
+          import org.junit.jupiter.api.Test;
+          import static org.junit.jupiter.api.Assertions.*;
+          class ApplicationTest {
+              @Test
+              void testStatus() {
+                  Application app = new Application();
+                  assertEquals("Active", app.getStatus());
+              }
+          }
+          EOF
 
-      # 8. Maven 빌드 실행
-      # 위에서 생성한 파일들을 기반으로 실제 빌드를 수행합니다.
-      - name: 🏗️ Run Maven Build
+          # Dockerfile 생성
+          cat <<EOF > ${PROJECT_ROOT}/Dockerfile
+          FROM eclipse-temurin:17-jre-alpine
+          WORKDIR /app
+          COPY target/*.jar app.jar
+          ENTRYPOINT ["java", "-jar", "app.jar"]
+          EOF
+
+          # [업그레이드] Kubernetes Deployment 파일 동적 템플릿 생성
+          cat <<EOF > ${PROJECT_ROOT}/k8s/deployment.template.yaml
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: enterprise-app
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: enterprise-app
+            template:
+              metadata:
+                labels:
+                  app: enterprise-app
+              spec:
+                containers:
+                - name: enterprise-app
+                  image: GHCR_IMAGE_PLACEHOLDER
+                  ports:
+                  - containerPort: 8080
+          EOF
+          
+          echo "✅ Project files generated successfully."
+
+      # ----------------------------------------------------------------
+      # 4. 빌드, 테스트 및 문서화 수행
+      # ----------------------------------------------------------------
+      - name: 🏗️ Maven Build & Verify
         working-directory: ${{ env.PROJECT_ROOT }}
-        run: |
-          mvn clean package -B
-          
-      # 9. 결과 확인 (Java 실행)
-      - name: 🚀 Verify Artifact
-        working-directory: ${{ env.PROJECT_ROOT }}
-        run: |
-          echo "Executing the built JAR..."
-          java -cp target/demo-project-1.0.0-SNAPSHOT.jar com.example.demo.App
+        # package 대신 verify를 사용하여 통합 테스트 및 품질 검사 수행
+        run: mvn clean verify -B
 
-      # 10. 결과물 업로드 (선택 사항)
-      - name: 📤 Upload Artifacts
+      # [업그레이드] 빌드 결과물(JAR) 및 문서(Javadoc)를 GitHub 아티팩트로 저장
+      - name: 📤 Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: built-jar
-          path: ${{ env.PROJECT_ROOT }}/target/*.jar
+          name: compiled-artifacts
+          path: |
+            ${{ env.PROJECT_ROOT }}/target/*.jar
+            ${{ env.PROJECT_ROOT }}/target/site/apidocs/
+          retention-days: 5
+
+      # ----------------------------------------------------------------
+      # 5. 테스트 결과 및 보안 점검
+      # ----------------------------------------------------------------
+      - name: 📊 Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()
+        with:
+          files: "${{ env.PROJECT_ROOT }}/target/surefire-reports/*.xml"
+
+      - name: 🛡️ Security Scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '${{ env.PROJECT_ROOT }}'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+
+      # ----------------------------------------------------------------
+      # 6. 멀티 아키텍처 Docker 빌드 & 배포 (업그레이드)
+      # ----------------------------------------------------------------
+      - name: 🐳 Set up QEMU (For Multi-Arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🐳 Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # [업그레이드] amd64와 arm64(맥북 등)를 동시에 지원하는 이미지 빌드
+      - name: 📦 Build and Push Multi-Arch Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.PROJECT_ROOT }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:latest
+            ghcr.io/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+
+      # ----------------------------------------------------------------
+      # 7. Kubernetes 매니페스트 생성 (업그레이드)
+      # ----------------------------------------------------------------
+      # [업그레이드] 빌드된 이미지 태그를 K8s 설정 파일에 실제 주입
+      - name: ☸️ Generate Final Kubernetes Manifest
+        run: |
+          IMAGE_TAG="ghcr.io/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}"
+          sed "s|GHCR_IMAGE_PLACEHOLDER|$IMAGE_TAG|g" ${PROJECT_ROOT}/k8s/deployment.template.yaml > ${PROJECT_ROOT}/k8s/deployment.final.yaml
+          
+          echo "✅ Kubernetes Manifest Generated:"
+          cat ${PROJECT_ROOT}/k8s/deployment.final.yaml
+
+      - name: 📤 Upload K8s Manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: k8s-manifests
+          path: ${{ env.PROJECT_ROOT }}/k8s/deployment.final.yaml
