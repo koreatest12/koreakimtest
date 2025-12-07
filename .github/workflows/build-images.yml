@@ -1,308 +1,150 @@
-name: "🐧 All-in-One CI/CD (Maximum Execution) — EchoOps"
+name: "📦 Maven Manual Setup & Project Generator"
 
-# 1. 트리거 설정
 on:
+  workflow_dispatch: # 수동 실행 버튼 활성화
   push:
-    branches: [ main, master, '**/create-and-manage-linux-images**' ]
-    tags: 
-      - 'v[0-9]+.[0-9]+.[0-9]+'
-  pull_request:
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: 'Image tag for Containers (e.g., latest)'
-        required: false
-        default: 'latest'
-      environment:
-        description: 'Deployment environment'
-        required: false
-        default: 'Staging'
-        type: choice
-        options:
-          - Staging
-          - Production
-          
-permissions:
-  contents: read
-  packages: write 
-  id-token: write
-  deployments: write
+    branches: [ "main" ]
 
 env:
-  REGISTRY: ghcr.io
-  ECHO_PREFIX: "[EchoOps][CI/CD]"
+  MAVEN_VERSION: '3.9.6'
+  JAVA_VERSION: '17'
+  PROJECT_ROOT: 'generated-project'
 
 jobs:
-  # 1. 컨테이너 이미지 빌드, 보안 검증 및 푸시
-  build-and-push-images:
+  maven-setup-and-generate:
     runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 5
-      fail-fast: false
-      matrix: # 스킵 없이 모든 항목 무조건 실행
-        include:
-          - name: ubuntu
-            type: container
-            context: ./docker/ubuntu
-            dockerfile: ./docker/ubuntu/Dockerfile
-          - name: ubi
-            type: container
-            context: ./docker/ubi
-            dockerfile: ./docker/ubi/Dockerfile
-    
+    name: 🛠️ Setup Maven & Generate Files
+
     steps:
-      - name: Checkout Code
+      # 1. 체크아웃 (기본)
+      - name: 📥 Checkout Repository
         uses: actions/checkout@v4
+
+      # 2. JDK 설정 (Maven 실행을 위해 필수)
+      - name: ☕ Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+
+      # 3. Maven 수동 다운로드 및 설치
+      # GitHub Runner에 기본 Maven이 있지만, 요청하신 대로 직접 다운로드/설치 과정을 구현합니다.
+      - name: ⬇️ Download & Install Apache Maven
+        run: |
+          echo "Downloading Maven ${MAVEN_VERSION}..."
+          wget -q https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz
+          
+          echo "Extracting Maven..."
+          tar -xzf apache-maven-${MAVEN_VERSION}-bin.tar.gz
+          
+          echo "Setting up Path..."
+          # 현재 Job에서 사용할 수 있도록 환경변수 설정
+          echo "$(pwd)/apache-maven-${MAVEN_VERSION}/bin" >> $GITHUB_PATH
+          
+          # 설치 확인
+          export PATH="$(pwd)/apache-maven-${MAVEN_VERSION}/bin:$PATH"
+          mvn -version
+
+      # 4. 필수 디렉토리 구조 대량 생성
+      # Maven의 표준 디렉토리 구조를 생성합니다.
+      - name: 📂 Create Directory Structure
+        run: |
+          echo "Creating project directories under ${PROJECT_ROOT}..."
+          
+          # 메인 소스 및 리소스 디렉토리
+          mkdir -p ${PROJECT_ROOT}/src/main/java/com/example/demo
+          mkdir -p ${PROJECT_ROOT}/src/main/resources
+          
+          # 테스트 소스 디렉토리
+          mkdir -p ${PROJECT_ROOT}/src/test/java/com/example/demo
+          
+          # 로그 및 빌드 아티팩트용 디렉토리 (예시)
+          mkdir -p ${PROJECT_ROOT}/logs
+          mkdir -p ${PROJECT_ROOT}/config
+          mkdir -p ${PROJECT_ROOT}/scripts
+          
+          echo "✅ Directories created:"
+          find ${PROJECT_ROOT} -maxdepth 4 -type d
+
       
-      - name: Set up Multi-Arch Tools (QEMU & Buildx)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: all
-      - uses: docker/setup-buildx-action@v3
-        
-      - name: Lint Dockerfile (Hadolint)
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: ${{ matrix.dockerfile }}
-          failure-threshold: warning
-          ignore: DL3005,DL3007 # Hadolint 오류 우회
-        continue-on-error: true 
 
-      - name: Prepare Image Metadata & Build Params
-        id: meta
+      # 5. 필수 파일 생성 (pom.xml)
+      # 빌드에 필요한 핵심 설정 파일을 동적으로 생성합니다.
+      - name: 📄 Generate pom.xml
         run: |
-          IMAGE_NAME="${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.name }}"
-          SHA_TAG="${IMAGE_NAME}:sha-${GITHUB_SHA}"
-          TAGS="${SHA_TAG}"
+          cat <<EOF > ${PROJECT_ROOT}/pom.xml
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+              <modelVersion>4.0.0</modelVersion>
           
-          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then TAGS="${TAGS},${IMAGE_NAME}:latest"; fi
-          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then TAGS="${TAGS},${IMAGE_NAME}:${GITHUB_REF_NAME}"; fi
+              <groupId>com.example</groupId>
+              <artifactId>demo-project</artifactId>
+              <version>1.0.0-SNAPSHOT</version>
           
-          echo "image_sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
-          echo "image_tags=${TAGS}" >> "$GITHUB_OUTPUT"
+              <properties>
+                  <maven.compiler.source>${JAVA_VERSION}</maven.compiler.source>
+                  <maven.compiler.target>${JAVA_VERSION}</maven.compiler.target>
+                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+              </properties>
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          
-      # A. Pull Request 및 Local Test용 빌드 (Load 모드)
-      - name: Build Image for Local Test (Load Only)
-        id: build_load
-        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64 # 단일 아키텍처만 로드
-          push: false 
-          load: true 
-          tags: ${{ steps.meta.outputs.image_sha_tag }} # SHA 태그만 로드
-          cache-from: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }}
-          cache-to: type=gha,mode=max
+              <dependencies>
+                  <dependency>
+                      <groupId>org.slf4j</groupId>
+                      <artifactId>slf4j-api</artifactId>
+                      <version>2.0.9</version>
+                  </dependency>
+              </dependencies>
+          </project>
+          EOF
+          echo "✅ pom.xml generated."
 
-      # B. Push 및 배포용 빌드 (Push 모드)
-      - name: Build and Push Multi-Arch Image (Push Only)
-        id: build_push
-        if: github.event_name == 'push'
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64 # Multi-Arch 푸시
-          push: true
-          load: false
-          tags: ${{ steps.meta.outputs.image_tags }}
-          cache-from: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }}
-          cache-to: type=gha,type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/buildcache:${{ matrix.name }},mode=max
-
-      # 2. Smoke Test (Skip 없이 무조건 실행)
-      - name: Smoke Test Image 
+      # 6. Java 소스 파일 생성
+      # 컴파일 테스트를 위한 간단한 Main 클래스를 생성합니다.
+      - name: 📝 Generate Java Source Code
         run: |
-          IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
+          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/example/demo/App.java
+          package com.example.demo;
+
+          public class App {
+              public static void main(String[] args) {
+                  System.out.println("🚀 Maven Build Success via GitHub Actions!");
+                  System.out.println("System Time: " + java.time.LocalDateTime.now());
+              }
+          }
+          EOF
+          echo "✅ Java source file generated."
+
+      # 7. 설정 파일 생성 (settings.xml 등)
+      - name: ⚙️ Generate Config Files
+        run: |
+          # 애플리케이션 설정 파일 예시
+          echo "app.env=production" > ${PROJECT_ROOT}/src/main/resources/application.properties
           
-          # Load 모드 성공 시 (PR/Dispatch) 로컬 이미지 테스트
-          if [[ "${{ steps.build_load.outcome }}" == "success" ]]; then
-            echo "${{ env.ECHO_PREFIX}} Running local smoke test on loaded image: ${IMAGE}"
-            docker run --rm "${IMAGE}" bash -lc "
-              test -f /etc/app/permissions.conf;
-              test -d /opt/app/data;
-              test -d /var/log/app;
-              echo 'Smoke test passed.';
-            "
-          # Push 모드 성공 시 (Push) GHCR에서 당겨와 테스트
-          elif [[ "${{ steps.build_push.outcome }}" == "success" ]]; then
-            echo "${{ env.ECHO_PREFIX}} Running remote smoke test on pushed image: ${IMAGE}"
-            docker pull "${IMAGE}"
-            docker run --rm "${IMAGE}" bash -lc "
-              test -f /etc/app/permissions.conf;
-              test -d /opt/app/data;
-              test -d /var/log/app;
-              echo 'Smoke test passed.';
-            "
-          else
-            echo "${{ env.ECHO_PREFIX}} Skipping smoke test as neither load nor push was executed successfully."
-          fi
+          # 스크립트 파일 예시
+          echo "#!/bin/bash" > ${PROJECT_ROOT}/scripts/run.sh
+          echo "java -cp target/demo-project-1.0.0-SNAPSHOT.jar com.example.demo.App" >> ${PROJECT_ROOT}/scripts/run.sh
+          chmod +x ${PROJECT_ROOT}/scripts/run.sh
           
-      # 3. Trivy Security Gate 및 SBOM 생성 (Skip 없이 무조건 실행)
-      - name: Scan Image for Vulnerabilities (Trivy Security Gate)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ${{ steps.meta.outputs.image_sha_tag }}
-          format: table
-          severity: CRITICAL,HIGH 
-          exit-code: 1 
-          ignore-unfixed: true
+          echo "✅ Config files generated."
+
+      # 8. Maven 빌드 실행
+      # 위에서 생성한 파일들을 기반으로 실제 빌드를 수행합니다.
+      - name: 🏗️ Run Maven Build
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          mvn clean package -B
           
-      - name: Generate and Upload SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ${{ steps.meta.outputs.image_sha_tag }}
-          format: cyclonedx
-          output: sbom-${{ matrix.name }}.json
-          scan-type: image
-          
-      - name: Upload SBOM Artifact
+      # 9. 결과 확인 (Java 실행)
+      - name: 🚀 Verify Artifact
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          echo "Executing the built JAR..."
+          java -cp target/demo-project-1.0.0-SNAPSHOT.jar com.example.demo.App
+
+      # 10. 결과물 업로드 (선택 사항)
+      - name: 📤 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}-sbom-${{ github.run_number }}
-          path: sbom-${{ matrix.name }}.json
-          retention-days: 30 
-
-      # 4. 아티팩트 저장 및 백업
-      - name: Save Image and Upload to Artifacts (Short-term)
-        if: steps.build_load.outcome == 'success'
-        run: |
-          IMAGE="${{ steps.meta.outputs.image_sha_tag }}"
-          TAR_NAME="${{ matrix.name }}.tar.gz"
-          docker save "${IMAGE}" | gzip > "${TAR_NAME}"
-      - name: Upload Image Artifact
-        if: steps.build_load.outcome == 'success'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.name }}-image-${{ github.run_number }}
-          path: ${{ matrix.name }}.tar.gz
-          retention-days: 7
-
-      - name: Long-term Image Backup to Cloud Storage
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        run: |
-          echo "${{ env.ECHO_PREFIX}} Backing up ${{ matrix.name }}.tar.gz to S3/GCS..."
-
-  # 2. 홈페이지 빌드 Job
-  build-website:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Website Code
-        uses: actions/checkout@v4
-      
-      - name: Set up Node.js for Frontend Build
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20' 
-          
-      - name: Install Dependencies and Build Frontend
-        run: |
-          echo "${{ env.ECHO_PREFIX}} Building website..."
-          cd ./web # 홈페이지 소스가 있는 디렉토리 가정 (수정 필요)
-          npm install
-          npm run build 
-          
-      - name: Upload Website Artifact (Build Output)
-        uses: actions/upload-artifact@v4
-        with:
-          name: website-build-${{ github.run_number }}
-          path: ./web/dist # 빌드 결과물이 저장되는 경로 가정 (수정 필요)
-          retention-days: 7
-
-  # 3. 컨테이너 배포 (스테이징)
-  deploy-staging-containers:
-    needs: [build-and-push-images]
-    if: |
-      success() && (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) || 
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'Staging')
-      )
-    runs-on: ubuntu-latest
-    environment: Staging 
-    steps:
-      - name: Determine Image Tag
-        id: tag
-        run: |
-          TAG='${{ github.sha }}'
-          
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            TAG='latest'
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/tags/"* ]]; then
-            TAG="${{ github.ref_name }}"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TAG="${{ github.event.inputs.image_tag }}"
-          fi
-          echo "DEPLOY_TAG=${TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy Image to Staging Environment
-        run: |
-          echo "${{ env.ECHO_PREFIX}} Deploying Container ${{ steps.tag.outputs.DEPLOY_TAG }} to Staging."
-
-  # 4. 홈페이지 배포
-  deploy-website:
-    needs: [build-website]
-    if: needs.build-website.result == 'success'
-    runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }} 
-    steps:
-      - name: Download Website Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: website-build-${{ github.run_number }}
-          path: ./website-deploy
-          
-      # 홈페이지 스테이징 배포 (Push/Dispatch Staging)
-      - name: Deploy Website to Staging (S3/Cloudflare)
-        if: github.event.inputs.environment == 'Staging' || github.ref == 'refs/heads/main'
-        run: |
-          echo "${{ env.ECHO_PREFIX}} Deploying Website to Staging Host."
-
-      # 홈페이지 운영 배포 (Dispatch Production/Tag Push)
-      - name: Deploy Website to Production (S3/Cloudflare)
-        if: github.event.inputs.environment == 'Production' || startsWith(github.ref, 'refs/tags/')
-        run: |
-          echo "${{ env.ECHO_PREFIX}} Deploying Website to Production Host."
-
-
-  # 5. 컨테이너 운영 배포 및 스케일 아웃
-  deploy-production-containers:
-    needs: [deploy-staging-containers]
-    if: |
-      success() && (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))) ||
-        (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'Production')
-      )
-    runs-on: ubuntu-latest
-    environment: 
-      name: Production 
-      url: https://your-production-url.com
-    steps:
-      - name: Determine Image Tag
-        id: tag
-        run: |
-          TAG='${{ github.sha }}'
-          
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            TAG='latest'
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/tags/"* ]]; then
-            TAG="${{ github.ref_name }}"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            TAG="${{ github.event.inputs.image_tag }}"
-          fi
-          echo "DEPLOY_TAG=${TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Deploy Image to Production Environment
-        run: |
-          echo "${{ env.ECHO_PREFIX}} Deploying Container ${{ steps.tag.outputs.DEPLOY_TAG }} to Production."
-          
-      - name: Scale up Server Replicas
-        run: |
-          echo "${{ env.ECHO_PREFIX}} Scaling up deployment to desired capacity (e.g., 5 replicas)."
+          name: built-jar
+          path: ${{ env.PROJECT_ROOT }}/target/*.jar
