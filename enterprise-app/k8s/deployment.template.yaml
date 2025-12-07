@@ -11,4 +11,3 @@ spec:
       - name: enterprise-app
         image: GHCR_IMAGE_PLACEHOLDER
         ports: [{ containerPort: 8080 }]
-        livenessProbe: { exec: { command: ["java", "-version"] }, initialDelaySeconds: 15 }
