@@ -1,11 +1,14 @@
-name: "🚀 Auto-Gen (Images included), Backup & Deploy"
+name: "🚀 Scheduled Auto-Gen, Expert Report & Deploy"
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 수동 실행
+  schedule:
+    - cron: '*/5 * * * *' # 5분 단위 자동 실행
   push:
     branches: [ "main" ]
     paths-ignore:
       - 'enterprise-app/**'
+      - 'reports/**' # 무한 루프 방지
 
 permissions:
   contents: write
@@ -19,16 +22,21 @@ env:
   PROJECT_ROOT: 'enterprise-app'
   DOCKER_IMAGE_NAME: 'enterprise-demo'
   BACKUP_DIR: 'backups'
+  REPORT_DIR: 'reports'
+  TZ: 'Asia/Seoul'
 
 jobs:
   full-execution:
     runs-on: ubuntu-latest
-    name: 🛠️ Gen Images, Code, Build & Dump
+    name: 🛠️ Scheduled Build & Analysis
 
     steps:
       # ----------------------------------------------------------------
-      # 1. 환경 설정 및 캐시
+      # 1. 초기화 및 시간 설정
       # ----------------------------------------------------------------
+      - name: 🕒 Set Start Time
+        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -60,18 +68,18 @@ jobs:
           export PATH="$(pwd)/apache-maven-${MAVEN_VERSION}/bin:$PATH"
 
       # ----------------------------------------------------------------
-      # 3. 프로젝트 파일 생성 (코드, XML, Docker, K8s)
+      # 3. 프로젝트 파일 생성
       # ----------------------------------------------------------------
       - name: 📂 Generate Project Structure & Files
         run: |
-          echo "🛠️ Generating Project..."
           mkdir -p ${PROJECT_ROOT}/src/main/java/com/company/core
           mkdir -p ${PROJECT_ROOT}/src/test/java/com/company/core
-          mkdir -p ${PROJECT_ROOT}/src/main/resources/customer_images # [NEW] 이미지 저장 폴더
+          mkdir -p ${PROJECT_ROOT}/src/main/resources/customer_images
           mkdir -p ${PROJECT_ROOT}/k8s
           mkdir -p ${PROJECT_ROOT}/${BACKUP_DIR}
+          mkdir -p ${PROJECT_ROOT}/${REPORT_DIR}
 
-          # [3-1] pom.xml
+          # pom.xml
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
           <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -93,16 +101,12 @@ jobs:
               <build>
                   <plugins>
                       <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.1.2</version></plugin>
-                      <plugin>
-                          <groupId>org.apache.maven.plugins</groupId><artifactId>maven-javadoc-plugin</artifactId><version>3.6.3</version>
-                          <configuration><encoding>UTF-8</encoding><doclint>none</doclint><failOnError>false</failOnError></configuration>
-                      </plugin>
                   </plugins>
               </build>
           </project>
           EOF
 
-          # [3-2] logback.xml
+          # logback.xml
           cat <<EOF > ${PROJECT_ROOT}/src/main/resources/logback.xml
           <configuration>
             <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
@@ -112,7 +116,7 @@ jobs:
           </configuration>
           EOF
 
-          # [3-3] settings.xml
+          # settings.xml
           cat <<EOF > ${PROJECT_ROOT}/settings.xml
           <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                     xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
@@ -120,16 +124,13 @@ jobs:
           </settings>
           EOF
 
-          # [3-4] Java Source
+          # Java Code
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/company/core/Application.java
           package com.company.core;
           import org.slf4j.Logger; import org.slf4j.LoggerFactory;
-          /** Enterprise App Entry Point */
           public class Application {
               private static final Logger logger = LoggerFactory.getLogger(Application.class);
-              /** @return status string */
               public String getStatus() { return "Active"; }
-              /** @param args arguments */
               public static void main(String[] args) {
                   logger.info("Starting Enterprise Service...");
                   logger.info("System Status: " + new Application().getStatus());
@@ -145,14 +146,7 @@ jobs:
           }
           EOF
 
-          # [3-5] Dockerfile & K8s
-          cat <<EOF > ${PROJECT_ROOT}/Dockerfile
-          FROM eclipse-temurin:17-jre
-          WORKDIR /app
-          COPY target/*.jar app.jar
-          ENTRYPOINT ["java", "-jar", "app.jar"]
-          EOF
-
+          # K8s Template
           cat <<EOF > ${PROJECT_ROOT}/k8s/deployment.template.yaml
           apiVersion: apps/v1
           kind: Deployment
@@ -167,112 +161,39 @@ jobs:
                 - name: enterprise-app
                   image: GHCR_IMAGE_PLACEHOLDER
                   ports: [{ containerPort: 8080 }]
-                  livenessProbe: { exec: { command: ["java", "-version"] }, initialDelaySeconds: 15 }
           EOF
 
-          echo "✅ Basic files generated."
-
       # ----------------------------------------------------------------
-      # 4. [NEW] 가상 고객 정보 이미지 대량 생성 (Bulk Image Gen)
+      # 4. 이미지 대량 생성
       # ----------------------------------------------------------------
       - name: 🖼️ Generate Bulk Customer Images
         run: |
-          echo "🎨 Installing ImageMagick for generation..."
           sudo apt-get update && sudo apt-get install -y imagemagick
-
           IMAGE_DIR="${PROJECT_ROOT}/src/main/resources/customer_images"
-          echo "📂 Generating images in: $IMAGE_DIR"
-
-          # 50개의 가상 고객 이미지 생성 루프
+          
+          # 50개 이미지 생성
           for i in {1..50}; do
-            # 랜덤 데이터 생성
             CUSTOMER_ID=$(shuf -i 1000000-9999999 -n 1)
-            R=$((RANDOM % 255))
-            G=$((RANDOM % 255))
-            B=$((RANDOM % 255))
-            BG_COLOR="rgb($R,$G,$B)"
+            R=$((RANDOM % 255)); G=$((RANDOM % 255)); B=$((RANDOM % 255))
             FILENAME="$IMAGE_DIR/customer_profile_$(printf "%03d" $i).png"
-
-            # ImageMagick을 사용하여 이미지 생성 (ID 카드 스타일)
-            convert -size 400x250 xc:white \
-              -fill "$BG_COLOR" -draw "rectangle 0,0 400,50" \
-              -fill white -pointsize 20 -gravity North -annotate +0+15 "Virtual Customer Card" \
-              -gravity Center \
-              -fill black -pointsize 24 -annotate +0-20 "ID: $CUSTOMER_ID" \
-              -fill gray -pointsize 14 -annotate +0+20 "Account Type: Premium" \
-              -fill black -pointsize 12 -gravity South -annotate +0+10 "Generated by GitHub Actions" \
-              -bordercolor black -border 2 \
-              "$FILENAME"
             
-            # 생성 로그 (5개마다 한 번씩만 출력하여 로그 과부하 방지)
-            if (( $i % 10 == 0 )); then
-                echo "✅ Generated $i/50 images..."
-            fi
+            convert -size 400x250 xc:white \
+              -fill "rgb($R,$G,$B)" -draw "rectangle 0,0 400,50" \
+              -fill black -pointsize 24 -annotate +0-20 "ID: $CUSTOMER_ID" \
+              -bordercolor black -border 2 "$FILENAME"
           done
-          
-          echo "✨ Total 50 customer images generated successfully."
-          ls -lh $IMAGE_DIR | head -n 10
+          echo "✅ Generated 50 images."
 
       # ----------------------------------------------------------------
-      # 5. 소스 코드 백업 (이미지 포함)
+      # 5. Maven 빌드 및 로그 캡처
       # ----------------------------------------------------------------
-      - name: 📦 Backup Source Code
-        run: |
-          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-          BACKUP_FILE="source_backup_${TIMESTAMP}.tar.gz"
-          
-          # enterprise-app 전체(생성된 이미지 포함) 압축
-          tar --exclude='target' -czf $BACKUP_FILE ${PROJECT_ROOT}
-          
-          echo "SOURCE_BACKUP_NAME=$BACKUP_FILE" >> $GITHUB_ENV
-
-      - name: 📤 Upload Source Backup
-        uses: actions/upload-artifact@v4
-        with:
-          name: Source-Backup-With-Images-${{ github.run_id }}
-          path: ${{ env.SOURCE_BACKUP_NAME }}
-          retention-days: 30
-
-      # ----------------------------------------------------------------
-      # 6. Git Commit & Push (이미지 포함)
-      # ----------------------------------------------------------------
-      - name: 🚀 Commit & Push to Repository
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${PROJECT_ROOT}
-          
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "🚀 Update: Added 50 virtual customer images [skip ci]"
-            git push
-            echo "✅ Git Push complete!"
-          fi
-
-      # ----------------------------------------------------------------
-      # 7. Maven 빌드 (이미지를 JAR에 포함)
-      # ----------------------------------------------------------------
-      - name: 🏗️ Maven Build & Verify
+      - name: 🏗️ Maven Build (With Log Capture)
         working-directory: ${{ env.PROJECT_ROOT }}
-        run: mvn clean verify -B -s settings.xml
+        run: |
+          mvn clean verify -B -s settings.xml | tee build_log.txt
 
       # ----------------------------------------------------------------
-      # 8. 빌드 및 이미지 덤프
-      # ----------------------------------------------------------------
-      - name: 💾 Dump Artifacts, Logs & Images
-        uses: actions/upload-artifact@v4
-        with:
-          name: Full-Dump-${{ github.run_id }}
-          path: |
-            ${{ env.PROJECT_ROOT }}/target/*.jar
-            ${{ env.PROJECT_ROOT }}/src/main/resources/customer_images/*.png
-            ${{ env.PROJECT_ROOT }}/pom.xml
-            ${{ env.PROJECT_ROOT }}/src/main/resources/logback.xml
-          retention-days: 90
-
-      # ----------------------------------------------------------------
-      # 9. 보안 스캔 & 배포
+      # 6. 보안 스캔
       # ----------------------------------------------------------------
       - name: 🛡️ Security Scan (Trivy)
         uses: aquasecurity/trivy-action@master
@@ -280,23 +201,110 @@ jobs:
           scan-type: 'fs'
           scan-ref: '${{ env.PROJECT_ROOT }}'
           format: 'table'
+          output: 'trivy_report.txt'
           exit-code: '0'
           severity: 'CRITICAL,HIGH'
 
-      - name: 🐳 Docker Build & Push
-        uses: docker/build-push-action@v5
-        with:
-          context: ${{ env.PROJECT_ROOT }}
-          push: false # 데모용이므로 푸시는 생략하거나 true로 변경
-          tags: ghcr.io/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:latest
-
-      - name: ☸️ Generate K8s Manifest
+      # ----------------------------------------------------------------
+      # 7. 전문가 수준 결과 보고서 생성 (에러 유발 태그 제거됨)
+      # ----------------------------------------------------------------
+      - name: 📝 Generate Professional Analysis Report
         run: |
-          IMAGE_TAG="ghcr.io/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:latest"
-          sed "s|GHCR_IMAGE_PLACEHOLDER|$IMAGE_TAG|g" ${PROJECT_ROOT}/k8s/deployment.template.yaml > ${PROJECT_ROOT}/k8s/deployment.final.yaml
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          CURRENT_DATE=$(date '+%Y-%m-%d %H:%M:%S')
+          REPORT_FILE="${PROJECT_ROOT}/${REPORT_DIR}/REPORT_$(date '+%Y%m%d_%H%M').md"
+          
+          # 시스템 정보 추출
+          CPU_INFO=$(lscpu | grep 'Model name' | awk -F: '{print $2}' | xargs)
+          MEM_INFO=$(free -h | grep Mem | awk '{print $2}')
+          DISK_USAGE=$(du -sh ${PROJECT_ROOT} | awk '{print $1}')
+          
+          # 빌드 결과 분석
+          BUILD_STATUS=$(grep "BUILD SUCCESS" ${PROJECT_ROOT}/build_log.txt && echo "✅ SUCCESS" || echo "❌ FAILURE")
+          TEST_COUNT=$(grep "Tests run:" ${PROJECT_ROOT}/build_log.txt | tail -1 | awk '{print $3}' | tr -d ',')
+          
+          # 이미지 리소스 분석
+          IMG_COUNT=$(ls ${PROJECT_ROOT}/src/main/resources/customer_images/*.png | wc -l)
+          IMG_SIZE=$(du -sh ${PROJECT_ROOT}/src/main/resources/customer_images | awk '{print $1}')
+          
+          # 보고서 작성
+          echo "# 📊 Enterprise Build & Resource Analysis Report" > "$REPORT_FILE"
+          echo "### 📅 Execution Date: $CURRENT_DATE (KST)" >> "$REPORT_FILE"
+          echo "---" >> "$REPORT_FILE"
+          
+          echo "## 1️⃣ Executive Summary" >> "$REPORT_FILE"
+          echo "| Metric | Value |" >> "$REPORT_FILE"
+          echo "| :--- | :--- |" >> "$REPORT_FILE"
+          echo "| **Build Status** | **$BUILD_STATUS** |" >> "$REPORT_FILE"
+          echo "| **Duration** | ${DURATION} seconds |" >> "$REPORT_FILE"
+          echo "| **Triggered By** | ${{ github.event_name }} |" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          
+          echo "## 2️⃣ Infrastructure" >> "$REPORT_FILE"
+          echo "- **CPU**: $CPU_INFO" >> "$REPORT_FILE"
+          echo "- **Memory**: $MEM_INFO" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          
+          echo "## 3️⃣ Resource Analytics" >> "$REPORT_FILE"
+          echo "- **Generated Images**: $IMG_COUNT files" >> "$REPORT_FILE"
+          echo "- **Total Image Size**: $IMG_SIZE" >> "$REPORT_FILE"
+          echo "" >> "$REPORT_FILE"
+          
+          echo "## 4️⃣ Security Summary" >> "$REPORT_FILE"
+          echo "\`\`\`text" >> "$REPORT_FILE"
+          cat trivy_report.txt | head -n 20 >> "$REPORT_FILE"
+          echo "..." >> "$REPORT_FILE"
+          echo "\`\`\`" >> "$REPORT_FILE"
+          
+          echo "✅ Report Generated: $REPORT_FILE"
+          cat "$REPORT_FILE"
 
-      - name: 📤 Dump K8s Manifest
+      # ----------------------------------------------------------------
+      # 8. 백업 및 업로드 (Commit & Push)
+      # ----------------------------------------------------------------
+      - name: 🚀 Commit & Push (Code + Images + Report)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 충돌 방지: Pull 수행
+          git pull --rebase origin main || echo "No remote changes to merge"
+          
+          git add ${PROJECT_ROOT}
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            TIMESTAMP=$(date '+%Y-%m-%d %H:%M')
+            git commit -m "🚀 Auto-Sync: 50 Images & Expert Report ($TIMESTAMP) [skip ci]"
+            git push
+            echo "✅ Data & Report pushed successfully!"
+          fi
+
+      - name: 📤 Dump All Artifacts (Includes Report)
         uses: actions/upload-artifact@v4
         with:
-          name: K8s-Manifest-Dump
-          path: ${{ env.PROJECT_ROOT }}/k8s/deployment.final.yaml
+          name: Ultimate-Dump-${{ github.run_id }}
+          path: |
+            ${{ env.PROJECT_ROOT }}/reports/*.md
+            ${{ env.PROJECT_ROOT }}/target/*.jar
+            ${{ env.PROJECT_ROOT }}/src/main/resources/customer_images/*.png
+            trivy_report.txt
+          retention-days: 90
+
+      # ----------------------------------------------------------------
+      # 9. Docker 배포
+      # ----------------------------------------------------------------
+      - name: 🐳 Docker Build & Push
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          
+      - uses: docker/build-push-action@v5
+        with:
+          context: ${{ env.PROJECT_ROOT }}
+          push: true
+          tags: ghcr.io/${{ github.repository }}/${{ env.DOCKER_IMAGE_NAME }}:latest
