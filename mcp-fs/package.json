@@ -11,6 +11,6 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@modelcontextprotocol/server-filesystem": "^2025.8.21"
+    "@modelcontextprotocol/server-filesystem": "^2025.12.18"
   }
 }
