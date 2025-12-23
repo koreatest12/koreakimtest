@@ -66,6 +66,26 @@ Multiple Model Context Protocol servers providing tools for Claude integration.
 - Command-line interface for usage reporting
 - Imports and uses functions from `fetchAnthropicUsage.ts`
 
+**mcpServerManager.ts** - MCP Server Management:
+- Function: `listMCPServers()` - Lists all configured MCP servers
+- Function: `installNpmMCPServer(packageName, serverName, serverPath?)` - Install npm-based MCP server
+- Function: `installPythonMCPServer(serverPath, serverName, requirementsPath?)` - Install Python-based MCP server
+- Function: `upgradeNpmMCPServer(packageName, serverName)` - Upgrade npm-based MCP server
+- Function: `upgradePythonMCPServer(serverPath, serverName, requirementsPath?)` - Upgrade Python-based MCP server
+- Function: `checkNpmPackageUpdate(packageName)` - Check for available updates
+- Function: `removeMCPServer(serverName)` - Remove server from configuration
+- Function: `getMCPServerInfo(serverName)` - Get detailed server information
+- **Auto-detection**: Automatically detects server type (npm/python/java/other)
+- **Virtual environments**: Automatically creates/manages Python virtual environments
+- **Configuration**: Manages `.mcp.json` file programmatically
+
+**mcpServerCli.ts** - MCP Server Management CLI:
+- Commands: `list`, `install`, `upgrade`, `check`, `remove`, `info`, `help`
+- **Usage**: `npm run mcp-<command> [args]`
+- **Installation**: Supports both npm and Python servers with automatic dependency management
+- **Upgrading**: Updates packages and dependencies for existing servers
+- See `docs/MCP_SERVER_MANAGER.md` for detailed usage
+
 ## MCP Configuration
 
 All MCP servers are configured in `.mcp.json` at the repository root:
