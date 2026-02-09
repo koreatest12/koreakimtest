@@ -34,7 +34,15 @@ def load_db_config(target: str) -> DbConfig:
     user = os.getenv("DB_USER", defaults.get("user"))
     password = os.getenv("DB_PASSWORD", defaults.get("password"))
     host = os.getenv("DB_HOST", defaults.get("host"))
-    port = int(os.getenv("DB_PORT", defaults.get("port") or 0)) or None
+    # Parse optional DB_PORT safely: treat missing/empty as None/default
+    raw_port = os.getenv("DB_PORT")
+    if raw_port is None or raw_port.strip() == "":
+        port = defaults.get("port")
+    else:
+        try:
+            port = int(raw_port) or None
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid DB_PORT: {raw_port!r}") from exc
     database = os.getenv("DB_NAME", defaults.get("database"))
     sqlite_path = os.getenv("SQLITE_PATH", defaults.get("sqlite_path"))
     duckdb_path = os.getenv("DUCKDB_PATH", defaults.get("duckdb_path"))
