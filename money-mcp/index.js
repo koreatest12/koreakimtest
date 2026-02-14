@@ -5,7 +5,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 const server = new Server(
   {
     name: "money-mcp",
-    version: "1.2.0"
+    version: "1.3.0"
   },
   {
     capabilities: {
@@ -86,7 +86,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "salary_calculator",
-      description: "급여 실수령액 계산 - 월급/연봉에서 4대보험 및 소득세 공제 후 실수령액 계산 (2024년 기준)",
+      description: "급여 실수령액 계산 - 월급/연봉에서 4대보험 및 소득세 공제 후 실수령액 계산 (2026년 기준)",
       inputSchema: {
         type: "object",
         properties: {
@@ -95,6 +95,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           dependents: { type: "number", description: "부양가족 수 (본인 포함, 기본값 1)" }
         },
         required: ["type", "amount"]
+      }
+    },
+    {
+      name: "minimum_wage",
+      description: "2026년 최저임금 계산기 - 시급 10,320원 기준 일급/주급/월급/연봉 계산",
+      inputSchema: {
+        type: "object",
+        properties: {
+          hours_per_day: { type: "number", description: "일 근무시간 (기본값 8)" },
+          days_per_week: { type: "number", description: "주 근무일수 (기본값 5)" }
+        }
       }
     }
   ]
@@ -261,10 +272,10 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const monthly = type === "annual" ? amount / 12 : amount;
     const deps = (dependents != null && dependents >= 1) ? dependents : 1;
 
-    // 2024년 기준 4대보험 근로자 부담률
-    const nationalPension = Math.min(monthly * 0.045, 265500);   // 국민연금 4.5% (상한 590만원 기준)
-    const healthInsurance = monthly * 0.03545;                     // 건강보험 3.545%
-    const longTermCare = healthInsurance * 0.1281;                 // 장기요양 12.81% (건강보험료 기준)
+    // 2026년 기준 4대보험 근로자 부담률
+    const nationalPension = Math.min(monthly * 0.0475, 280250);   // 국민연금 4.75% (상한 590만원 기준)
+    const healthInsurance = monthly * 0.03595;                     // 건강보험 3.595%
+    const longTermCare = healthInsurance * 0.1314;                 // 장기요양 13.14% (0.9448/7.19)
     const employment = monthly * 0.009;                            // 고용보험 0.9%
 
     const totalInsurance = nationalPension + healthInsurance + longTermCare + employment;
@@ -308,6 +319,37 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     text += `──────────────\n`;
     text += `총 공제: -${f(totalDeduction)}원\n`;
     text += `실수령액: ${f(netPay)}원`;
+
+    return { content: [{ type: "text", text }] };
+  }
+
+  /* --- minimum_wage --- */
+  if (name === "minimum_wage") {
+    const hoursPerDay = (args.hours_per_day != null && args.hours_per_day > 0) ? args.hours_per_day : 8;
+    const daysPerWeek = (args.days_per_week != null && args.days_per_week > 0) ? args.days_per_week : 5;
+
+    const HOURLY = 10320; // 2026년 최저시급
+    const dailyPay = HOURLY * hoursPerDay;
+    const weeklyHours = hoursPerDay * daysPerWeek;
+    const weeklyPaidHours = weeklyHours >= 15 ? weeklyHours + hoursPerDay : weeklyHours; // 주휴수당 포함
+    const weeklyPay = HOURLY * weeklyPaidHours;
+    const monthlyHours = weeklyPaidHours * (365 / 7 / 12);
+    const monthlyPay = Math.round(HOURLY * monthlyHours);
+    const annualPay = monthlyPay * 12;
+
+    const f = (n) => Math.round(n).toLocaleString();
+
+    let text = `[ 2026년 최저임금 계산 ]\n`;
+    text += `시급: ${f(HOURLY)}원\n`;
+    text += `근무조건: 일 ${hoursPerDay}시간, 주 ${daysPerWeek}일\n`;
+    text += `──────────────\n`;
+    text += `일급: ${f(dailyPay)}원\n`;
+    text += `주급: ${f(weeklyPay)}원`;
+    if (weeklyHours >= 15) {
+      text += ` (주휴수당 포함)`;
+    }
+    text += `\n월급: ${f(monthlyPay)}원\n`;
+    text += `연봉: ${f(annualPay)}원`;
 
     return { content: [{ type: "text", text }] };
   }
