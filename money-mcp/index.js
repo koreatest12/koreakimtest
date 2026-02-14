@@ -5,7 +5,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 const server = new Server(
   {
     name: "money-mcp",
-    version: "1.3.0"
+    version: "1.4.0"
   },
   {
     capabilities: {
@@ -106,6 +106,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           hours_per_day: { type: "number", description: "일 근무시간 (기본값 8)" },
           days_per_week: { type: "number", description: "주 근무일수 (기본값 5)" }
         }
+      }
+    },
+    {
+      name: "vat_calculator",
+      description: "부가세(VAT) 계산 - 공급가액↔합계금액 간 부가세 10% 계산",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "supply (공급가액→합계) 또는 total (합계→공급가액)" },
+          amount: { type: "number", description: "금액" }
+        },
+        required: ["type", "amount"]
       }
     }
   ]
@@ -350,6 +362,37 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
     text += `\n월급: ${f(monthlyPay)}원\n`;
     text += `연봉: ${f(annualPay)}원`;
+
+    return { content: [{ type: "text", text }] };
+  }
+
+  /* --- vat_calculator --- */
+  if (name === "vat_calculator") {
+    const { type, amount } = args;
+
+    if (!["supply", "total"].includes(type)) {
+      return { content: [{ type: "text", text: "오류: type은 supply(공급가액→합계) 또는 total(합계→공급가액)이어야 합니다." }] };
+    }
+    if (amount == null || amount <= 0) {
+      return { content: [{ type: "text", text: "오류: 금액(amount)은 0보다 커야 합니다." }] };
+    }
+
+    const f = (n) => Math.round(n).toLocaleString();
+    let supply, vat, total;
+
+    if (type === "supply") {
+      supply = amount;
+      vat = amount * 0.1;
+      total = amount + vat;
+    } else {
+      total = amount;
+      supply = Math.round(amount / 1.1);
+      vat = amount - supply;
+    }
+
+    let text = `공급가액: ${f(supply)}원\n`;
+    text += `부가세(10%): ${f(vat)}원\n`;
+    text += `합계금액: ${f(total)}원`;
 
     return { content: [{ type: "text", text }] };
   }
