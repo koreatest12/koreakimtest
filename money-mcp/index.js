@@ -1,3 +1,4 @@
+import https from "node:https";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -5,7 +6,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 const server = new Server(
   {
     name: "money-mcp",
-    version: "1.4.0"
+    version: "1.5.0"
   },
   {
     capabilities: {
@@ -118,6 +119,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           amount: { type: "number", description: "금액" }
         },
         required: ["type", "amount"]
+      }
+    },
+    {
+      name: "security_news",
+      description: "KISA 보호나라 최신 보안공지 조회 - 최신 보안 취약점, 업데이트 권고 등",
+      inputSchema: {
+        type: "object",
+        properties: {
+          count: { type: "number", description: "조회할 건수 (기본값 5, 최대 10)" },
+          keyword: { type: "string", description: "검색 키워드 (선택)" }
+        }
       }
     }
   ]
@@ -395,6 +407,91 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     text += `합계금액: ${f(total)}원`;
 
     return { content: [{ type: "text", text }] };
+  }
+
+  /* --- security_news --- */
+  if (name === "security_news") {
+    const count = Math.min(Math.max((args.count != null ? args.count : 5), 1), 10);
+    const keyword = args.keyword || "";
+
+    try {
+      const html = await new Promise((resolve, reject) => {
+        const url = "https://www.boho.or.kr/kr/bbs/list.do?menuNo=205020&bbsId=B0000133";
+        const req = https.get(url, { timeout: 5000 }, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            https.get(res.headers.location, { timeout: 5000 }, (res2) => {
+              let data = "";
+              res2.on("data", (chunk) => data += chunk);
+              res2.on("end", () => resolve(data));
+              res2.on("error", reject);
+            }).on("error", reject);
+            return;
+          }
+          let data = "";
+          res.on("data", (chunk) => data += chunk);
+          res.on("end", () => resolve(data));
+          res.on("error", reject);
+        });
+        req.on("error", reject);
+        req.on("timeout", () => { req.destroy(); reject(new Error("요청 시간 초과 (5초)")); });
+      });
+
+      // 게시물 파싱: <td class="title"> 안의 링크와 날짜
+      const rows = [];
+      const rowRegex = /<tr[^>]*>[\s\S]*?<\/tr>/gi;
+      let rowMatch;
+      while ((rowMatch = rowRegex.exec(html)) !== null) {
+        const row = rowMatch[0];
+        // 제목 링크 추출
+        const titleMatch = row.match(/<td[^>]*class="[^"]*title[^"]*"[^>]*>[\s\S]*?<a[^>]*>([\s\S]*?)<\/a>/i);
+        if (!titleMatch) continue;
+        const title = titleMatch[1].replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+        if (!title) continue;
+
+        // nttId 추출
+        const nttIdMatch = row.match(/nttId[=:](\d+)/);
+        const nttId = nttIdMatch ? nttIdMatch[1] : null;
+
+        // 날짜 추출
+        const dateMatch = row.match(/(\d{4}-\d{2}-\d{2})/);
+        const date = dateMatch ? dateMatch[1] : "";
+
+        rows.push({ title, nttId, date });
+      }
+
+      // keyword 필터링
+      let filtered = keyword
+        ? rows.filter(r => r.title.toLowerCase().includes(keyword.toLowerCase()))
+        : rows;
+
+      filtered = filtered.slice(0, count);
+
+      if (filtered.length === 0) {
+        const msg = keyword
+          ? `"${keyword}" 키워드에 해당하는 보안공지가 없습니다.`
+          : "보안공지를 가져올 수 없습니다. 페이지 구조가 변경되었을 수 있습니다.";
+        return { content: [{ type: "text", text: msg }] };
+      }
+
+      let text = keyword
+        ? `[ KISA 보안공지 - "${keyword}" 검색 결과 ${filtered.length}건 ]\n`
+        : `[ KISA 보안공지 - 최신 ${filtered.length}건 ]\n`;
+      text += `──────────────\n`;
+
+      filtered.forEach((item, i) => {
+        const link = item.nttId
+          ? `https://www.boho.or.kr/kr/bbs/view.do?bbsId=B0000133&nttId=${item.nttId}&menuNo=205020`
+          : "https://www.boho.or.kr/kr/bbs/list.do?menuNo=205020&bbsId=B0000133";
+        text += `${i + 1}. ${item.title}`;
+        if (item.date) text += ` (${item.date})`;
+        text += `\n   🔗 ${link}\n`;
+        if (i < filtered.length - 1) text += `\n`;
+      });
+
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `보안공지 조회 실패: ${err.message}\n\n직접 확인: https://www.boho.or.kr/kr/bbs/list.do?menuNo=205020&bbsId=B0000133` }] };
+    }
   }
 
   return { content: [{ type: "text", text: "오류: 알 수 없는 도구입니다." }] };
