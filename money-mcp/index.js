@@ -296,7 +296,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const taxableMonthly = monthly - totalInsurance;
     let incomeTax = 0;
     if (taxableMonthly > 10000000) {
-      incomeTax = taxableMonthly * 0.35 - 1490000;
+      incomeTax = taxableMonthly * 0.38 - 1940000;
     } else if (taxableMonthly > 8800000) {
       incomeTax = taxableMonthly * 0.35 - 1490000;
     } else if (taxableMonthly > 4600000) {
