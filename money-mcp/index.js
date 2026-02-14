@@ -5,7 +5,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 const server = new Server(
   {
     name: "money-mcp",
-    version: "1.1.0"
+    version: "1.2.0"
   },
   {
     capabilities: {
@@ -82,6 +82,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           currency: { type: "string", description: "통화 코드: KRW, USD, JPY, EUR" }
         },
         required: ["amount", "currency"]
+      }
+    },
+    {
+      name: "salary_calculator",
+      description: "급여 실수령액 계산 - 월급/연봉에서 4대보험 및 소득세 공제 후 실수령액 계산 (2024년 기준)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "monthly (월급) 또는 annual (연봉)" },
+          amount: { type: "number", description: "월급 또는 연봉 (세전)" },
+          dependents: { type: "number", description: "부양가족 수 (본인 포함, 기본값 1)" }
+        },
+        required: ["type", "amount"]
       }
     }
   ]
@@ -232,6 +245,71 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     return { content: [{ type: "text", text: `결과: ${formatters[upper]()}` }] };
+  }
+
+  /* --- salary_calculator --- */
+  if (name === "salary_calculator") {
+    const { type, amount, dependents } = args;
+
+    if (!["monthly", "annual"].includes(type)) {
+      return { content: [{ type: "text", text: "오류: type은 monthly(월급) 또는 annual(연봉)이어야 합니다." }] };
+    }
+    if (amount == null || amount <= 0) {
+      return { content: [{ type: "text", text: "오류: 금액(amount)은 0보다 커야 합니다." }] };
+    }
+
+    const monthly = type === "annual" ? amount / 12 : amount;
+    const deps = (dependents != null && dependents >= 1) ? dependents : 1;
+
+    // 2024년 기준 4대보험 근로자 부담률
+    const nationalPension = Math.min(monthly * 0.045, 265500);   // 국민연금 4.5% (상한 590만원 기준)
+    const healthInsurance = monthly * 0.03545;                     // 건강보험 3.545%
+    const longTermCare = healthInsurance * 0.1281;                 // 장기요양 12.81% (건강보험료 기준)
+    const employment = monthly * 0.009;                            // 고용보험 0.9%
+
+    const totalInsurance = nationalPension + healthInsurance + longTermCare + employment;
+
+    // 간이세액표 기반 근사 소득세 계산
+    const taxableMonthly = monthly - totalInsurance;
+    let incomeTax = 0;
+    if (taxableMonthly > 10000000) {
+      incomeTax = taxableMonthly * 0.35 - 1490000;
+    } else if (taxableMonthly > 8800000) {
+      incomeTax = taxableMonthly * 0.35 - 1490000;
+    } else if (taxableMonthly > 4600000) {
+      incomeTax = taxableMonthly * 0.24 - 522000;
+    } else if (taxableMonthly > 1500000) {
+      incomeTax = taxableMonthly * 0.15 - 108000;
+    } else if (taxableMonthly > 1060000) {
+      incomeTax = taxableMonthly * 0.06;
+    }
+
+    // 부양가족 공제 (1인당 약 12,500원 감면)
+    incomeTax = Math.max(0, incomeTax - (deps - 1) * 12500);
+    const localTax = incomeTax * 0.1; // 지방소득세 10%
+
+    const totalDeduction = totalInsurance + incomeTax + localTax;
+    const netPay = monthly - totalDeduction;
+
+    const f = (n) => Math.round(n).toLocaleString();
+
+    let text = type === "annual"
+      ? `연봉: ${f(amount)}원 (월 환산: ${f(monthly)}원)\n`
+      : `월급: ${f(amount)}원\n`;
+
+    text += `부양가족: ${deps}명\n`;
+    text += `──────────────\n`;
+    text += `국민연금: -${f(nationalPension)}원\n`;
+    text += `건강보험: -${f(healthInsurance)}원\n`;
+    text += `장기요양: -${f(longTermCare)}원\n`;
+    text += `고용보험: -${f(employment)}원\n`;
+    text += `소득세: -${f(incomeTax)}원\n`;
+    text += `지방소득세: -${f(localTax)}원\n`;
+    text += `──────────────\n`;
+    text += `총 공제: -${f(totalDeduction)}원\n`;
+    text += `실수령액: ${f(netPay)}원`;
+
+    return { content: [{ type: "text", text }] };
   }
 
   return { content: [{ type: "text", text: "오류: 알 수 없는 도구입니다." }] };
