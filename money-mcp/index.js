@@ -5,7 +5,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 const server = new Server(
   {
     name: "money-mcp",
-    version: "1.0.0"
+    version: "1.1.0"
   },
   {
     capabilities: {
@@ -32,6 +32,57 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
         required: ["operation", "amount1"]
       }
+    },
+    {
+      name: "savings_calculator",
+      description: "적금/복리 계산 (단리: simple, 복리: compound)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "simple (단리) 또는 compound (복리)" },
+          principal: { type: "number", description: "원금" },
+          rate: { type: "number", description: "연이율 (%)" },
+          years: { type: "number", description: "기간 (년)" }
+        },
+        required: ["type", "principal", "rate", "years"]
+      }
+    },
+    {
+      name: "installment_calculator",
+      description: "할부 계산 - 월 납부금액 계산 (원리금균등상환)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          principal: { type: "number", description: "총 금액" },
+          months: { type: "number", description: "할부 개월 수" },
+          rate: { type: "number", description: "연이율 (%). 무이자는 0" }
+        },
+        required: ["principal", "months"]
+      }
+    },
+    {
+      name: "dutch_pay",
+      description: "더치페이 (N빵) - 총 금액을 인원수로 나눠 1인당 금액 계산",
+      inputSchema: {
+        type: "object",
+        properties: {
+          total: { type: "number", description: "총 금액" },
+          people: { type: "number", description: "인원 수" }
+        },
+        required: ["total", "people"]
+      }
+    },
+    {
+      name: "currency_formatter",
+      description: "통화 포맷터 - 숫자를 원화(KRW), 달러(USD), 엔화(JPY), 유로(EUR) 형식으로 변환",
+      inputSchema: {
+        type: "object",
+        properties: {
+          amount: { type: "number", description: "금액" },
+          currency: { type: "string", description: "통화 코드: KRW, USD, JPY, EUR" }
+        },
+        required: ["amount", "currency"]
+      }
     }
   ]
 }));
@@ -40,59 +91,150 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
    TOOL CALL
 ========================= */
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
-  const { operation, amount1, amount2, rate } = req.params.arguments;
+  const name = req.params.name;
+  const args = req.params.arguments;
 
-  const needsAmount2 = ["add", "subtract", "multiply", "divide"];
-  const needsRate = ["tax", "discount", "exchange"];
+  /* --- money_calculator --- */
+  if (name === "money_calculator") {
+    const { operation, amount1, amount2, rate } = args;
 
-  if (needsAmount2.includes(operation) && (amount2 == null || typeof amount2 !== "number")) {
-    return { content: [{ type: "text", text: "오류: amount2 값이 필요합니다." }] };
-  }
-  if (needsRate.includes(operation) && (rate == null || typeof rate !== "number")) {
-    return { content: [{ type: "text", text: "오류: rate 값이 필요합니다." }] };
-  }
-  if (operation === "divide" && amount2 === 0) {
-    return { content: [{ type: "text", text: "오류: 0으로 나눌 수 없습니다." }] };
-  }
+    const needsAmount2 = ["add", "subtract", "multiply", "divide"];
+    const needsRate = ["tax", "discount", "exchange"];
 
-  let result;
+    if (needsAmount2.includes(operation) && (amount2 == null || typeof amount2 !== "number")) {
+      return { content: [{ type: "text", text: "오류: amount2 값이 필요합니다." }] };
+    }
+    if (needsRate.includes(operation) && (rate == null || typeof rate !== "number")) {
+      return { content: [{ type: "text", text: "오류: rate 값이 필요합니다." }] };
+    }
+    if (operation === "divide" && amount2 === 0) {
+      return { content: [{ type: "text", text: "오류: 0으로 나눌 수 없습니다." }] };
+    }
 
-  switch (operation) {
-    case "add":
-      result = amount1 + amount2;
-      break;
+    let result;
+    switch (operation) {
+      case "add":      result = amount1 + amount2; break;
+      case "subtract": result = amount1 - amount2; break;
+      case "multiply": result = amount1 * amount2; break;
+      case "divide":   result = amount1 / amount2; break;
+      case "tax":      result = amount1 + (amount1 * (rate / 100)); break;
+      case "discount": result = amount1 - (amount1 * (rate / 100)); break;
+      case "exchange": result = amount1 * rate; break;
+      default:
+        return { content: [{ type: "text", text: "오류: 잘못된 연산입니다. (add, subtract, multiply, divide, tax, discount, exchange)" }] };
+    }
 
-    case "subtract":
-      result = amount1 - amount2;
-      break;
-
-    case "multiply":
-      result = amount1 * amount2;
-      break;
-
-    case "divide":
-      result = amount1 / amount2;
-      break;
-
-    case "tax":
-      result = amount1 + (amount1 * (rate / 100));
-      break;
-
-    case "discount":
-      result = amount1 - (amount1 * (rate / 100));
-      break;
-
-    case "exchange":
-      result = amount1 * rate;
-      break;
-
-    default:
-      return { content: [{ type: "text", text: "오류: 잘못된 연산입니다. (add, subtract, multiply, divide, tax, discount, exchange)" }] };
+    return { content: [{ type: "text", text: `결과: ${result.toLocaleString()}` }] };
   }
 
-  return {
-    content: [{ type: "text", text: `결과: ${result.toLocaleString()}` }]
-  };
+  /* --- savings_calculator --- */
+  if (name === "savings_calculator") {
+    const { type, principal, rate, years } = args;
+
+    if (principal == null || principal <= 0) {
+      return { content: [{ type: "text", text: "오류: 원금(principal)은 0보다 커야 합니다." }] };
+    }
+    if (rate == null || rate < 0) {
+      return { content: [{ type: "text", text: "오류: 이율(rate)은 0 이상이어야 합니다." }] };
+    }
+    if (years == null || years <= 0) {
+      return { content: [{ type: "text", text: "오류: 기간(years)은 0보다 커야 합니다." }] };
+    }
+
+    const r = rate / 100;
+    let total, interest;
+
+    if (type === "simple") {
+      interest = principal * r * years;
+      total = principal + interest;
+    } else if (type === "compound") {
+      total = principal * Math.pow(1 + r, years);
+      interest = total - principal;
+    } else {
+      return { content: [{ type: "text", text: "오류: type은 simple(단리) 또는 compound(복리)여야 합니다." }] };
+    }
+
+    return {
+      content: [{ type: "text", text: `원금: ${principal.toLocaleString()}원\n이율: ${rate}%\n기간: ${years}년\n이자: ${Math.round(interest).toLocaleString()}원\n만기금액: ${Math.round(total).toLocaleString()}원` }]
+    };
+  }
+
+  /* --- installment_calculator --- */
+  if (name === "installment_calculator") {
+    const { principal, months, rate } = args;
+
+    if (principal == null || principal <= 0) {
+      return { content: [{ type: "text", text: "오류: 총 금액(principal)은 0보다 커야 합니다." }] };
+    }
+    if (months == null || months <= 0 || !Number.isInteger(months)) {
+      return { content: [{ type: "text", text: "오류: 할부 개월수(months)는 1 이상의 정수여야 합니다." }] };
+    }
+
+    const annualRate = rate || 0;
+    let monthly, totalPayment, totalInterest;
+
+    if (annualRate === 0) {
+      monthly = principal / months;
+      totalPayment = principal;
+      totalInterest = 0;
+    } else {
+      const monthlyRate = annualRate / 100 / 12;
+      monthly = principal * monthlyRate * Math.pow(1 + monthlyRate, months) / (Math.pow(1 + monthlyRate, months) - 1);
+      totalPayment = monthly * months;
+      totalInterest = totalPayment - principal;
+    }
+
+    return {
+      content: [{ type: "text", text: `총 금액: ${principal.toLocaleString()}원\n할부: ${months}개월 (이율 ${annualRate}%)\n월 납부금: ${Math.round(monthly).toLocaleString()}원\n총 이자: ${Math.round(totalInterest).toLocaleString()}원\n총 납부금: ${Math.round(totalPayment).toLocaleString()}원` }]
+    };
+  }
+
+  /* --- dutch_pay --- */
+  if (name === "dutch_pay") {
+    const { total, people } = args;
+
+    if (total == null || total <= 0) {
+      return { content: [{ type: "text", text: "오류: 총 금액(total)은 0보다 커야 합니다." }] };
+    }
+    if (people == null || people <= 0 || !Number.isInteger(people)) {
+      return { content: [{ type: "text", text: "오류: 인원수(people)는 1 이상의 정수여야 합니다." }] };
+    }
+
+    const perPerson = Math.ceil(total / people);
+    const remainder = total - perPerson * (people - 1);
+
+    let text = `총 금액: ${total.toLocaleString()}원\n인원: ${people}명\n1인당: ${perPerson.toLocaleString()}원`;
+    if (remainder !== perPerson) {
+      text += `\n(마지막 1명: ${remainder.toLocaleString()}원)`;
+    }
+
+    return { content: [{ type: "text", text }] };
+  }
+
+  /* --- currency_formatter --- */
+  if (name === "currency_formatter") {
+    const { amount, currency } = args;
+
+    if (amount == null || typeof amount !== "number") {
+      return { content: [{ type: "text", text: "오류: 금액(amount)이 필요합니다." }] };
+    }
+
+    const formatters = {
+      KRW: () => amount.toLocaleString("ko-KR", { style: "currency", currency: "KRW" }),
+      USD: () => amount.toLocaleString("en-US", { style: "currency", currency: "USD" }),
+      JPY: () => amount.toLocaleString("ja-JP", { style: "currency", currency: "JPY" }),
+      EUR: () => amount.toLocaleString("de-DE", { style: "currency", currency: "EUR" })
+    };
+
+    const upper = (currency || "").toUpperCase();
+    if (!formatters[upper]) {
+      return { content: [{ type: "text", text: `오류: 지원하지 않는 통화입니다. (KRW, USD, JPY, EUR)` }] };
+    }
+
+    return { content: [{ type: "text", text: `결과: ${formatters[upper]()}` }] };
+  }
+
+  return { content: [{ type: "text", text: "오류: 알 수 없는 도구입니다." }] };
 });
 
 /* =========================
