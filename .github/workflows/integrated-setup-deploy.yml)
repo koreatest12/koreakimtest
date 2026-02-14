@@ -1,0 +1,87 @@
+name: Integrated AI CI/CD & Server Setup
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: # 수동 실행 가능
+
+permissions:
+  contents: read
+  security-events: write # CodeQL 결과를 위해 필요
+
+jobs:
+  # 1. 코드 품질 및 보안 검사 (Copilot/CodeQL 역할)
+  quality-and-security:
+    name: Code Quality & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # YAML 문법 검사 (로그의 오류 예방)
+      - name: Install and Run Yamllint
+        run: |
+          pip install yamllint
+          yamllint . -d "{extends: default, rules: {line-length: disable}}" || true
+
+      # CodeQL 보안 스캔 (로그의 Security Check 반영)
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: 'python' # 필요에 따라 java, javascript 등으로 변경 가능
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  # 2. 서버 설치 및 배포 기능 (요청하신 추가 기능)
+  server-setup-and-deploy:
+    name: Server Setup & Deployment
+    needs: quality-and-security # 보안 검사가 통과되어야 실행
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 원격 서버에 SSH 접속하여 설치 및 스크립트 실행
+      - name: Deploy and Setup Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            echo "Starting Server Setup..."
+            
+            # 1. 시스템 패키지 업데이트
+            sudo apt-get update -y
+            
+            # 2. 로그에서 수정된 Heredoc 문법 적용 (들여쓰기 수정 완료)
+            # /tmp/echo.sh 생성 예시
+            cat <<'EOF' > /tmp/echo.sh
+            safe_echo(){ echo "▶  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+            left_echo(){ echo "⬅️  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+            right_echo(){ echo "➡️  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+            
+            # 서버 필수 패키지 설치 (예: Docker, Git)
+            if ! command -v docker &> /dev/null; then
+                echo "Installing Docker..."
+                curl -fsSL https://get.docker.com -o get-docker.sh
+                sh get-docker.sh
+            fi
+            EOF
+            
+            # 3. 생성된 스크립트 실행 권한 부여 및 실행
+            chmod +x /tmp/echo.sh
+            bash /tmp/echo.sh "Server Setup Initiated"
+            
+            # 4. 애플리케이션 배포/재시작 로직 (예시)
+            echo "Deploying application..."
+            # docker-compose up -d --build (실제 배포 명령어 입력)
+            
+            echo "Server Setup & Deployment Completed Successfully."

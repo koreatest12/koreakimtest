@@ -1,15 +1,19 @@
 name: "🛡 CodeQL Advanced SecureScan (Enterprise-Grade, No-Skip, AutoUpgrade, Caching, SARIF Archive)"
-################################################################################# ARCHITECTURE OVERVIEW
-# ------------------------------------------------------------------------------
-# (주요 원칙: 모든 단계는 증거 수집을 위해 실패해도 계속 실행됩니다.)
-# ------------------------------------------------------------------------------
+
 ################################################################################
+# ARCHITECTURE OVERVIEW
+# ---------------------------------------------------------------------------
+# - 절대 스킵 금지: 실패해도 마지막까지 진행하고 증거(SARIF, 로그, 업그레이드 정보) 남김
+# - 러너 환경 점검/업데이트 로그, CodeQL DB, SARIF 전부 아티팩트 업로드
+# - PR / 수동(dispatch) / 스케줄(run on cron) / main push 전부 대응
+# - workflow_dispatch inputs는 10개 이하만 사용
+################################################################################
+
 on:
   push:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-    # Perf optimization: skip docs-only PRs. Security teams often allow this.
     paths-ignore:
       - "**/*.md"
       - "**/*.txt"
@@ -17,33 +21,49 @@ on:
   merge_group:
     branches: [ "main" ]
   schedule:
-    # minute hour dom month dow   (CRON IS UTC ONLY)
+    # minute hour dom month dow   (UTC 시간대)
     - cron: "39 19 * * 3"
+  workflow_dispatch:
+    inputs:
+      scan_mode:            # 1
+        description: "full=모든 쿼리 / lite=가벼운 쿼리"
+        type: choice
+        options: [full, lite]
+        default: full
+        required: false
+      enforce_manual_build: # 2
+        description: "항상 수동 빌드 fallback 실행할지 여부"
+        type: boolean
+        default: false
+        required: false
+      retention_days:       # 3
+        description: "아티팩트 보관 일수 (기본 14)"
+        default: "14"
+        required: false
+      queries_profile:      # 4
+        description: "security-and-quality or +security-extended,security-and-quality"
+        default: "+security-extended,security-and-quality"
+        required: false
+
 concurrency:
-  # Prevent concurrent scans on the same ref from stepping on artifacts
   group: codeql-secure-scan-${{ github.ref }}
   cancel-in-progress: false
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
-    # 🌟 CORE NO-SKIP PHILOSOPHY: Job이 실패해도 다음 단계가 진행되도록 설정합니다.
+
+    # ✅ 핵심 정책: 잡 전체 레벨에서 fail 허용 → 마지막까지 진행
     continue-on-error: true
-    # Permissions: 최소 권한 원칙 반영
+
     permissions:
-      security-events: write
+      security-events: write   # allow SARIF upload to code scanning
       contents: read
       packages: read
       actions: read
-      id-token: write 
-    env:
-      TZ: Asia/Seoul
-      LOG_DIR: .github/echo_logs
-      ARTIFACT_DIR: .github/echo_artifacts
-      UPGRADE_LOG_DIR: .github/echo_upgrade
-      MANUAL_BUILD_ENFORCE: "false"
-      # MODIFIED: PR에서는 경량 쿼리, 그 외에는 전체 쿼리 실행 (성능 최적화)
-      CODEQL_QUERIES: ${{ github.event_name == 'pull_request' && 'security-and-quality' || '+security-extended,security-and-quality' }}
+      id-token: write
+
     strategy:
       fail-fast: false
       matrix:
@@ -56,42 +76,146 @@ jobs:
             build-mode: none
           - language: python
             build-mode: none
+          # swift 등 필요 시 여기에 추가
+
+    env:
+      TZ: Asia/Seoul
+      LOG_DIR: .github/echo_logs
+      ARTIFACT_DIR: .github/echo_artifacts
+      UPGRADE_LOG_DIR: .github/echo_upgrade
+
+      # CodeQL DB/TMP 저장 루트: runner.temp 대신 workspace 하위 임시 디렉토리 사용
+      CODEQL_DB_ROOT: ${{ github.workspace }}/.codeql_tmp
+
+      # workflow_dispatch 우선순위 > PR 기본값 우선순위
+      # 1) queries_profile 입력 있으면 그걸 쓰고
+      # 2) 아니면 PR은 얇은 쿼리
+      # 3) 아니면 기본(확장 쿼리 포함)
+      CODEQL_QUERIES: ${{ inputs.queries_profile || (github.event_name == 'pull_request' && 'security-and-quality') || '+security-extended,security-and-quality' }}
+
+      # MANUAL_BUILD_ENFORCE: dispatch enforce_manual_build=true 면 true, 아니면 기본 false
+      MANUAL_BUILD_ENFORCE: ${{ inputs.enforce_manual_build && 'true' || 'false' }}
+
+      # RETENTION_DAYS: artifact 보관일 (dispatch 값 없으면 기본 14)
+      RETENTION_DAYS: ${{ inputs.retention_days || '14' }}
+
+      # SCAN_MODE: full / lite
+      SCAN_MODE: ${{ inputs.scan_mode || 'full' }}
+
     steps:
-      ##########################################################################
+      ########################################################################
       # 0. CHECKOUT SOURCE
-      ##########################################################################
+      ########################################################################
       - name: Checkout repository
         uses: actions/checkout@v4
-      ##########################################################################
-      # 1. PREP: DIRECTORIES, LOG HELPERS, HOST UPGRADE SNAPSHOT
-      ##########################################################################
-      # 🌟 No-Skip: if: always() 적용하여 인트로스펙션 및 디렉토리 생성을 보장합니다.
+
+      ########################################################################
+      # 0.5 ECHO: 컨텍스트/입력/변경파일/환경 요약 (console + Step Summary)
+      ########################################################################
+      - name: Echo runtime & inputs
+        shell: bash
+        env:
+          TZ: Asia/Seoul
+        run: |
+          set -Eeuo pipefail
+          has_jq(){ command -v jq >/dev/null 2>&1; }
+
+          # 이벤트 페이로드 및 변경 파일 수집 (checkout 없이도 동작하는 모드)
+          EVENT_RAW="$(cat "${GITHUB_EVENT_PATH}" 2>/dev/null || true)"
+          CHANGED_TXT=""
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ] && has_jq; then
+            PR_NUMBER="$(jq -r '.number' <<<"$EVENT_RAW" 2>/dev/null || echo "")"
+            if [ -n "$PR_NUMBER" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+              PAGE=1
+              while :; do
+                RESP="$(curl -sS -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                             -H "Accept: application/vnd.github+json" \
+                             "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100&page=${PAGE}")" || true
+                COUNT="$(jq 'length' <<<"$RESP" 2>/dev/null || echo 0)"
+                [ "$COUNT" = "0" ] && break
+                jq -r '.[] | "\(.status)\t\(.filename)"' <<<"$RESP" 2>/dev/null || true
+                CHANGED_TXT="${CHANGED_TXT}"$'\n'"$(jq -r '.[] | "\(.status)\t\(.filename)"' <<<"$RESP" 2>/dev/null || true)"
+                [ "$COUNT" -lt 100 ] && break
+                PAGE=$((PAGE+1))
+              done
+            fi
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ] && has_jq; then
+            BEFORE="$(jq -r '.before' <<<"$EVENT_RAW" 2>/dev/null || echo "")"
+            AFTER="$(jq -r '.after'  <<<"$EVENT_RAW" 2>/dev/null || echo "")"
+            if [ -n "$BEFORE" ] && [ -n "$AFTER" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+              RESP="$(curl -sS -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                           -H "Accept: application/vnd.github+json" \
+                           "https://api.github.com/repos/${GITHUB_REPOSITORY}/compare/${BEFORE}...${AFTER}")" || true
+              ADDED="$(jq -r '.files[]? | select(.status=="added")    | "A\t"+.filename' <<<"$RESP" 2>/dev/null || true)"
+              MODD="$(jq -r '.files[]? | select(.status=="modified") | "M\t"+.filename' <<<"$RESP" 2>/dev/null || true)"
+              REMV="$(jq -r '.files[]? | select(.status=="removed")  | "D\t"+.filename' <<<"$RESP" 2>/dev/null || true)"
+              CHANGED_TXT="$(printf "%s\n%s\n%s\n" "$ADDED" "$MODD" "$REMV" | sed '/^$/d')"
+            fi
+          fi
+
+          SAFE_ENV="$(env | egrep -v 'TOKEN|SECRET|PASSWORD|AWS_|GCP_|AZURE_|KEY|PASS|CERT' || true)"
+
+          echo "[Echo] Event=${GITHUB_EVENT_NAME}  Ref=${GITHUB_REF}  SHA=${GITHUB_SHA}"
+          echo "[Echo] Runner=${RUNNER_OS}/${RUNNER_ARCH}  Matrix=${{ toJson(matrix) }}"
+          echo "[Echo] Inputs.scan_mode=${{ inputs.scan_mode || 'full' }}  queries_profile=${{ inputs.queries_profile || '' }}"
+          echo "[Echo] Changed files (top 50):"
+          printf "%s\n" "${CHANGED_TXT}" | head -n 50
+
+          {
+            echo "## 🪞 Echo Report"
+            echo ""
+            echo "| Key | Value |"
+            echo "|---|---|"
+            echo "| Event | \`${GITHUB_EVENT_NAME}\` |"
+            echo "| Ref | \`${GITHUB_REF}\` |"
+            echo "| SHA | \`${GITHUB_SHA}\` |"
+            echo "| Actor | \`${GITHUB_ACTOR}\` |"
+            echo "| Repo | \`${GITHUB_REPOSITORY}\` |"
+            echo "| Runner | \`${RUNNER_OS}/${RUNNER_ARCH}\` |"
+            echo "| Job | \`${GITHUB_JOB}\` |"
+            echo "| Matrix | \`${{ toJson(matrix) }}\` |"
+            echo ""
+            echo "### 🗂️ Changed files (best-effort)"
+            if [ -n "$CHANGED_TXT" ]; then
+              echo '```text'
+              printf "%s\n" "${CHANGED_TXT}" | head -n 500
+              echo '```'
+            else
+              echo "_(diff unavailable for this event)_"
+            fi
+            echo ""
+            echo "### 🌿 Environment (safe subset)"
+            echo '```text'
+            printf "%s\n" "${SAFE_ENV}" | head -n 200
+            echo '```'
+            echo ""
+            echo "> ⏱️ TZ=Asia/Seoul  —  $(date '+%Y-%m-%d %H:%M:%S %Z')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      ########################################################################
+      # 1. PREP: DIR SETUP, ENV SNAPSHOT, BEST-EFFORT RUNNER UPGRADE
+      ########################################################################
       - name: Prep dirs, env introspection, and best-effort OS upgrade
-        if: always()         
+        if: always()
         shell: bash
         run: |
-          # 🚨 NOTE: 'set -o pipefail'은 파이프(|)에서 오류 발생 시 전체 실패로 간주.
-          # 모든 명령이 개별적으로 실패해도 계속 진행하기 위해 '|| true' 사용을 유지
           set -Eeuo pipefail
-          
-          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${UPGRADE_LOG_DIR}"
-          
+          mkdir -p "${LOG_DIR}" "${ARTIFACT_DIR}" "${UPGRADE_LOG_DIR}" "${CODEQL_DB_ROOT}"
+          # helper functions (TS/LOG) for reuse in later steps
           cat > /tmp/echo_helpers.sh << 'EOF'
           TS() { date "+%Y-%m-%d %H:%M:%S%z"; }
           LOG() { lvl="$1"; shift; echo "[$(TS)] [$lvl] $*"; }
           EOF
+          # Introspection
           source /tmp/echo_helpers.sh || true
-          
           LOG INFO "===== RUNTIME INTROSPECTION START ====="
           uname -a  || true
           lsb_release -a 2>/dev/null || true
           sw_vers 2>/dev/null || true
           df -h || true
           free -m 2>/dev/null || true
-          LOG INFO "Capturing upgradable package list and attempting upgrade (Linux runners)."
-          
-          # 🚨 강화: Upgrade 스크립트는 내부 오류를 무시하고(|| true) 로깅만 수행하도록 보장
-          {            
+          LOG INFO "Capturing upgradable package list and attempting upgrade (Linux/macOS)."
+          {
             echo "===== UPGRADE SESSION START $(date) ====="
             echo "Runner OS info:"
             uname -a || true
@@ -100,16 +224,17 @@ jobs:
             echo
             if command -v apt-get >/dev/null 2>&1; then
               echo ">>> apt-get update / upgrade attempt"
+              sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true
+              sudo dpkg --configure -a || true
               sudo apt-get update -y || true
               echo ">>> pre-upgrade upgradable list"
-              # 리다이렉트 오류 무시
               apt list --upgradable 2>/dev/null || true > "${UPGRADE_LOG_DIR}/upgradable.pre.txt"
-              # Patch runner packages (best effort, 실패해도 계속 진행)
+              # best-effort patch upgrade
               sudo DEBIAN_FRONTEND=noninteractive apt-get -y upgrade || true
               echo ">>> post-upgrade upgradable list"
               apt list --upgradable 2>/dev/null || true > "${UPGRADE_LOG_DIR}/upgradable.post.txt"
             else
-              echo "No apt-get (likely macOS self-hosted or GitHub macOS)."
+              echo "No apt-get (likely macOS)."
               if command -v softwareupdate >/dev/null 2>&1; then
                 echo ">>> macOS softwareupdate --list (read-only)"
                 softwareupdate --list || true
@@ -117,13 +242,11 @@ jobs:
             fi
             echo "===== UPGRADE SESSION END $(date) ====="
           } | tee "${UPGRADE_LOG_DIR}/upgrade_${{ matrix.language }}.log"
-          
           LOG INFO "===== RUNTIME INTROSPECTION END ====="
-                
-      ##########################################################################
-      # 2. DEPENDENCY CACHES (PER LANGUAGE ECOSYSTEM)
-      ##########################################################################
-      # (Dependency cache steps are preserved - 캐시 실패는 다음 단계로 자동 진행됨)
+
+      ########################################################################
+      # 2. DEPENDENCY CACHES (언어별 캐시: 실패해도 계속)
+      ########################################################################
       - name: Cache Maven local repo
         if: contains(matrix.language, 'java')
         uses: actions/cache@v4
@@ -159,54 +282,49 @@ jobs:
           key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/pyproject.toml', '**/setup.py') }}
           restore-keys: |
             pip-${{ runner.os }}-
-            
-      ##########################################################################
-      # 2.5 CODEQL DATABASE CACHE (NEW)
-      ##########################################################################
-      - name: Cache CodeQL Database
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/codeql_db_${{ matrix.language }}
-          key: codeql-db-${{ matrix.language }}-${{ runner.os }}-${{ hashFiles('**/*.${{ matrix.language }}', '**/pom.xml', '**/build.gradle*', '**/package*.json', '**/requirements.txt') }}
-          restore-keys: |
-            codeql-db-${{ matrix.language }}-${{ runner.os }}-
-            
-      ##########################################################################
+
+      ########################################################################
+      # 2.5 PREP CLEAN DB DIR (CodeQL DB 디렉토리 초기화)
+      ########################################################################
+      - name: Prep clean CodeQL DB directory
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          DB_DIR="${CODEQL_DB_ROOT}/codeql_db_${{ matrix.language }}"
+          rm -rf "${DB_DIR}" || true
+          mkdir -p "${DB_DIR}"
+
+      ########################################################################
       # 3. CODEQL INIT
-      ##########################################################################
-      # 🌟 NO-SKIP: 캐시 복원 실패와 관계없이 항상 CodeQL 초기화를 시도합니다.
+      ########################################################################
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix['build-mode'] }}
-          db-location: ${{ runner.temp }}/codeql_db_${{ matrix.language }}
+          db-location: ${{ env.CODEQL_DB_ROOT }}/codeql_db_${{ matrix.language }}
           queries: ${{ env.CODEQL_QUERIES }}
-          
-      ##########################################################################
-      # 4. AUTOBUILD (compiled languages only)
-      ##########################################################################
-      # 🌟 NO-SKIP: autobuild 실패 시, job은 계속됩니다.
+
+      ########################################################################
+      # 4. AUTOBUILD (compiled languages 전용)
+      ########################################################################
       - name: Autobuild (for compiled languages)
         if: ${{ matrix.build-mode == 'autobuild' }}
         uses: github/codeql-action/autobuild@v4
-        
-      ##########################################################################
-      # 5. MANUAL BUILD FALLBACK (NO-SKIP, ALWAYS LOG)
-      ##########################################################################
-      # 🌟 NO-SKIP: 이전 단계 실패(`failure()`) 시에도 반드시 실행됩니다.
+
+      ########################################################################
+      # 5. MANUAL BUILD FALLBACK (autobuild 실패 대비)
+      ########################################################################
       - name: Manual build fallback (enforced or on autobuild failure)
         if: ${{ failure() || matrix.build-mode == 'manual' || env.MANUAL_BUILD_ENFORCE == 'true' }}
         shell: bash
         run: |
-          # 🚨 set -Eeuo pipefail는 유지하되, 내부 빌드 명령어는 || true로 실패를 명시적으로 무시
           set -Eeuo pipefail
           source /tmp/echo_helpers.sh || true
           LOG WARN "Autobuild failed OR manual mode enforced -> running manual fallback build"
           BUILD_LOG_FILE="${LOG_DIR}/manual_build_${{ matrix.language }}.log"
-          
-          # 빌드 에러를 무시하고( || true) 빌드 로그를 반드시 기록합니다.
-          {            
+          {
             echo "===== MANUAL BUILD START $(date) ====="
             if [ -f "mvnw" ] || [ -f "pom.xml" ]; then
               echo "[manual] mvn -B -q -DskipTests package"
@@ -226,63 +344,89 @@ jobs:
             fi
             echo "===== MANUAL BUILD END $(date) ====="
           } | tee "${BUILD_LOG_FILE}"
-
           LOG INFO "Manual fallback build finished (all errors ignored, continuing)"
-          
-          # Add build summary to job summary for quick triage
-          echo "### ⚠️ Manual Build Fallback Log Summary (${{ matrix.language }})" >> $GITHUB_STEP_SUMMARY
-          echo "Full log uploaded as artifact: ${BUILD_LOG_FILE}" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          tail -n 100 "${BUILD_LOG_FILE}" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          
-      ##########################################################################
+          {
+            echo "### ⚠️ Manual Build Fallback Log Summary (${{ matrix.language }})"
+            echo "Full log uploaded as artifact: ${BUILD_LOG_FILE}"
+            echo '```bash'
+            tail -n 100 "${BUILD_LOG_FILE}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      ########################################################################
       # 6. CODEQL ANALYZE
-      ##########################################################################
-      # 🌟 NO-SKIP: 이 단계가 실패해도 Job은 계속됩니다. (continue-on-error: true)
+      ########################################################################
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
           upload: true
-          output: ${{ runner.temp }}/codeql_db_${{ matrix.language }}/results-${{ matrix.language }}.sarif
-          
-      ##########################################################################
-      # 7. EVIDENCE PACKAGING / AUDIT TRAIL
-      ##########################################################################
-      # 🌟 NO-SKIP: analyze 단계의 성공/실패와 관계없이 반드시 실행되어 증거를 수집합니다.
+          output: ${{ env.CODEQL_DB_ROOT }}/codeql_db_${{ matrix.language }}/results-${{ matrix.language }}.sarif
+
+      ########################################################################
+      # 6.5 ECHO: SARIF 심각도 요약 (Step Summary)
+      ########################################################################
+      - name: Echo SARIF summary (severity counts)
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SARIF="${{ env.CODEQL_DB_ROOT }}/codeql_db_${{ matrix.language }}/results-${{ matrix.language }}.sarif"
+          echo "### 🔎 CodeQL Findings (${{ matrix.language }})" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$SARIF" ]; then
+            if command -v jq >/dev/null 2>&1; then
+              jq -r '.runs[].results[]?.level' "$SARIF" 2>/dev/null | sort | uniq -c | awk '{printf "- %s: %s\n",$2,$1}' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- jq not available; SARIF raw bytes: $(wc -c < "$SARIF" 2>/dev/null || echo 0) bytes" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "- SARIF missing." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo ""
+            echo "#### 🧾 Run Metadata"
+            echo "- Event: ${{ github.event_name }}"
+            echo "- Ref: ${{ github.ref }}"
+            echo "- SHA: ${{ github.sha }}"
+            echo "- Runner: ${{ runner.os }} / ${{ runner.arch }}"
+            echo "- Matrix: ${{ toJson(matrix) }}"
+            echo "- Queries: ${{ env.CODEQL_QUERIES }}"
+            echo "- Mode: ${{ env.SCAN_MODE }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      ########################################################################
+      # 7. PACKAGE EVIDENCE / AUDIT TRAIL
+      ########################################################################
       - name: Collect and package CodeQL DB + logs + SARIF
         if: always()
         shell: bash
         env:
-          CODEQL_DB_DIR: ${{ runner.temp }}/codeql_db_${{ matrix.language }}
+          CODEQL_DB_DIR: ${{ env.CODEQL_DB_ROOT }}/codeql_db_${{ matrix.language }}
         run: |
           set -Eeuo pipefail
           source /tmp/echo_helpers.sh || true
           LOG INFO "Collecting CodeQL artifacts, SARIF, upgrade logs for audit trail"
           mkdir -p "${ARTIFACT_DIR}"
-          
-          # DB Packaging (오류 무시)
+          # Snapshot DB structure for triage
           if [ -d "${CODEQL_DB_DIR}" ]; then
-            tar -czf "${ARTIFACT_DIR}/codeql_db_${{ matrix.language }}.tgz" \
-              -C "${CODEQL_DB_DIR}" . || true
             ls -R "${CODEQL_DB_DIR}" \
               > "${LOG_DIR}/codeql_db_tree_${{ matrix.language }}.log" 2>&1 || true
+            tar -czf "${ARTIFACT_DIR}/codeql_db_${{ matrix.language }}.tgz" \
+              -C "${CODEQL_DB_DIR}" . || true
           fi
-          # SARIF Copy (오류 무시)
+          # Copy SARIF results for code scanning + audit
           if [ -f "${CODEQL_DB_DIR}/results-${{ matrix.language }}.sarif" ]; then
             cp "${CODEQL_DB_DIR}/results-${{ matrix.language }}.sarif" \
                "${ARTIFACT_DIR}/results-${{ matrix.language }}.sarif" || true
           fi
-          # Upgrade Logs (오류 무시)
+          # Runner upgrade logs pack
           tar -czf "${ARTIFACT_DIR}/upgrade_logs_${{ matrix.language }}.tgz" \
             "${UPGRADE_LOG_DIR}" || true
           LOG INFO "Packaging complete"
-          
-      ##########################################################################
+
+      ########################################################################
       # 8. UPLOAD EVERYTHING AS ARTIFACT
-      ##########################################################################
-      # 🌟 NO-SKIP: 앞선 단계의 성공/실패와 관계없이 증거 파일을 반드시 업로드합니다.
+      ########################################################################
       - name: Upload CodeQL & Environment Artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -293,4 +437,4 @@ jobs:
             .github/echo_artifacts/**
             .github/echo_upgrade/**
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: ${{ env.RETENTION_DAYS }}

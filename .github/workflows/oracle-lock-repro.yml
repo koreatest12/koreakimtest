@@ -1,0 +1,86 @@
+name: ETL Daily Workflow (PostgreSQL to Vertica)
+
+on:
+  schedule:
+    - cron: '0 3 * * *' # 매일 UTC 기준 새벽 3시에 실행
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: '수동 실행 사유'
+        required: false
+        default: 'Manual Trigger'
+
+jobs:
+  run_etl_pipeline:
+    # 🚨 주의: Self-Hosted Runner 또는 SSH 키를 직접 파일 시스템에 추가해야 함
+    runs-on: self-hosted # Self-Hosted Runner 사용을 가정하여 서버 접근 문제 회피
+    
+    steps:
+      # 1. SSH 접속 설정 (Secrets 제거로 인한 변경)
+      # Self-Hosted Runner를 사용하지 않는다면, 이 단계에서 SSH 키를 직접 파일로 생성해야 합니다.
+      - name: SSH Key Setup and Connection Test
+        run: |
+          # 🚨 보안 경고: 실제 키를 여기에 직접 입력하지 마십시오.
+          # 예시: echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa 대신
+          # echo "하드코딩된_개인_키_문자열" > ~/.ssh/id_rsa
+          
+          # SSH 접속 정보 (하드코딩 예시 - 보안 위험)
+          export ETL_SERVER_USER="etl_user"
+          export ETL_SERVER_HOST="10.0.1.10"
+          export SSH_CONNECT_STRING="${ETL_SERVER_USER}@${ETL_SERVER_HOST}"
+          
+          # 하드코딩 대신, SSH 설정 파일에 이미 해당 서버 접속 정보가 등록되어 있다고 가정합니다.
+          echo "SSH 접속 정보가 환경에 설정되어 있다고 가정하고 진행합니다."
+
+
+      # ----------------------------------------------------------------------
+      # 1단계: 🛡️ 백업 및 스키마 관리 (Guardrail)
+      # ----------------------------------------------------------------------
+      # SSH 접속이 아닌, Self-Hosted Runner가 ETL 서버 자체라고 가정하고 Local 명령 실행
+      - name: A1_Backup_Cleanup_2_Days_Retention
+        run: |
+          echo "2일 초과 Vertica 백업 정리 중..."
+          # Self-Hosted Runner가 ETL 서버이므로 Local 명령 실행
+          find /mnt/backup_repo/vertica/ -maxdepth 1 -type d -name "vertica_backup_*" -mtime +2 -exec rm -rf {} \;
+          echo '백업 정리 완료.'
+
+      - name: A2_Vertica_Backup_Creation
+        run: |
+          echo "Vertica 백업 생성 중..."
+          # Self-Hosted Runner가 ETL 서버이므로 Local 명령 실행
+          /opt/vertica/bin/vbr.py --task backup --config-file /opt/vertica/config/vbr_backup.ini
+          echo '백업 재생성 완료.'
+
+      - name: A3_A4_PG_DDL_Detect_and_Apply
+        run: |
+          echo "PG DDL 감지 및 Vertica 반영 스크립트 실행 중..."
+          # DB 자격 증명은 스크립트 내부 파일에 저장되거나 (보안 위험) 환경 변수에서 가져와야 함.
+          /opt/etl/scripts/run_ddl_sync.sh
+      
+      # ----------------------------------------------------------------------
+      # 2단계: 🔄 ETL 프로세스 실행 (Data Flow)
+      # ----------------------------------------------------------------------
+      - name: B_ETL_Execution (Extract, Transform, Load)
+        run: |
+          echo "ETL (Extract, Transform, Load) 파이프라인 시작..."
+          # 스크립트 내부에서 DB 접속 정보 (하드코딩된 값 또는 파일) 사용
+          /opt/etl/scripts/run_etl_pipeline.sh
+
+      # ----------------------------------------------------------------------
+      # 3단계: ✅ 최종 반영 및 모니터링 (Finalization)
+      # ----------------------------------------------------------------------
+      - name: C1_Final_Merge_to_Production
+        run: |
+          echo "최종 데이터 Merge/Swap 반영 중..."
+          # Vertica CLI 사용 (DB 자격 증명은 환경 변수/파일에 저장되어야 함)
+          /opt/vertica/bin/vsql -c "MERGE INTO public.target_data AS target USING public.target_data_staging ...;"
+
+      - name: C2_Run_Vertica_Analyze
+        run: |
+          echo "Vertica 통계 분석 실행..."
+          /opt/vertica/bin/vsql -c 'SELECT ANALYZE_STATISTICS();'
+
+      - name: C3_Send_Success_Notification
+        if: success()
+        run: |
+          echo "ETL 워크플로우 성공적으로 완료됨. 날짜: ${{ github.event.schedule }}"

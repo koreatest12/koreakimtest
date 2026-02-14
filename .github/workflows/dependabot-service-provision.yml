@@ -1,0 +1,498 @@
+name: Dependabot Service Provisioning
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "디렉터리/파일만 생성 (이미지 빌드/컨테이너 실행 스킵)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  TZ: Asia/Seoul
+  ECHO_PREFIX: "[Dependabot Provision]"
+  ECHO_LOG_FILE: "/tmp/echoops-dependabot.log"
+  DRY_RUN: ${{ inputs.dry_run }}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: dependabot-service-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    if: github.event_name == 'workflow_dispatch' || github.actor == 'dependabot[bot]' || github.actor == 'dependabot-preview[bot]'
+    runs-on: ubuntu-latest
+    name: Provision service containers for Dependabot updates
+    timeout-minutes: 60
+
+    steps:
+      - name: 🧾 Echo start context
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Workflow started"
+          log "  - Event       : ${{ github.event_name }}"
+          log "  - Actor       : ${{ github.actor }}"
+          log "  - Ref         : ${{ github.ref }}"
+          log "  - SHA         : ${{ github.sha }}"
+          log "  - Run ID      : ${{ github.run_id }}"
+          log "  - Run Number  : ${{ github.run_number }}"
+          log "  - DRY_RUN     : ${DRY_RUN:-}"
+          echo "============================================"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ✅ Verify checkout
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Verify checkout"
+          echo "--------------------------------------------"
+          log "Working directory : $(pwd)"
+          log "Repository files  :"
+          ls -al
+          echo "============================================"
+
+      - name: 🧱 Build custom Scala runtime base image
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Build Scala runtime base image"
+          echo "============================================"
+
+          # DRY-RUN 모드에서는 베이스 이미지 빌드도 스킵
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            log "${ECHO_PREFIX} DRY-RUN 모드: Scala runtime base image 빌드를 스킵합니다."
+            echo "============================================"
+            exit 0
+          fi
+
+          if [ ! -d docker/scala-runtime ]; then
+            echo "::error::docker/scala-runtime not found"
+            log "ERROR: docker/scala-runtime not found"
+            exit 1
+          fi
+
+          docker build --tag dependabot/scala-runtime:latest docker/scala-runtime
+          log "✓ Built image dependabot/scala-runtime:latest"
+          echo "============================================"
+
+      - name: 🏗 Prepare service directories and assets (ALL services)
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Prepare service directories and assets"
+          echo "============================================"
+          log "Initializing service asset generation"
+
+          declare -A images
+
+          # ---- 1) 언어 런타임 / 기본 OS ----
+          images[python]='python:3.11-slim'
+          images[java]='eclipse-temurin:17-jdk'
+          images[linux]='debian:stable-slim'
+          images[ubuntu]='ubuntu:22.04'
+          images[nodejs]='node:20-alpine'
+          images[golang]='golang:1.22'
+          images[ruby]='ruby:3.3'
+          images[php]='php:8.3-cli'
+          images[dotnet]='mcr.microsoft.com/dotnet/sdk:8.0'
+          images[scala]='dependabot/scala-runtime:latest'
+          images[rust]='rust:1.81'
+          images[perl]='perl:5'
+          images[elixir]='elixir:1.16'
+          images[erlang]='erlang:26'
+
+          # ---- 2) Docker / DevOps / IaC ----
+          images[docker]='docker:dind'
+          images[buildx]='docker/buildx-bin:latest'
+          images[terraform]='hashicorp/terraform:1.9'
+          images[ansible]='willhallonline/ansible:latest'
+          images[packer]='hashicorp/packer:latest'
+          images[gitlab_runner]='gitlab/gitlab-runner:latest'
+
+          # ---- 3) DB / Cache / MQ / 기타 데이터 스토어 ----
+          images[teradata]='alpine:3.19'     # placeholder
+          images[mysql]='mysql:8.0'
+          images[postgres]='postgres:16'
+          images[mariadb]='mariadb:11'
+          images[redis]='redis:7-alpine'
+          images[mongodb]='mongo:7'
+          images[rabbitmq]='rabbitmq:3-management'
+          images[kafka]='eclipse-temurin:17-jdk'  # Kafka 서비스용 플레이스홀더(Java 기반)
+          images[activemq]='rmohr/activemq:latest'
+
+          # ---- 4) Web / Proxy / App 서버 ----
+          images[nginx]='nginx:stable-alpine'
+          images[apache]='httpd:2.4'
+          images[caddy]='caddy:2'
+          images[tomcat]='tomcat:10-jdk17'
+          images[wildfly]='jboss/wildfly:latest'
+
+          # ---- 5) Observability / Monitoring / Tracing ----
+          images[prometheus]='prom/prometheus:latest'
+          images[grafana]='grafana/grafana:latest'
+          images[loki]='grafana/loki:latest'
+          images[jaeger]='jaegertracing/all-in-one:latest'
+
+          # ---- 6) Search / Analytics / 로그 스택 ----
+          images[elasticsearch]='docker.elastic.co/elasticsearch/elasticsearch:8.15.0'
+          images[logstash]='docker.elastic.co/logstash/logstash:8.15.0'
+          images[kibana]='docker.elastic.co/kibana/kibana:8.15.0'
+          images[opensearch]='opensearchproject/opensearch:latest'
+          images[opensearch_dashboards]='opensearchproject/opensearch-dashboards:latest'
+
+          # ---- 7) Security / Scanning / 품질 ----
+          images[trivy]='aquasec/trivy:latest'
+          images[grype]='anchore/grype:latest'
+          images[clair]='quay.io/projectquay/clair:4.8.0'
+          images[sonarqube]='sonarqube:latest'
+          images[zap]='owasp/zap2docker-stable'
+
+          # ---- 8) Additional Ecosystem Services ----
+          images[banking_pipeline]='python:3.11-slim'
+          images[mcp_hello_js]='node:20-alpine'
+          images[mcp_fs]='node:20-alpine'
+          images[mcp_hello_py]='python:3.11-slim'
+          images[mcp_python_server]='python:3.11-slim'
+          images[mcp_apache_server]='python:3.11-slim'
+          images[mcp_hello_java]='eclipse-temurin:17-jdk'
+          images[cost_tracker_nodejs]='node:20-alpine'
+          images[cost_tracker_python]='python:3.11-slim'
+
+          log "Configured image map (ALL services): ${!images[@]}"
+
+          mkdir -p infrastructure
+          > infrastructure/.services
+
+          for service in "${!images[@]}"; do
+            echo "${service}" >> infrastructure/.services
+          done
+
+          log "Service list written to infrastructure/.services"
+
+          while read -r service; do
+            [ -z "${service}" ] && continue
+            echo "--------------------------------------------"
+            log "${ECHO_PREFIX} Generating assets for ${service}"
+            echo "--------------------------------------------"
+
+            service_dir="infrastructure/${service}"
+            image="${images[$service]}"
+            title="${service^}"
+
+            log "Creating directory: ${service_dir}/config"
+            mkdir -p "${service_dir}/config"
+
+            log "Writing Dockerfile for ${service}"
+            {
+              echo "# ${title} 서비스를 위한 자동 생성된 Dockerfile"
+              echo "FROM ${image}"
+              echo "LABEL org.opencontainers.image.title=\"${title} service\""
+              echo "LABEL org.opencontainers.image.description=\"Container for ${title} workloads managed by Dependabot workflows\""
+              echo ""
+              echo "RUN mkdir -p /tmp/service && \\"
+              echo "    echo \"Provisioning ${title} runtime\" > /tmp/service/INSTALLATION.log"
+              echo ""
+              echo "COPY config /tmp/service/config"
+              echo "WORKDIR /tmp/service"
+              echo ""
+              echo "CMD [\"/bin/sh\", \"-c\", \"echo '${title} container ready'; sleep 5\"]"
+            } > "${service_dir}/Dockerfile"
+            log "✓ Dockerfile created for ${service}"
+
+            log "Creating server install script for ${service}"
+            {
+              echo "#!/usr/bin/env bash"
+              echo "set -euo pipefail"
+              echo "# Simulated server installation script for ${title} service"
+              echo "log_dir=\"/tmp/service\""
+              echo "mkdir -p \"\${log_dir}\""
+              echo "echo \"[${title}] Starting server installation\" > \"\${log_dir}/server-install.log\""
+              echo "echo \"[${title}] Installing core packages\" >> \"\${log_dir}/server-install.log\""
+              echo "echo \"[${title}] Installation complete\" >> \"\${log_dir}/server-install.log\""
+            } > "${service_dir}/server-install.sh"
+            chmod +x "${service_dir}/server-install.sh"
+            log "✓ Server install script created for ${service}"
+
+            log "Creating firewall rules script for ${service}"
+            {
+              echo "#!/usr/bin/env bash"
+              echo "set -euo pipefail"
+              echo "# Simulated firewall configuration for ${title} service"
+              echo "echo 'allow from 10.0.0.0/8 to any port 443'"
+              echo "echo 'allow from 172.16.0.0/12 to any port 8443'"
+              echo "echo 'allow from 192.168.0.0/16 to any port 9000'"
+            } > "${service_dir}/firewall-rules.sh"
+            chmod +x "${service_dir}/firewall-rules.sh"
+            log "✓ Firewall rules script created for ${service}"
+
+            log "Creating network setup script for ${service}"
+            {
+              echo "#!/usr/bin/env bash"
+              echo "set -euo pipefail"
+              echo "# Simulated network creation for ${title} service"
+              echo "network_name=\"${service}-network\""
+              echo "echo \"Creating network \${network_name}\""
+              echo "docker network create \"\${network_name}\" >/dev/null 2>&1 || docker network inspect \"\${network_name}\" >/dev/null"
+            } > "${service_dir}/network-setup.sh"
+            chmod +x "${service_dir}/network-setup.sh"
+            log "✓ Network setup script created for ${service}"
+
+            log "Writing documentation blueprint for ${service}"
+            {
+              echo "# ${title} Service Blueprint"
+              echo ""
+              echo "This document is automatically generated by the Dependabot service provisioning workflow."
+              echo ""
+              echo "- **Container Image:** ${image}"
+              echo "- **Purpose:** Provision containerized resources for ${title} updates."
+              echo "- **Server Installation Script:** \`server-install.sh\`"
+              echo "- **Firewall Rules:** \`firewall-rules.sh\`"
+              echo "- **Network Setup:** \`network-setup.sh\`"
+            } > "${service_dir}/${service}.md"
+            log "✓ Documentation created for ${service}"
+
+            touch "${service_dir}/config/${service}-config.yaml"
+            log "✓ Config file created for ${service}"
+
+            log "Created assets for ${service}"
+          done < infrastructure/.services
+
+          echo "============================================"
+          log "Completed service asset generation (ALL services)"
+          echo "============================================"
+
+      - name: 🐳 Build container images (ALL services)
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Build container images"
+          echo "============================================"
+
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            log "${ECHO_PREFIX} DRY-RUN 모드: 이미지 빌드를 스킵합니다."
+            echo "============================================"
+            exit 0
+          fi
+
+          if [ ! -f infrastructure/.services ]; then
+            echo "::error::infrastructure/.services 파일이 없어 빌드할 서비스를 알 수 없습니다."
+            log "ERROR: infrastructure/.services not found"
+            exit 1
+          fi
+
+          mapfile -t services < infrastructure/.services
+          log "Services to build: ${services[*]}"
+
+          echo "Ensuring shared CI network exists"
+          docker network create dependabot-ci-network >/dev/null 2>&1 || docker network inspect dependabot-ci-network >/dev/null
+          log "✓ Docker network dependabot-ci-network is ready"
+
+          for service in "${services[@]}"; do
+            echo "--------------------------------------------"
+            log "Building image for ${service}"
+            echo "--------------------------------------------"
+            docker build --tag "dependabot/${service}-service:ci" "infrastructure/${service}"
+            log "✓ Image built: dependabot/${service}-service:ci"
+          done
+
+          echo "============================================"
+          log "Finished container image builds (ALL services)"
+          echo "============================================"
+
+      - name: 🔍 Smoke test containers (ALL services)
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Smoke test containers"
+          echo "============================================"
+
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            log "${ECHO_PREFIX} DRY-RUN 모드: 컨테이너 실행/스모크 테스트를 스킵합니다."
+            echo "============================================"
+            exit 0
+          fi
+
+          if [ ! -f infrastructure/.services ]; then
+            echo "::error::infrastructure/.services 파일이 없어 테스트할 서비스를 알 수 없습니다."
+            log "ERROR: infrastructure/.services not found"
+            exit 1
+          fi
+
+          mapfile -t services < infrastructure/.services
+          log "Services to test: ${services[*]}"
+
+          for service in "${services[@]}"; do
+            echo "--------------------------------------------"
+            log "Running container for ${service}"
+            echo "--------------------------------------------"
+            output="$(docker run --rm --network dependabot-ci-network "dependabot/${service}-service:ci" 2>&1 || true)"
+            echo "${output}"
+            if [[ "${output}" != *"container ready"* ]]; then
+              echo "::error::${service} container did not report ready state"
+              log "ERROR: ${service} container did not report ready state"
+              exit 1
+            fi
+            log "✓ ${service} container passed smoke test"
+          done
+
+          echo "============================================"
+          log "All containers reported ready state (ALL services)"
+          echo "============================================"
+
+      - name: 📂 Summarize generated structure
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Summarize generated structure"
+          echo "============================================"
+
+          if [ -f infrastructure/.services ]; then
+            log "Service list:"
+            cat infrastructure/.services | sort
+          else
+            log "WARNING: infrastructure/.services not found"
+          fi
+
+          echo "Listing generated service assets"
+          if [ -d infrastructure ]; then
+            find infrastructure -maxdepth 2 -type f -print | sort
+            echo "--------------------------------------------"
+            count=$(find infrastructure -type f | wc -l)
+            log "Service asset file count: ${count}"
+          else
+            echo "::warning::'infrastructure' directory not found"
+            log "WARNING: 'infrastructure' directory not found"
+          fi
+
+          echo "--------------------------------------------"
+          log "Service asset listing complete"
+          echo "============================================"
+
+      - name: 📦 Upload service artifacts (prepare)
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Prepare to upload service artifacts"
+          echo "============================================"
+
+          if [ -d infrastructure ]; then
+            log "Artifacts root: infrastructure/"
+            log "Sample tree (depth 2):"
+            find infrastructure -maxdepth 2 -type d -print | sort
+          else
+            echo "::error::No 'infrastructure' directory found to upload"
+            log "ERROR: No 'infrastructure' directory found to upload"
+            echo "============================================"
+            exit 1
+          fi
+
+          echo "============================================"
+
+      - name: 📤 Upload service artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependabot-service-assets
+          path: infrastructure/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 🧹 Cleanup provisioned networks (ALL services)
+        if: always()
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Cleanup provisioned networks"
+          echo "============================================"
+
+          log "Cleaning up Docker networks"
+          docker network rm dependabot-ci-network >/dev/null 2>&1 || true
+          log "✓ Removed dependabot-ci-network (if existed)"
+
+          if [ -f infrastructure/.services ]; then
+            mapfile -t services < infrastructure/.services
+          else
+            services=(python java linux ubuntu docker teradata nodejs)
+          fi
+
+          for service in "${services[@]}"; do
+            log "Removing network for ${service}"
+            docker network rm "${service}-network" >/dev/null 2>&1 || true
+            log "✓ Removed ${service}-network (if existed)"
+          done
+
+          echo "============================================"
+          log "Docker network cleanup complete (ALL services)"
+          echo "============================================"
+
+      - name: ✅ Echo final status
+        if: always()
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Workflow finished"
+          log "  - Conclusion : ${{ job.status }}"
+          log "  - DRY_RUN    : ${DRY_RUN:-}"
+          echo "============================================"

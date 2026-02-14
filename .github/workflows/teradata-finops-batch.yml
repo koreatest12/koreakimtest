@@ -1,0 +1,195 @@
+name: "🏦 Teradata FinOps Batch — EchoOps + Audit + Snapshot + ISO + DR(1일보관) + DBA + SafeEcho (v9)"
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      echo_trace:
+        description: "모든 단계에서 echo(set -x) 활성화 여부"
+        type: choice
+        options: ["true", "false"]
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  finops_pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      #######################################################################
+      # 0. 코드 체크아웃
+      #######################################################################
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      #######################################################################
+      # 1. 전역 echo_trace 설정
+      #######################################################################
+      - name: 🔊 전역 echo_trace 토글
+        run: |
+          if [ "${{ github.event.inputs.echo_trace || 'false' }}" = "true" ]; then
+            echo "ECHO_TRACE_GLOBAL=true" >> "$GITHUB_ENV"
+            echo "::notice::Global echo_trace = ON"
+          else
+            echo "ECHO_TRACE_GLOBAL=false" >> "$GITHUB_ENV"
+            echo "::notice::Global echo_trace = OFF"
+          fi
+
+      #######################################################################
+      # 2. Bootstrap /tmp/echo_helpers.sh
+      #######################################################################
+      - name: ⚙️ Bootstrap EchoOps Helper
+        run: |
+          set -e
+          mkdir -p /home/runner/td_data/{logs,tmp,release,history}
+          cat > /tmp/echo_helpers.sh <<'EOSH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          ts() { date +%Y-%m-%dT%H:%M:%S%z; }
+          echo_note() { echo "▶ $(ts) $*" | tee -a "/home/runner/td_data/logs/echo.log"; }
+          if [ "${ECHO_TRACE_GLOBAL:-}" = "true" ]; then
+            export PS4='+ $(date "+%Y-%m-%dT%H:%M:%S%z") ${BASH_SOURCE##*/}:${LINENO}: '
+            set -x
+          fi
+          trap 'echo_note "⚠️ Error (exit code $?) in ${BASH_SOURCE##*/}:${LINENO}"' ERR
+          EOSH
+          chmod +x /tmp/echo_helpers.sh
+          echo "::notice::Helper script ready (/tmp/echo_helpers.sh)"
+
+      #######################################################################
+      # 3. Echo Trace 테스트
+      #######################################################################
+      - name: 🧪 Echo Trace 확인 테스트
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "Echo Trace 테스트 시작"
+          echo "현재 PS4 설정:"
+          echo "$PS4"
+          sleep 1
+          echo_note "Echo Trace 테스트 종료"
+
+      #######################################################################
+      # 4. 시스템 업그레이드 & 보안 패치
+      #######################################################################
+      - name: ⬆️ 시스템 업그레이드/보안 패치
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "시스템 패키지 업데이트 시작"
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y unattended-upgrades ca-certificates
+          echo_note "업데이트 완료"
+
+      #######################################################################
+      # 5. PostgreSQL 설치
+      #######################################################################
+      - name: 🛢️ PostgreSQL 서버 설치 및 부트스트랩
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "PostgreSQL 설치"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-contrib
+          sudo systemctl start postgresql
+          sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE DATABASE finops;
+          DO $$BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'finops') THEN
+              CREATE ROLE finops LOGIN PASSWORD 'finops';
+            END IF;
+          END$$;
+          GRANT ALL PRIVILEGES ON DATABASE finops TO finops;
+          SQL
+
+      #######################################################################
+      # 6. DR 클러스터 구축
+      #######################################################################
+      - name: 🛰️ DR PostgreSQL 경량 스탠바이 구성
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "DR 클러스터 생성"
+          PG_MAJOR=$(psql -V | awk '{print $3}' | cut -d. -f1)
+          sudo pg_createcluster "$PG_MAJOR" dr --start -p 5433
+          sudo pg_lsclusters
+
+      #######################################################################
+      # 7. ISO/DR Resource 생성 + SQL 대량 파일 생성 (권한 문제 영구 해결)
+      #######################################################################
+      - name: 🧱 리소스/쿼리 대량 생성 및 주입 (권한 Fix 적용)
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "ISO/DR용 리소스 생성"
+
+          mkdir -p /home/runner/td_data/{iso_payloads,queries,resources}
+
+          # 리소스 생성
+          seq 1 50 | xargs -I{} sh -c 'echo "RESOURCE_{}" > /home/runner/td_data/resources/resource_{}.txt'
+
+          # SQL 생성 (runner 권한으로 생성)
+          for i in $(seq 1 20); do
+            echo "SELECT ${i} AS seq_id, now() AS generated_at;" > /home/runner/td_data/queries/query_${i}.sql
+          done
+
+          # 🔥🔥🔥 핵심 FIX: postgres가 접근할 수 있도록 전체 권한 부여
+          chmod -R 755 /home/runner/td_data/queries
+
+          echo_note "데이터베이스에 샘플 데이터 주입 시작"
+          sudo -u postgres psql -d finops -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE IF NOT EXISTS audit_snapshots (
+            id SERIAL PRIMARY KEY,
+            bucket VARCHAR(32) NOT NULL,
+            payload JSONB NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT now()
+          );
+          INSERT INTO audit_snapshots (bucket, payload)
+          SELECT 'iso-bucket', jsonb_build_object('row', g)
+          FROM generate_series(1, 100) AS g;
+          SQL
+
+          echo_note "대량 SQL 파일 실행 테스트"
+          sudo -u postgres psql -d finops -f /home/runner/td_data/queries/query_1.sql
+
+      #######################################################################
+      # 8. 추가 DB 도구 설치
+      #######################################################################
+      - name: 📦 추가 DB 유틸리티 설치
+        run: |
+          source /tmp/echo_helpers.sh
+          sudo apt-get install -y sqlite3 mysql-client unixodbc-bin
+
+      #######################################################################
+      # 9. 보안 툴 설치
+      #######################################################################
+      - name: 🛡️ 바이러스/보안 패키지 설치
+        run: |
+          source /tmp/echo_helpers.sh
+          sudo apt-get install -y clamav clamav-daemon
+          sudo freshclam || true
+
+      #######################################################################
+      # 10. 가상 데이터 생성
+      #######################################################################
+      - name: 📦 가상 데이터 생성
+        run: |
+          source /tmp/echo_helpers.sh
+          mkdir -p /home/runner/td_data/tmp
+          for i in $(seq 1 5); do
+            echo "ROW_${i},VALUE_$((RANDOM%1000))" >> /home/runner/td_data/tmp/sample.csv
+          done
+
+      #######################################################################
+      # 11. 품질검증
+      #######################################################################
+      - name: ✅ 품질 검증 단계
+        run: |
+          source /tmp/echo_helpers.sh
+          COUNT=$(wc -l < /home/runner/td_data/tmp/sample.csv)
+          if [ "$COUNT" -lt 5 ]; then exit 1; fi
+
+      #######################################################################
+      # 12. 종료
+      #######################################################################
+      - name: 🕒 종료 로그
+        run: |
+          source /tmp/echo_helpers.sh
+          echo_note "FinOps Batch 워크플로우 종료"

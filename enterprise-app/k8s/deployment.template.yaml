@@ -1,0 +1,13 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: enterprise-app }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: enterprise-app } }
+  template:
+    metadata: { labels: { app: enterprise-app } }
+    spec:
+      containers:
+      - name: enterprise-app
+        image: GHCR_IMAGE_PLACEHOLDER
+        ports: [{ containerPort: 8080 }]

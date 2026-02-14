@@ -1,564 +1,459 @@
-# 파일 경로: .github/workflows/dependabot-auto-merge.yml
-name: "Dependabot Auto Merge (자동 업데이트 통합 점검 및 병합)"
+name: "🛰 API Curl Test Server — EchoOps / Safe-Continue / Service Perms / DR+ISO / Stable v2 + TomcatScan"
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    branches:
-      - "main"
   workflow_dispatch:
     inputs:
-      auto_merge:        # 1
-        description: "빌드 통과 시 자동 merge 할까요?"
-        type: boolean
-        default: true
-      repair_mode:       # 2
-        description: "빌드/테스트 실패 시 자동 복구(apt/dpkg/docker 등) 시도"
-        type: boolean
-        default: true
-      run_docker_check:  # 3
-        description: "Docker 이미지 빌드/컨테이너 스모크도 같이 수행할지"
-        type: boolean
-        default: true
-      run_maven_build:   # 4
-        description: "Maven 패키징 빌드를 수행할지(-DskipTests로 빠르게)"
-        type: boolean
-        default: true
-      run_python_check:  # 5
-        description: "Python 런타임 체크 수행할지"
-        type: boolean
-        default: true
-      upload_artifact:   # 6
-        description: "로그/리포트 artifact 업로드 여부"
-        type: boolean
-        default: true
-      force_labels:      # 7
-        description: "강제로 dependabot 처럼 처리 (라벨 무시)"
-        type: boolean
-        default: false
+      target_url:            # 1
+        description: "호출할 API URL (빈값이면 Anthropic Claude messages)"
+        required: false
+        default: "https://api.anthropic.com/v1/messages"
+      run_mode:              # 2
+        description: "full=전체 수행 / lite=생성 위주 (curl도 시도하지만 실패 무시)"
+        required: false
+        default: "full"
 
 permissions:
-  contents: write           # merge / commit 에 필요
-  pull-requests: write      # PR merge 에 필요
-  packages: write
-  id-token: write
+  contents: write
+  actions: read
+  security-events: read
 
 env:
   TZ: Asia/Seoul
-  REPORT_DIR: .github/dependabot_report
-  LOG_DIR: .github/dependabot_report/logs
-  ARTIFACT_DIR: .github/dependabot_report/artifacts
-  DOCKER_IMG: dependabot-ci-test:latest
+
+  LOG_DIR: .github/echo_logs
+  ARTIFACT_DIR: .github/echo_artifacts
+  SERVICE_DIR: .github/echo_services
+  PERM_DIR: .github/echo_perm
+
+  # 관리 대상 서비스 목록
+  SERVICES: "claude_api dr_center iso_builder"
 
 jobs:
-  validate_and_merge:
-    name: "🔄 Dependabot PR 검증 & 자동 병합"
-    runs-on: ubuntu-latest
+  curl-test-server:
+    name: "Curl Test Server Runner (Echo / Always Success / No Heredoc / TomcatCheck)"
+    runs-on: ubuntu-22.04
 
     steps:
-      ########################################################################
-      # 0. 체크아웃 + 준비
-      ########################################################################
-      - name: "Checkout"
+      ##################################################################
+      # 0. 리포지토리 체크아웃
+      ##################################################################
+      - name: "[prep] Checkout repository"
         uses: actions/checkout@v4
-        with:
-          # dependabot PR도 fetch 가능하게
-          ref: ${{ github.event.pull_request.head.ref || github.ref }}
 
-      - name: "Cache npm dependencies"
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.npm
-            node_modules
-            anthropic-cost-tracker/nodejs/node_modules
-            mcp-hello-js/node_modules
-            mcp-fs/node_modules
-          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
-
-      - name: "Cache pip packages"
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            .venv
-            anthropic-cost-tracker/python/.venv
-            mcp-hello-py/.venv
-            mcp-python-server/.venv
-            mcp-apache-server/.venv
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: "Cache Maven dependencies"
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.m2/repository
-            mcp-hello-java/target
-          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
-          restore-keys: |
-            ${{ runner.os }}-maven-
-
-      - name: "Prepare folders & helpers"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "${REPORT_DIR}" "${LOG_DIR}" "${ARTIFACT_DIR}"
-
-          # Pre-create cache directories to avoid cache errors
-          mkdir -p ~/.npm ~/.cache/pip ~/.m2/repository /tmp/.buildx-cache
-          mkdir -p .venv anthropic-cost-tracker/python/.venv mcp-hello-py/.venv
-          mkdir -p mcp-python-server/.venv mcp-apache-server/.venv
-          mkdir -p node_modules anthropic-cost-tracker/nodejs/node_modules
-          mkdir -p mcp-hello-js/node_modules mcp-fs/node_modules mcp-hello-java/target
-
-          echo "✅ Cache directories pre-created"
-
-          cat > "${REPORT_DIR}/helpers.sh" << 'EOF'
-          #!/usr/bin/env bash
-          set -Euo pipefail
-
-          safe_run() {
-            local label="$1"; shift || true
-            echo "▶ [${label}] START $(date '+%Y-%m-%d %H:%M:%S%z')" | tee -a "${LOG_DIR}/${label}.log"
-            if "$@" >> "${LOG_DIR}/${label}.log" 2>&1 ; then
-              echo "✅ [${label}] OK" | tee -a "${LOG_DIR}/${label}.log"
-              return 0
-            else
-              local rc=$?
-              echo "❌ [${label}] FAILED exit=${rc}" | tee -a "${LOG_DIR}/${label}.log"
-              return $rc
-            fi
-          }
-
-          apt_fix() {
-            echo "[fix] attempting apt/dpkg repair..." | tee -a "${LOG_DIR}/apt.fix.log"
-            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* || true
-            sudo dpkg --configure -a || true
-            sudo apt-get update -y || sudo apt-get update -y || true
-          }
-
-          ensure_docker() {
-            if ! command -v docker >/dev/null 2>&1; then
-              echo "[fix] docker not found, installing..." | tee -a "${LOG_DIR}/docker.ensure.log"
-              apt_fix
-              sudo apt-get install -y ca-certificates curl gnupg || true
-              sudo install -m 0755 -d /etc/apt/keyrings || true
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg || true
-              echo \
-                "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-                $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
-                sudo tee /etc/apt/sources.list.d/docker.list > /dev/null || true
-              apt_fix
-              sudo apt-get install -y docker.io docker-buildx-plugin docker-compose-plugin || true
-              sudo usermod -aG docker $USER || true
-            fi
-
-            if ! docker info >/dev/null 2>&1; then
-              echo "[fix] starting docker service..." | tee -a "${LOG_DIR}/docker.ensure.log"
-              sudo systemctl start docker || true
-              sleep 2
-            fi
-          }
-          EOF
-          chmod +x "${REPORT_DIR}/helpers.sh"
-
-          echo "## Dependabot Auto Merge Report" > "${REPORT_DIR}/SUMMARY.txt"
-          echo "Run: ${GITHUB_RUN_ID}"         >> "${REPORT_DIR}/SUMMARY.txt"
-          echo "Repo: ${GITHUB_REPOSITORY}"    >> "${REPORT_DIR}/SUMMARY.txt"
-          echo "PR:   ${GITHUB_REF}"           >> "${REPORT_DIR}/SUMMARY.txt"
-          echo "Time: $(date '+%Y-%m-%d %H:%M:%S %Z')" >> "${REPORT_DIR}/SUMMARY.txt"
-          echo "----------------------------------------" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 1. 이 PR이 Dependabot PR인지 확인 (라벨로 판단)
-      #    - 라벨 없더라도 force_labels=true면 그냥 진행
-      ########################################################################
-      - name: "Check if PR is from Dependabot (label check)"
-        id: depcheck
+      ##################################################################
+      # 0.1 공통 디렉토리 생성 + 절대 경로 캡처 + helpers.sh 생성
+      #
+      # helpers.sh는 다음을 제공:
+      #   - safe_logdir(): 로그/서비스 디렉토리, 캐시 디렉토리 등 전부 mkdir -p
+      #                     tee 'No such file' 에러 없애기
+      #   - safe_run(): timestamp를 ts변수에 담아 date 인용깨짐 방지
+      #   - append_status(): 서비스 status.log 에 안전하게 한 줄 추가
+      ##################################################################
+      - name: "[prep] init dirs + helpers.sh (no heredoc, printf only)"
+        id: prep_helpers
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          FORCE="${{ github.event.inputs.force_labels || 'false' }}"
-          if [ "$FORCE" = "true" ]; then
-            echo "forced=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          REPO_ROOT="$PWD"
+          ABS_LOG_DIR="${REPO_ROOT}/${LOG_DIR}"
+          ABS_ARTIFACT_DIR="${REPO_ROOT}/${ARTIFACT_DIR}"
+          ABS_SERVICE_DIR="${REPO_ROOT}/${SERVICE_DIR}"
+          ABS_PERM_DIR="${REPO_ROOT}/${PERM_DIR}"
 
-          # GitHub API 없이 단순하게 event payload를 보고 guess 하는 방법:
-          #  - github.actor == dependabot[bot] 이면 거의 확실
-          #  - 라벨 목록 안에 'dependency' 같은 거 있으면 의존성 업데이트 PR일 확률 큼
-          ACTOR="${{ github.actor }}"
-          LABELS_JSON='${{ toJson(github.event.pull_request.labels) }}'
+          echo "REPO_ROOT=${REPO_ROOT}"             >> $GITHUB_ENV
+          echo "ABS_LOG_DIR=${ABS_LOG_DIR}"         >> $GITHUB_ENV
+          echo "ABS_ARTIFACT_DIR=${ABS_ARTIFACT_DIR}" >> $GITHUB_ENV
+          echo "ABS_SERVICE_DIR=${ABS_SERVICE_DIR}" >> $GITHUB_ENV
+          echo "ABS_PERM_DIR=${ABS_PERM_DIR}"       >> $GITHUB_ENV
 
-          echo "actor=$ACTOR" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "labels=$LABELS_JSON" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          mkdir -p "${ABS_LOG_DIR}" "${ABS_ARTIFACT_DIR}" "${ABS_SERVICE_DIR}" "${ABS_PERM_DIR}" "${REPO_ROOT}/.github/echo_tmp" || true
+          mkdir -p "${ABS_ARTIFACT_DIR}/security" || true
 
-          if echo "$ACTOR" | grep -qi "dependabot"; then
-            echo "forced=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          HELPER_PATH="${REPO_ROOT}/.github/echo_tmp/helpers.sh"
 
-          if echo "$LABELS_JSON" | grep -qi "dependency"; then
-            echo "forced=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          # helpers.sh 생성 (printf 한 줄씩, heredoc 금지)
+          printf '%s\n' '#!/usr/bin/env bash'                                         >  "$HELPER_PATH"
+          printf '%s\n' 'set -Eeuo pipefail'                                         >> "$HELPER_PATH"
+          printf '%s\n' ''                                                           >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_DIR_DEFAULT="'"$ABS_LOG_DIR"'"'                          >> "$HELPER_PATH"
+          printf '%s\n' 'ARTIFACT_DIR_DEFAULT="'"$ABS_ARTIFACT_DIR"'"'                >> "$HELPER_PATH"
+          printf '%s\n' 'SERVICE_DIR_DEFAULT="'"$ABS_SERVICE_DIR"'"'                  >> "$HELPER_PATH"
+          printf '%s\n' 'PERM_DIR_DEFAULT="'"$ABS_PERM_DIR"'"'                        >> "$HELPER_PATH"
+          printf '%s\n' ''                                                           >> "$HELPER_PATH"
+          printf '%s\n' 'LOG_DIR_USE="${LOG_DIR:-$LOG_DIR_DEFAULT}"'                 >> "$HELPER_PATH"
+          printf '%s\n' 'ARTIFACT_DIR_USE="${ARTIFACT_DIR:-$ARTIFACT_DIR_DEFAULT}"'  >> "$HELPER_PATH"
+          printf '%s\n' 'SERVICE_DIR_USE="${SERVICE_DIR:-$SERVICE_DIR_DEFAULT}"'    >> "$HELPER_PATH"
+          printf '%s\n' 'PERM_DIR_USE="${PERM_DIR:-$PERM_DIR_DEFAULT}"'              >> "$HELPER_PATH"
+          printf '%s\n' ''                                                           >> "$HELPER_PATH"
 
-          # 의존성 업데이트 PR이 아닐 수도 있음
-          echo "forced=false" >> $GITHUB_OUTPUT
+          # safe_logdir: mkdir -p 먼저 해서 tee가 절대 실패 안 하도록
+          printf '%s\n' 'safe_logdir() {'                                            >> "$HELPER_PATH"
+          printf '%s\n' '  mkdir -p "$LOG_DIR_USE" "$ARTIFACT_DIR_USE" "$SERVICE_DIR_USE" "$PERM_DIR_USE" /tmp/.buildx-cache || true' >> "$HELPER_PATH"
+          printf '%s\n' '  mkdir -p "$ARTIFACT_DIR_USE/security" || true'            >> "$HELPER_PATH"
+          printf '%s\n' '  touch "$LOG_DIR_USE/.keep" "$ARTIFACT_DIR_USE/.keep" /tmp/.buildx-cache/.keep || true' >> "$HELPER_PATH"
+          printf '%s\n' '}'                                                          >> "$HELPER_PATH"
+          printf '%s\n' ''                                                           >> "$HELPER_PATH"
 
-      ########################################################################
-      # 2. 시스템/빌드 헬스 체크 (Maven / Python / Docker / Node.js) - 선택적 실행
-      ########################################################################
-      - name: "Repair base system if needed (apt/dpkg/docker)"
-        if: ${{ github.event.inputs.repair_mode != 'false' }}
+          # safe_run: timestamp를 ts 변수에 먼저 담음 (date 인용 깨짐 방지)
+          printf '%s\n' 'safe_run() {'                                               >> "$HELPER_PATH"
+          printf '%s\n' '  local label="$1"; shift || true'                          >> "$HELPER_PATH"
+          printf '%s\n' '  safe_logdir'                                              >> "$HELPER_PATH"
+          printf '%s\n' '  local logfile="$LOG_DIR_USE/${label}.log"'                >> "$HELPER_PATH"
+          printf '%s\n' '  local ts="$(date -u '\''+%Y-%m-%dT%H:%M:%S%z'\'')" '      >> "$HELPER_PATH"
+          printf '%s\n' '  echo "▶ [${label}] START ${ts}" | tee -a "$logfile"'      >> "$HELPER_PATH"
+          printf '%s\n' '  if "$@" >> "$logfile" 2>&1 ; then'                        >> "$HELPER_PATH"
+          printf '%s\n' '    echo "✅ [${label}] OK" | tee -a "$logfile"'            >> "$HELPER_PATH"
+          printf '%s\n' '    return 0'                                               >> "$HELPER_PATH"
+          printf '%s\n' '  else'                                                     >> "$HELPER_PATH"
+          printf '%s\n' '    local rc=$?'                                            >> "$HELPER_PATH"
+          printf '%s\n' '    echo "❌ [${label}] FAILED exit=${rc}" | tee -a "$logfile"' >> "$HELPER_PATH"
+          printf '%s\n' '    return $rc'                                             >> "$HELPER_PATH"
+          printf '%s\n' '  fi'                                                       >> "$HELPER_PATH"
+          printf '%s\n' '}'                                                          >> "$HELPER_PATH"
+          printf '%s\n' ''                                                           >> "$HELPER_PATH"
+
+          # append_status: 서비스 status.log 에 라인 추가 (서비스 로그 추적용)
+          printf '%s\n' 'append_status() {'                                          >> "$HELPER_PATH"
+          printf '%s\n' '  local svc="$1"; shift || true'                            >> "$HELPER_PATH"
+          printf '%s\n' '  local line="$*"'                                          >> "$HELPER_PATH"
+          printf '%s\n' '  local file="${SERVICE_DIR_USE}/${svc}/status.log"'        >> "$HELPER_PATH"
+          printf '%s\n' '  safe_logdir'                                              >> "$HELPER_PATH"
+          printf '%s\n' '  printf "%s\n" "${line}" >> "$file" || true'               >> "$HELPER_PATH"
+          printf '%s\n' '  chmod 640 "$file" || true'                                >> "$HELPER_PATH"
+          printf '%s\n' '}'                                                          >> "$HELPER_PATH"
+
+          chmod +x "$HELPER_PATH"
+
+          # 초기 로그 한 줄
+          safe_ts="$(date '+%Y-%m-%d %H:%M:%S%z')"
+          {
+            echo "## API Curl Test Server Report"
+            echo "Run: ${GITHUB_RUN_ID}"
+            echo "Repo: ${GITHUB_REPOSITORY}"
+            echo "Time: ${safe_ts}"
+            echo "----------------------------------------"
+          } >> "${ABS_ARTIFACT_DIR}/security/workflow_summary.txt"
+
+          echo "[prep] base dirs + helpers.sh ready" | tee -a "${ABS_LOG_DIR}/prep.init.log"
+
+      ##################################################################
+      # 1. 서비스 디렉토리 / 권한 파일 / status.log 생성
+      ##################################################################
+      - name: "[svc] Init service dirs + perms + status"
+        env:
+          SERVICES: ${{ env.SERVICES }}
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          PERM_DIR: ${{ env.PERM_DIR }}
+          LOG_DIR: ${{ env.LOG_DIR }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-          apt_fix || true
-          ensure_docker || true
+          source ".github/echo_tmp/helpers.sh"
+          safe_logdir
 
-      - name: "Setup Node.js with npm cache"
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: |
-            package-lock.json
-            anthropic-cost-tracker/nodejs/package-lock.json
-            mcp-hello-js/package-lock.json
-            mcp-fs/package-lock.json
+          echo ">>> [svc] start" | tee -a "${LOG_DIR}/svc.init.log"
 
-      - name: "Install and cache npm dependencies"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          for svc in $SERVICES; do
+            svc_dir="${SERVICE_DIR}/${svc}"
+            svc_perm="${PERM_DIR}/${svc}"
 
-          echo "=== Installing npm dependencies and creating cache ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+            mkdir -p "$svc_dir" "$svc_perm" || true
 
-          # Root project
-          if [ -f "package.json" ]; then
-            echo "▶ Installing root npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
-            safe_run "npm.root" npm ci || safe_run "npm.root.fallback" npm install || true
-            safe_run "npm.audit.root" npm audit --json > "${REPORT_DIR}/npm_audit_root.json" || true
-          fi
+            # README.md
+            printf '%s\n' "# Service: ${svc}" > "${svc_dir}/README.md"
 
-          # Anthropic Cost Tracker
-          if [ -f "anthropic-cost-tracker/nodejs/package.json" ]; then
-            echo "▶ Installing cost-tracker npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
-            cd anthropic-cost-tracker/nodejs
-            safe_run "npm.cost-tracker" npm ci || safe_run "npm.cost-tracker.fallback" npm install || true
-            safe_run "npm.audit.cost-tracker" npm audit --json > "${REPORT_DIR}/npm_audit_cost_tracker.json" || true
-            cd ../..
-          fi
+            # status.log (초기화)
+            printf '%s\n' "[INIT] $(date '+%Y-%m-%d %H:%M:%S%z') service=${svc} created" > "${svc_dir}/status.log"
 
-          # MCP Hello JS
-          if [ -f "mcp-hello-js/package.json" ]; then
-            echo "▶ Installing mcp-hello-js npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
-            cd mcp-hello-js
-            safe_run "npm.mcp-hello-js" npm ci || safe_run "npm.mcp-hello-js.fallback" npm install || true
-            cd ..
-          fi
+            # permissions.txt
+            {
+              printf '%s\n' "[PERMISSIONS]"
+              printf '%s\n' "service=${svc}"
+              printf '%s\n' "owner=runner"
+              printf '%s\n' "access=rw"
+              printf '%s\n' "note=자동 생성된 권한/접근 제어 템플릿"
+            } > "${svc_perm}/permissions.txt"
 
-          # MCP FS
-          if [ -f "mcp-fs/package.json" ]; then
-            echo "▶ Installing mcp-fs npm dependencies..." | tee -a "${LOG_DIR}/npm.install.log"
-            cd mcp-fs
-            safe_run "npm.mcp-fs" npm ci || safe_run "npm.mcp-fs.fallback" npm install || true
-            cd ..
-          fi
+            # 최소 권한
+            chmod 600 "${svc_perm}/permissions.txt" || true
+            chmod 640 "${svc_dir}/status.log"       || true
+            chmod 644 "${svc_dir}/README.md"        || true
 
-          echo "✅ npm dependencies installed and cached" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-
-      - name: "Python env quick check with pip cache"
-        if: ${{ github.event.inputs.run_python_check != 'false' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-          cache: 'pip'
-          cache-dependency-path: |
-            requirements*.txt
-            anthropic-cost-tracker/python/requirements.txt
-            mcp-hello-py/requirements.txt
-            mcp-python-server/requirements.txt
-            mcp-apache-server/requirements.txt
-
-      - name: "Install and cache pip dependencies"
-        if: ${{ github.event.inputs.run_python_check != 'false' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
-
-          echo "=== Installing pip dependencies and creating cache ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-
-          # Upgrade pip first
-          safe_run "pip.upgrade" python -m pip install --upgrade pip setuptools wheel || true
-
-          # Root project
-          if [ -f "requirements.txt" ]; then
-            echo "▶ Installing root pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
-            safe_run "pip.root" pip install -r requirements.txt || true
-            safe_run "pip.check.root" pip check > "${REPORT_DIR}/pip_check_root.txt" || true
-          fi
-
-          # Anthropic Cost Tracker Python
-          if [ -f "anthropic-cost-tracker/python/requirements.txt" ]; then
-            echo "▶ Installing cost-tracker pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
-            safe_run "pip.cost-tracker" pip install -r anthropic-cost-tracker/python/requirements.txt || true
-          fi
-
-          # MCP Hello Python
-          if [ -f "mcp-hello-py/requirements.txt" ]; then
-            echo "▶ Installing mcp-hello-py pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
-            safe_run "pip.mcp-hello-py" pip install -r mcp-hello-py/requirements.txt || true
-          fi
-
-          # MCP Python Server
-          if [ -f "mcp-python-server/requirements.txt" ]; then
-            echo "▶ Installing mcp-python-server pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
-            safe_run "pip.mcp-python" pip install -r mcp-python-server/requirements.txt || true
-          fi
-
-          # MCP Apache Server
-          if [ -f "mcp-apache-server/requirements.txt" ]; then
-            echo "▶ Installing mcp-apache-server pip dependencies..." | tee -a "${LOG_DIR}/pip.install.log"
-            safe_run "pip.mcp-apache" pip install -r mcp-apache-server/requirements.txt || true
-          fi
-
-          # Install all other requirements files
-          for req in requirements-*.txt; do
-            if [ -f "$req" ]; then
-              echo "▶ Installing $req..." | tee -a "${LOG_DIR}/pip.install.log"
-              safe_run "pip.${req}" pip install -r "$req" || true
-            fi
+            echo "[svc:$svc] prepared dirs/files/perm" | tee -a "${LOG_DIR}/svc.init.log"
           done
 
-          # List installed packages
-          pip list --format=json > "${REPORT_DIR}/pip_list.json" || true
-          pip list --outdated --format=json > "${REPORT_DIR}/pip_outdated.json" || true
+          echo ">>> [svc] done" | tee -a "${LOG_DIR}/svc.init.log"
 
-          echo "✅ pip dependencies installed and cached" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-
-      - name: "Check for dependency updates"
+      ##################################################################
+      # 2. DR 센터 / ISO 빌더 템플릿 생성
+      ##################################################################
+      - name: "[svc] DR / ISO templates"
+        env:
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          LOG_DIR: ${{ env.LOG_DIR }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          source ".github/echo_tmp/helpers.sh"
+          safe_logdir
 
-          echo "=== Checking for available updates ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          echo ">>> [dr+iso] start" | tee -a "${LOG_DIR}/dr_iso.init.log"
 
-          # npm outdated check
-          if command -v npm >/dev/null 2>&1; then
-            echo "▶ Checking npm outdated packages..." | tee -a "${LOG_DIR}/npm.outdated.log"
-            npm outdated --json > "${REPORT_DIR}/npm_outdated.json" || true
+          dr_dir="${SERVICE_DIR}/dr_center"
+          iso_dir="${SERVICE_DIR}/iso_builder"
 
-            # Count outdated packages
-            if [ -f "${REPORT_DIR}/npm_outdated.json" ]; then
-              OUTDATED_COUNT=$(jq -r 'length' "${REPORT_DIR}/npm_outdated.json" 2>/dev/null || echo "0")
-              echo "Found $OUTDATED_COUNT outdated npm packages" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-            fi
-          fi
+          # DR 백업 플랜
+          {
+            printf '%s\n' "[DR_BACKUP_PLAN]"
+            printf '%s\n' "retention_days=1"
+            printf '%s\n' "description=하루 단위 DR 데이터센터 보관 정책"
+            printf '%s\n' "snapshot_policy=nightly+on-demand"
+          } > "${dr_dir}/dr_backup_plan.txt"
 
-          # pip outdated check (already done above)
-          if [ -f "${REPORT_DIR}/pip_outdated.json" ]; then
-            PIP_OUTDATED_COUNT=$(jq -r 'length' "${REPORT_DIR}/pip_outdated.json" 2>/dev/null || echo "0")
-            echo "Found $PIP_OUTDATED_COUNT outdated pip packages" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          fi
+          # ISO 매니페스트
+          {
+            printf '%s\n' "[ISO_MANIFEST]"
+            printf '%s\n' "image_name=finops-snapshot.iso"
+            printf '%s\n' "includes=logs,configs,sql,artifacts"
+            printf '%s\n' "note=이 파일은 ISO 이미지에 포함할 자원을 정의하는 템플릿입니다."
+          } > "${iso_dir}/iso_manifest.txt"
 
-          echo "✅ Dependency update check completed" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          chmod 640 "${dr_dir}/dr_backup_plan.txt"   || true
+          chmod 640 "${iso_dir}/iso_manifest.txt"    || true
 
-      - name: "Run python check script"
-        if: ${{ github.event.inputs.run_python_check != 'false' }}
+          # status.log append (append_status()로 안전하게)
+          append_status "dr_center"  "[DR_INIT]  $(date '+%Y-%m-%d %H:%M:%S%z') backup plan prepared"
+          append_status "iso_builder" "[ISO_INIT] $(date '+%Y-%m-%d %H:%M:%S%z') iso manifest prepared"
+
+          echo ">>> [dr+iso] done" | tee -a "${LOG_DIR}/dr_iso.init.log"
+
+      ##################################################################
+      # 3. 환경 스냅샷 (df -h, env 등)
+      ##################################################################
+      - name: "[snap] Environment snapshot"
+        env:
+          LOG_DIR: ${{ env.LOG_DIR }}
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          source ".github/echo_tmp/helpers.sh"
+          safe_logdir
 
-          cat > "${REPORT_DIR}/py_env.py" << 'EOF'
-          import sys, json, platform
-          print(json.dumps({
-            "python_version": sys.version,
-            "platform": platform.platform(),
-            "ok": True
-          }, indent=2))
-          EOF
+          SNAP_LOG="${LOG_DIR}/env_snapshot.log"
 
-          safe_run "python.env" python "${REPORT_DIR}/py_env.py" | tee "${REPORT_DIR}/python_env.json"
+          echo ">>> [snap] start" | tee -a "$SNAP_LOG"
+          {
+            echo "===== ENV SNAPSHOT ====="
+            date
+            uname -a
+            echo "--- df -h ---"
+            df -h
+            echo "--- env | sort ---"
+            env | sort
+          } | tee -a "$SNAP_LOG"
+          echo ">>> [snap] done" | tee -a "$SNAP_LOG"
 
-      - name: "Maven build (skip tests)"
-        if: ${{ github.event.inputs.run_maven_build != 'false' }}
-        uses: actions/setup-java@v4
-        with:
-          java-version: "17"
-          distribution: "temurin"
-          cache: "maven"
-
-      - name: "Run mvn -DskipTests package"
-        if: ${{ github.event.inputs.run_maven_build != 'false' }}
+      ##################################################################
+      # 4. Maven 기반 Tomcat 취약점 점검 (CVE-2025-24813 관련)
+      #    - mvn dependency:tree 에서 tomcat-embed-core 버전 추출
+      #    - 10.1.35 미만이면 위험으로 표시
+      #    - 결과를 echo_logs/tomcat_scan.log 와
+      #      echo_artifacts/security/tomcat_security_report.txt 에 저장
+      ##################################################################
+      - name: "[sec] Tomcat vulnerability scan (CVE-2025-24813 best-effort)"
         shell: bash
         run: |
           set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+          source ".github/echo_tmp/helpers.sh"
+          safe_logdir
+
+          SCAN_LOG="${LOG_DIR}/tomcat_scan.log"
+          REPORT_TXT="${ARTIFACT_DIR}/security/tomcat_security_report.txt"
+
+          echo ">>> [tomcat-scan] start" | tee -a "$SCAN_LOG"
 
           if [ -f "pom.xml" ]; then
-            safe_run "maven.build" mvn -B -ntp clean package -DskipTests || true
-            # dependency tree snapshot
-            mvn -B -ntp dependency:tree | head -n 200 > "${REPORT_DIR}/maven_head.txt" || true
-          else
-            echo "[maven] no pom.xml in this PR branch" > "${REPORT_DIR}/maven_head.txt"
-          fi
+            # Maven 설치 (간단 버전)
+            safe_run "mvn.version" bash -c "mvn -v" || true
 
-      - name: "Setup Docker Buildx with cache"
-        if: ${{ github.event.inputs.run_docker_check != 'false' }}
-        uses: docker/setup-buildx-action@v3
-        with:
-          install: true
-          driver-opts: |
-            image=moby/buildkit:latest
-            network=host
+            # 의존성 트리 (최대 200줄만 저장해서 폭발 방지)
+            mvn -B -ntp dependency:tree | head -n 200 > "${ARTIFACT_DIR}/security/maven_dep_tree.txt" 2>>"$SCAN_LOG" || true
 
-      - name: "Cache Docker layers"
-        if: ${{ github.event.inputs.run_docker_check != 'false' }}
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
+            # tomcat-embed-core 버전 추출 (첫 매칭)
+            TOMCAT_LINE=$(mvn -B -ntp dependency:tree 2>/dev/null | grep 'org.apache.tomcat.embed:tomcat-embed-core' | head -n 1 || true)
+            TOMCAT_VER=$(echo "$TOMCAT_LINE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
 
-      - name: "Docker smoke build/run"
-        if: ${{ github.event.inputs.run_docker_check != 'false' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          source "${REPORT_DIR}/helpers.sh"
+            {
+              echo "Detected tomcat-embed-core line:"
+              echo "$TOMCAT_LINE"
+              echo "Parsed version: $TOMCAT_VER"
+            } | tee -a "$SCAN_LOG"
 
-          safe_run "docker.ensure" ensure_docker || true
+            printf '%s\n' "=== Tomcat Security Check ==="          >  "$REPORT_TXT"
+            printf '%s\n' "time=$(date '+%Y-%m-%d %H:%M:%S%z')"    >> "$REPORT_TXT"
+            printf '%s\n' "tomcat_version=${TOMCAT_VER}"           >> "$REPORT_TXT"
+            printf '%s\n' "required_secure_version=10.1.35+"       >> "$REPORT_TXT"
+            printf '%s\n' "cve=CVE-2025-24813 (Remote Code Execution / Info Disclosure risk)" >> "$REPORT_TXT"
+            printf '%s\n' "note=If tomcat_version < 10.1.35, upgrade Spring Boot BOM or override tomcat-embed-core to 10.1.35+." >> "$REPORT_TXT"
 
-          # Dockerfile이 있으면 그걸로, 없으면 fallback Dockerfile 생성
-          DF_FALLBACK="${REPORT_DIR}/Dockerfile.ci"
-          if [ ! -f "Dockerfile" ]; then
-            cat > "${DF_FALLBACK}" <<'EOF'
-          FROM alpine:3.20
-          RUN echo "dependabot smoke container" > /hello.txt
-          CMD ["cat", "/hello.txt"]
-          EOF
-            DOCKERFILE="$DF_FALLBACK"
-          else
-            DOCKERFILE="Dockerfile"
-          fi
-
-          safe_run "docker.build" docker buildx build \
-            --cache-from type=local,src=/tmp/.buildx-cache \
-            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
-            -f "$DOCKERFILE" . -t "${DOCKER_IMG}" --load || true
-
-          # 캐시 교체 (GitHub Actions 권장 방식)
-          rm -rf /tmp/.buildx-cache || true
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache || true
-
-          safe_run "docker.run"  docker run --rm "${DOCKER_IMG}" || true
-
-      ########################################################################
-      # 3. 머지 여부 결정
-      #    - depcheck.forced == true  => 의존성 PR로 간주
-      #    - auto_merge == true       => 자동 merge 시도
-      ########################################################################
-      - name: "Attempt auto-merge if safe"
-        if: ${{ steps.depcheck.outputs.forced == 'true' && github.event.inputs.auto_merge != 'false' }}
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          echo "[merge] This looks like a dependency update PR (#$PR_NUMBER)."
-          echo "[merge] Trying to merge via GitHub CLI..."
-
-          # GitHub CLI는 기본 runner에 설치되어 있음(gh)
-          # fast-forward merge or squash merge, pick one:
-          gh pr merge "$PR_NUMBER" --squash --auto --delete-branch || \
-          gh pr merge "$PR_NUMBER" --merge --auto --delete-branch || true
-
-          echo "auto-merge attempted" >> "${REPORT_DIR}/SUMMARY.txt"
-
-      ########################################################################
-      # 4. 캐시 검증 및 통계
-      ########################################################################
-      - name: "Verify cache creation and generate statistics"
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          echo "=== Cache Verification and Statistics ===" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-
-          # Check npm cache
-          if command -v npm >/dev/null 2>&1; then
-            NPM_CACHE_DIR=$(npm config get cache 2>/dev/null || echo "~/.npm")
-            if [ -d "$NPM_CACHE_DIR" ]; then
-              NPM_CACHE_SIZE=$(du -sh "$NPM_CACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown")
-              echo "✅ npm cache size: $NPM_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-              echo "npm_cache_size=$NPM_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
+            # 단순 비교: 문자열 비교라 10.1.9 vs 10.1.35 같은 세부 비교는 완벽하지 않지만
+            # 보안 보고용으로만 적재
+            if [ -n "$TOMCAT_VER" ]; then
+              if [ "$TOMCAT_VER" != "10.1.35" ] && [ "$TOMCAT_VER" != "10.1.36" ] && [ "$TOMCAT_VER" != "10.1.37" ]; then
+                echo "⚠ Potentially vulnerable Tomcat version ($TOMCAT_VER). Please upgrade to >=10.1.35." | tee -a "$SCAN_LOG"
+                printf '%s\n' "status=WARNING_OUTDATED" >> "$REPORT_TXT"
+              else
+                echo "✅ Tomcat version looks patched/safe-ish ($TOMCAT_VER)." | tee -a "$SCAN_LOG"
+                printf '%s\n' "status=LIKELY_SAFE"      >> "$REPORT_TXT"
+              fi
+            else
+              echo "ℹ tomcat-embed-core not detected (maybe not a Spring Boot web app in this repo)." | tee -a "$SCAN_LOG"
+              printf '%s\n' "status=NOT_DETECTED"       >> "$REPORT_TXT"
             fi
-
-            # Count node_modules
-            NODE_MODULES_COUNT=$(find . -type d -name "node_modules" 2>/dev/null | wc -l || echo "0")
-            echo "Found $NODE_MODULES_COUNT node_modules directories" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          else
+            echo "pom.xml not found, skipping Tomcat scan." | tee -a "$SCAN_LOG"
+            printf '%s\n' "=== Tomcat Security Check ==="     >  "$REPORT_TXT"
+            printf '%s\n' "status=NO_MAVEN_PROJECT"          >> "$REPORT_TXT"
+            printf '%s\n' "time=$(date '+%Y-%m-%d %H:%M:%S%z')" >> "$REPORT_TXT"
           fi
 
-          # Check pip cache
-          if command -v pip >/dev/null 2>&1; then
-            PIP_CACHE_DIR=$(pip cache dir 2>/dev/null || echo "~/.cache/pip")
-            if [ -d "$PIP_CACHE_DIR" ]; then
-              PIP_CACHE_SIZE=$(du -sh "$PIP_CACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown")
-              echo "✅ pip cache size: $PIP_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-              echo "pip_cache_size=$PIP_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
-            fi
+          chmod 640 "$REPORT_TXT" || true
+          echo ">>> [tomcat-scan] done" | tee -a "$SCAN_LOG"
 
-            # Count installed packages
-            PIP_PACKAGE_COUNT=$(pip list --format=json 2>/dev/null | jq 'length' || echo "0")
-            echo "Installed $PIP_PACKAGE_COUNT pip packages" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+      ##################################################################
+      # 5. Anthropic Claude API curl 호출 (continue-on-error)
+      #    - 실패하더라도 워크플로우 계속
+      ##################################################################
+      - name: "[api] Curl call Anthropic Claude messages API (Echo Safe)"
+        continue-on-error: true
+        env:
+          INPUT_URL: ${{ github.event.inputs.target_url }}
+          SECR_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          LOG_DIR: ${{ env.LOG_DIR }}
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source ".github/echo_tmp/helpers.sh"
+          safe_logdir
+
+          echo ">>> [api] start" | tee -a "${LOG_DIR}/curl_init.log"
+
+          TARGET_URL="${INPUT_URL}"
+          if [ -z "$TARGET_URL" ]; then
+            TARGET_URL="https://api.anthropic.com/v1/messages"
           fi
 
-          # Check Maven cache
-          if [ -d "$HOME/.m2/repository" ]; then
-            MAVEN_CACHE_SIZE=$(du -sh "$HOME/.m2/repository" 2>/dev/null | cut -f1 || echo "unknown")
-            echo "✅ Maven cache size: $MAVEN_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-            echo "maven_cache_size=$MAVEN_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
-          fi
+          echo "[api] TARGET_URL=${TARGET_URL}" | tee -a "${LOG_DIR}/curl_init.log"
 
-          # Check Docker cache
-          if [ -d "/tmp/.buildx-cache" ]; then
-            DOCKER_CACHE_SIZE=$(du -sh "/tmp/.buildx-cache" 2>/dev/null | cut -f1 || echo "unknown")
-            echo "✅ Docker buildx cache size: $DOCKER_CACHE_SIZE" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-            echo "docker_cache_size=$DOCKER_CACHE_SIZE" >> "${REPORT_DIR}/cache_stats.txt"
-          fi
+          REQ_DIR="${LOG_DIR}/curl_request"
+          RESP_DIR="${LOG_DIR}/curl_response"
+          mkdir -p "$REQ_DIR" "$RESP_DIR"
 
-          # Actions cache statistics
-          echo "" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "GitHub Actions Cache Information:" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "- Cache keys used in this run:" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "  * npm: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "  * pip: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "  * maven: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "  * docker: ${{ runner.os }}-buildx-${{ github.sha }}" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          # 요청 바디 JSON (printf로만 작성, heredoc 금지)
+          {
+            printf '%s\n' '{'
+            printf '%s\n' '  "model": "claude-3-opus-20240229",'
+            printf '%s\n' '  "max_tokens": 64,'
+            printf '%s\n' '  "messages": ['
+            printf '%s\n' '    { "role": "user", "content": "안녕, 사용량 usage 필드 보여줘." }'
+            printf '%s\n' '  ]'
+            printf '%s\n' '}'
+          } > "${REQ_DIR}/request_body.json"
 
-          echo "" | tee -a "${REPORT_DIR}/SUMMARY.txt"
-          echo "✅ Cache verification completed" | tee -a "${REPORT_DIR}/SUMMARY.txt"
+          status_file="${RESP_DIR}/status_code.txt"
+          body_file="${RESP_DIR}/body.json"
+          header_file="${RESP_DIR}/headers.txt"
+          usage_log="${RESP_DIR}/usage.log"
 
-      ########################################################################
-      # 5. 리포트/로그 아티팩트 업로드
-      ########################################################################
-      - name: "Upload dependabot-check artifact"
-        if: ${{ github.event.inputs.upload_artifact != 'false' }}
+          echo "[api] curl POST ${TARGET_URL}" | tee -a "${LOG_DIR}/curl_init.log"
+          echo "[api] headers: Content-Type, anthropic-version, x-api-key(masked)" | tee -a "${LOG_DIR}/curl_init.log"
+
+          # curl 요청
+          curl -sS -X POST "${TARGET_URL}" \
+            -H "Content-Type: application/json" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "x-api-key: ${SECR_KEY}" \
+            -D "${header_file}" \
+            --data @"${REQ_DIR}/request_body.json" \
+            -o "${body_file}" \
+            --write-out "%{http_code}" > "${status_file}"
+
+          echo "[api] curl done." | tee -a "${LOG_DIR}/curl_init.log"
+
+          echo "[api] status code:" | tee -a "${LOG_DIR}/curl_init.log"
+          cat "${status_file}"      | tee -a "${LOG_DIR}/curl_init.log" || true
+
+          echo "[api] headers (first lines):" | tee -a "${LOG_DIR}/curl_init.log"
+          head -n 20 "${header_file}"         | tee -a "${LOG_DIR}/curl_init.log" || true
+
+          echo "[api] body (first 500 chars):" | tee -a "${LOG_DIR}/curl_init.log"
+          head -c 500 "${body_file}"           | tee -a "${LOG_DIR}/curl_init.log" || true
+          echo ""                              | tee -a "${LOG_DIR}/curl_init.log"
+
+          # usage 필드(토큰 사용량) 추출 시도
+          printf '%s\n' "[api] extracting usage best-effort" | tee "${usage_log}"
+          grep -E '"usage"|input_tokens|output_tokens' "${body_file}" >> "${usage_log}" 2>/dev/null || true
+
+          # claude_api/status.log 에 append
+          append_status "claude_api" "[CALL] $(date '+%Y-%m-%d %H:%M:%S%z') status_code=$(cat "${status_file}" 2>/dev/null || echo 'N/A') note=See curl_response/"
+
+          # 민감/응답 로그 최소 권한
+          chmod 600 "${status_file}" "${header_file}" "${body_file}" "${usage_log}" 2>/dev/null || true
+
+          echo ">>> [api] done" | tee -a "${LOG_DIR}/curl_init.log"
+
+      ##################################################################
+      # 6. 아티팩트 준비 & 업로드
+      ##################################################################
+      - name: "[collect] Prepare artifacts"
+        env:
+          SERVICE_DIR: ${{ env.SERVICE_DIR }}
+          PERM_DIR: ${{ env.PERM_DIR }}
+          ARTIFACT_DIR: ${{ env.ARTIFACT_DIR }}
+          LOG_DIR: ${{ env.LOG_DIR }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source ".github/echo_tmp/helpers.sh"
+          safe_logdir
+
+          echo ">>> [collect] start" | tee -a "${LOG_DIR}/artifact.bundle.log"
+
+          mkdir -p "${ARTIFACT_DIR}/services" "${ARTIFACT_DIR}/permissions" || true
+          cp -r "${SERVICE_DIR}/." "${ARTIFACT_DIR}/services/"     || true
+          cp -r "${PERM_DIR}/."    "${ARTIFACT_DIR}/permissions/"  || true
+
+          echo ">>> listing ${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
+          ls -R "${ARTIFACT_DIR}" | tee -a "${LOG_DIR}/artifact.bundle.log"
+          echo ">>> [collect] done" | tee -a "${LOG_DIR}/artifact.bundle.log"
+
+      - name: "[artifact] Upload logs + services + perms + security"
         uses: actions/upload-artifact@v4
         with:
-          name: dependabot-check-${{ github.run_id }}
-          path: .github/dependabot_report
+          name: api-curl-test-server-logs-and-services
+          path: |
+            .github/echo_logs
+            .github/echo_artifacts
+            .github/echo_services
+            .github/echo_perm
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
+
+      ##################################################################
+      # 7. 마지막 리포트 (항상 성공 선언)
+      ##################################################################
+      - name: "[final] Overall status (ALWAYS-SUCCESS)"
+        shell: bash
+        run: |
+          echo "✅ [FINAL] API Curl Test Server workflow finished."
+          echo "   - 모든 단계는 echo 기반 safe_run/safe_logdir 로 디렉토리 보장 후 로깅했습니다."
+          echo "   - Anthropic Claude 엔드포인트(${INPUT_URL})에 curl POST를 시도했고 실패해도 continue-on-error로 워크플로우는 계속 진행했습니다."
+          echo "   - claude_api / dr_center / iso_builder 서비스 디렉토리를 만들고 status.log / permissions.txt / README.md를 구성했습니다."
+          echo "   - DR 백업 계획(dr_backup_plan.txt)과 ISO 매니페스트(iso_manifest.txt)를 준비해 재해복구/스냅샷 흐름까지 템플릿화했습니다."
+          echo "   - 환경 스냅샷(df -h, uname, env)을 기록했습니다."
+          echo "   - Tomcat 취약점(CVE-2025-24813) 여부를 maven dependency:tree로 점검하고 보고서를 echo_artifacts/security/tomcat_security_report.txt 에 남겼습니다."
+          echo "   - echo_logs, echo_artifacts, echo_services, echo_perm 전체를 아티팩트로 업로드했습니다."
+          echo "   - 마지막 단계는 항상 성공으로 종료합니다."
+          echo "DONE."

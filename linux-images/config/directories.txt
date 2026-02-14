@@ -1,0 +1,23 @@
+# environment/service directory seeds
+apps/prod/api
+
+apps/prod/web
+apps/stage/api
+apps/stage/web
+apps/dev/api
+apps/dev/web
+monitoring/prod/prometheus
+monitoring/stage/prometheus
+monitoring/dev/grafana
+secops/prod/honeypots
+secops/stage/ids
+data/prod/warehouse
+data/stage/warehouse
+data/dev/lake
+=======
+apps/stage/api
+apps/dev/api
+monitoring/prod/prometheus
+monitoring/stage/prometheus
+secops/prod/honeypots
+

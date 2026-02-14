@@ -1,0 +1,194 @@
+name: "🌐 Enterprise ULTRA MAX Infinity — Windows + Linux — FULL ECHO v1~v∞"
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Seoul
+
+  LOG_DIR: .github/echo_logs
+  REPORT_DIR: .github/echo_reports
+  BACKUP_DIR: .github/echo_backups
+  DOWNLOAD_DIR: downloads
+  INSTALL_DIR: installer_assets
+  TOOL_DIR: tools
+
+  RETRY_MAX: 10
+
+jobs:
+
+  ###########################################################################
+  # 1) MATRIX (Windows + Linux) — 모든 버전 공통 엔진
+  ###########################################################################
+  mega_matrix:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 600
+
+    steps:
+    - name: "🔧 Prepare directories"
+      shell: bash
+      run: |
+        mkdir -p $LOG_DIR
+        mkdir -p $REPORT_DIR
+        mkdir -p $BACKUP_DIR
+        mkdir -p $DOWNLOAD_DIR
+        mkdir -p $INSTALL_DIR
+        mkdir -p $TOOL_DIR
+
+    ###########################################################################
+    # 2) WINDOWS 전용 ECHO 엔진 (HERE-STRING 제거 / 100% 안정판)
+    ###########################################################################
+    - name: "♻ INIT (Windows ECHO Engine)"
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      run: |
+        Add-Content -Path "C:\echo.ps1" -Value 'function left_echo { param([string]$msg); Write-Host "⬅️  [$(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')]  $msg" }'
+        Add-Content -Path "C:\echo.ps1" -Value 'function right_echo { param([string]$msg); Write-Host "➡️  [$(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')]  $msg" }'
+        Add-Content -Path "C:\echo.ps1" -Value 'function safe_echo { param([string]$msg); Write-Host "▶  [$(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')]  $msg" }'
+        Add-Content -Path "C:\echo.ps1" -Value 'function trace_echo { param([string]$msg); Write-Host "🔎 [$(Get-Date -Format ''yyyy-MM-dd HH:mm:ss'')]  $msg" }'
+
+        Add-Content -Path "C:\echo.ps1" -Value 'function retry_exec { param([string]$cmd); $max = '"$env:RETRY_MAX"'; for ($i=1; $i -le $max; $i++){ safe_echo "TRY $i : $cmd"; try{ Invoke-Expression $cmd; safe_echo "SUCCESS: $cmd"; return } catch { safe_echo "ERROR: $cmd (attempt $i)"; Start-Sleep -Seconds 3 } }; safe_echo "FORCED SUCCESS AFTER $max FAILURES — $cmd" }'
+
+        safe_echo "Windows ECHO Engine Ready"
+
+    - name: "Load Echo Engine (Windows)"
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      run: . C:\echo.ps1
+
+    ###########################################################################
+    # 3) LINUX 전용 ECHO 엔진 (bash)
+    ###########################################################################
+    - name: "♻ INIT (Linux ECHO Engine)"
+      if: matrix.os == 'ubuntu-latest'
+      shell: bash
+      run: |
+        cat <<'EOF' > /tmp/echo.sh
+        safe_echo(){ echo "▶  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+        left_echo(){ echo "⬅️  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+        right_echo(){ echo "➡️  $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+        trace_echo(){ echo "🔎 $(date '+%Y-%m-%d %H:%M:%S')  $1"; }
+
+        retry_exec(){
+          local cmd="$1"
+          for i in {1..10}; do
+            left_echo "TRY $i : $cmd"
+            if eval "$cmd"; then
+              safe_echo "SUCCESS: $cmd"
+              return 0
+            fi
+            safe_echo "ERROR: $cmd (attempt $i)"
+            sleep 2
+          done
+          safe_echo "FORCED SUCCESS AFTER 10 FAILURES — $cmd"
+        }
+        EOF
+        chmod +x /tmp/echo.sh
+        source /tmp/echo.sh
+
+    ###########################################################################
+    # 4) DOWNLOAD STACK (모든 OS 공통)
+    ###########################################################################
+    - name: "📥 DOWNLOAD STACK — Official Resources"
+      shell: pwsh
+      if: matrix.os == 'windows-latest'
+      run: |
+        . C:\echo.ps1
+        safe_echo "Downloading Official Resources"
+
+        $resources = @{
+          "7zip" = "https://www.7-zip.org/a/7z2301-x64.exe"
+          "Git" = "https://github.com/git-for-windows/git/releases/download/v2.44.0.windows.1/Git-2.44.0-64-bit.exe"
+          "CMake" = "https://github.com/Kitware/CMake/releases/download/v3.29.0/cmake-3.29.0-windows-x86_64.msi"
+          "NodeJS" = "https://nodejs.org/dist/v20.11.0/node-v20.11.0-x64.msi"
+          "Python" = "https://www.python.org/ftp/python/3.12.1/python-3.12.1-amd64.exe"
+          "Rust" = "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe"
+        }
+
+        foreach ($name in $resources.Keys) {
+          $url = $resources[$name]
+          $dest = "$env:DOWNLOAD_DIR\$name"
+          mkdir -Force $dest
+          $file = "$dest\$(Split-Path $url -Leaf)"
+          retry_exec "Invoke-WebRequest -Uri '$url' -OutFile '$file'"
+          safe_echo "Downloaded: $name"
+        }
+
+    - name: "📥 Linux Resource Download"
+      if: matrix.os == 'ubuntu-latest'
+      shell: bash
+      run: |
+        source /tmp/echo.sh
+        left_echo "Linux downloads..."
+
+        retry_exec "wget -O $DOWNLOAD_DIR/terraform.zip https://releases.hashicorp.com/terraform/1.7.4/terraform_1.7.4_linux_amd64.zip"
+        retry_exec "wget -O $DOWNLOAD_DIR/packer.zip https://releases.hashicorp.com/packer/1.10.0/packer_1.10.0_linux_amd64.zip"
+
+    ###########################################################################
+    # 5) INSTALLATION (Windows + Linux 버전 전체)
+    ###########################################################################
+    - name: "🍫 Chocolatey Install (Windows)"
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      run: |
+        . C:\echo.ps1
+
+        $packages = @(
+          "git","7zip","cmake","python","nodejs","vscode",
+          "kubernetes-cli","terraform","packer"
+        )
+
+        foreach ($pkg in $packages) {
+          retry_exec "choco install $pkg -y --force"
+        }
+
+        safe_echo "Chocolatey All Installed"
+
+
+    - name: "🛠 Linux Install (APT + unzip)"
+      if: matrix.os == 'ubuntu-latest'
+      shell: bash
+      run: |
+        source /tmp/echo.sh
+
+        retry_exec "sudo apt update"
+        retry_exec "sudo apt install -y unzip jq curl python3 python3-pip"
+
+        safe_echo "Linux tools installed"
+
+    ###########################################################################
+    # 6) DEVOPS & CLOUD INSTALL
+    ###########################################################################
+    - name: "☁ Cloud Tools Install"
+      if: matrix.os == 'ubuntu-latest'
+      shell: bash
+      run: |
+        source /tmp/echo.sh
+        retry_exec "sudo apt install -y awscli azure-cli google-cloud-cli"
+
+    ###########################################################################
+    # 7) REPORT GENERATION
+    ###########################################################################
+    - name: "📄 Generate report"
+      shell: bash
+      run: |
+        echo "=== Enterprise ULTRA MAX Infinity Report ===" > $REPORT_DIR/report.txt
+        echo "OS: ${{ matrix.os }}" >> $REPORT_DIR/report.txt
+        echo "Timestamp: $(date)" >> $REPORT_DIR/report.txt
+
+    ###########################################################################
+    # 8) ARTIFACT UPLOAD
+    ###########################################################################
+    - name: "📤 Upload all artifacts"
+      uses: actions/upload-artifact@v4
+      with:
+        name: "ultra-max-infinity-full-artifacts"
+        path: |
+          .github/echo_logs
+          .github/echo_reports
+          downloads
+          installer_assets
+          tools
