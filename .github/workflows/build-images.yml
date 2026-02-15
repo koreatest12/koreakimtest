@@ -1,65 +1,88 @@
-name: "🏦 Financial Enterprise Core: Data Merge & Dependabot Automation"
+name: "🚀 Spring Super CI V6: Oracle, Container & MB-Optimized"
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ "main" ]
-  pull_request: # Dependabot 자동 승인을 위해 추가
+    branches: [ "main", "develop" ]
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: '강제 종속성 업데이트'
+        type: boolean
+        default: false
+      backup_retention:
+        description: '백업 보관 기간(일)'
+        default: '30'
+
+env:
+  # 1. 시스템 설정
+  APP_NAME: "finance-core-system"
+  JAVA_VERSION: '17'
+  DISTRIBUTION: 'temurin'
+  PROJECT_ROOT: 'financial-core'
+  CONTAINER_NAME: 'fin-core-service'
+  # 2. 서비스 정의
+  SERVICE_POSTGRES: "postgres:15-alpine"
+  SERVICE_REDIS: "redis:7-alpine"
+  # 3. 경로 설정
+  ARTIFACT_DIR: "super-artifacts"
+  SIZE_REPORT: "size_report_mb.txt"
 
 permissions:
   contents: write
-  pull-requests: write # Dependabot 승인 권한
-
-env:
-  JAVA_VERSION: '17'
-  PROJECT_ROOT: 'financial-core'
-  CONTAINER_NAME: 'fin-core-service'
+  packages: write
+  pull-requests: write
 
 jobs:
-  # [추가] 1. Dependabot 자동 승인 및 병합 작업
-  dependabot-automation:
+  # ======================================================
+  # JOB 1: 서비스 인프라 준비 (MB 최적화)
+  # ======================================================
+  provision-infra-mb:
+    name: 📥 Provision Services (MB Optimized)
     runs-on: ubuntu-latest
-    if: ${{ github.actor == 'dependabot[bot]' }}
     steps:
-      - name: 🤖 Fetch Dependabot Metadata
-        id: metadata
-        uses: dependabot/fetch-metadata@v2.1.0
+      - name: 📝 Initialize
+        run: |
+          mkdir -p services
+          echo "===== INFRA SIZE REPORT (MB) =====" > ${{ env.SIZE_REPORT }}
+
+      - name: 🐳 Pull & Compress Services
+        run: |
+          for img in ${{ env.SERVICE_POSTGRES }} ${{ env.SERVICE_REDIS }}; do
+            docker pull -q $img
+            SAFE_NAME=$(echo $img | tr '/:' '_')
+            docker save $img | gzip > "services/${SAFE_NAME}.tar.gz"
+            SIZE_MB=$(du -m "services/${SAFE_NAME}.tar.gz" | cut -f1)
+            echo " - $SAFE_NAME: ${SIZE_MB} MB" >> ${{ env.SIZE_REPORT }}
+          done
+
+      - name: 📤 Upload Infra Pack
+        uses: actions/upload-artifact@v4
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: infra-pack-mb
+          path: services
 
-      - name: ✅ Approve Minor/Patch Updates
-        if: ${{ steps.metadata.outputs.update-type != 'version-update:semver-major' }}
-        run: gh pr review --approve "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 🔀 Enable Auto-Merge
-        run: gh pr merge --auto --merge "$PR_URL"
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # 2. 메인 엔터프라이즈 배포 및 데이터 병합 작업
-  enterprise-deployment:
+  # ======================================================
+  # JOB 2: 금융 코어 빌드, 컨테이너 적재 및 데이터 병합
+  # ======================================================
+  build-and-deploy-mb:
+    name: 💎 Oracle & Container Data Integration
+    needs: provision-infra-mb
     runs-on: ubuntu-latest
-    name: 💎 Oracle & Container Data Merge
     steps:
-      - name: 📥 Checkout
+      - name: 📥 Checkout Source
         uses: actions/checkout@v4
 
-      - name: ☕ Setup JDK 17 & Maven Cache
+      - name: ☕ Set up JDK 17 & Maven Cache
         uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'temurin'
+          distribution: ${{ env.DISTRIBUTION }}
           cache: 'maven'
 
-      - name: 🏗️ Generate Core & Data Merge Logic
+      - name: 🏗️ Generate Financial Core Logic (Data Merge & Persistence)
         run: |
           mkdir -p ${PROJECT_ROOT}/src/main/java/com/bank/core
-          
-          # [pom.xml] 
+          # [pom.xml] 생성 (Encoding & Version Warning 해결)
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
           <project xmlns="http://maven.apache.org/POM/4.0.0">
               <modelVersion>4.0.0</modelVersion>
@@ -78,25 +101,26 @@ jobs:
           </project>
           EOF
 
-          # [FinancialSystem.java] 데이터 병합(Merge) 로직 추가
+          # [FinancialSystem.java] 데이터 적재 및 병합 로직
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
           package com.bank.core;
           import java.sql.*;
           import java.util.UUID;
-
           public class FinancialSystem {
               private static final String URL = "jdbc:h2:mem:oracle_db;MODE=Oracle;DB_CLOSE_DELAY=-1";
-              
               public static void main(String[] args) throws Exception {
                   Class.forName("org.h2.Driver");
                   try (Connection conn = DriverManager.getConnection(URL, "sa", "")) {
                       Statement stmt = conn.createStatement();
-                      // 1. 초기 테이블 생성 (임시 영역 및 통합 영역)
                       stmt.execute("CREATE TABLE IF NOT EXISTS RAW_STAGING (ID RAW(16), VAL NUMBER)");
-                      stmt.execute("CREATE TABLE IF NOT EXISTS MERGED_LEDGER (ID RAW(16) PRIMARY KEY, TOTAL_VAL NUMBER, UPDATED_AT TIMESTAMP)");
+                      stmt.execute("CREATE TABLE IF NOT EXISTS MERGED_LEDGER (ID RAW(16) PRIMARY KEY, TOTAL_VAL NUMBER, TS TIMESTAMP)");
 
-                      // 2. 데이터 적재 시뮬레이션
-                      System.out.println("📦 [STAGING] Loading 50,000 raw records...");
+                      ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM RAW_STAGING");
+                      rs.next();
+                      int count = rs.getInt(1);
+                      String mode = (count == 0) ? "INITIAL" : "RESTART_MERGE";
+                      
+                      System.out.println("🚀 [" + mode + "] Loading 50,000 records...");
                       PreparedStatement ps = conn.prepareStatement("INSERT INTO RAW_STAGING VALUES (RANDOM_UUID(), ?)");
                       for (int i = 0; i < 50000; i++) {
                           ps.setLong(1, (long)(Math.random() * 1000));
@@ -105,17 +129,12 @@ jobs:
                       }
                       ps.executeBatch();
 
-                      // 3. 데이터 병합(Merge) 기능 수행 (Oracle MERGE 문 스타일)
-                      System.out.println("🔄 [MERGE] Consolidating staging data into Merged Ledger...");
-                      long start = System.currentTimeMillis();
-                      stmt.execute(
-                          "INSERT INTO MERGED_LEDGER (ID, TOTAL_VAL, UPDATED_AT) " +
-                          "SELECT ID, VAL, CURRENT_TIMESTAMP FROM RAW_STAGING"
-                      );
+                      System.out.println("🔄 Consolidating Data into MERGED_LEDGER...");
+                      stmt.execute("INSERT INTO MERGED_LEDGER SELECT ID, VAL, CURRENT_TIMESTAMP FROM RAW_STAGING WHERE ID NOT IN (SELECT ID FROM MERGED_LEDGER)");
                       
-                      ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM MERGED_LEDGER");
+                      rs = stmt.executeQuery("SELECT COUNT(*) FROM MERGED_LEDGER");
                       rs.next();
-                      System.out.println("✅ [SUCCESS] Data Merge Completed. Total Rows: " + rs.getInt(1) + " (" + (System.currentTimeMillis()-start) + "ms)");
+                      System.out.println("✅ Current Merged Records: " + rs.getInt(1));
                   }
               }
           }
@@ -134,27 +153,46 @@ jobs:
           ENTRYPOINT ["java", "-cp", "app.jar:lib/*", "com.bank.core.FinancialSystem"]
           EOF
 
-      - name: 🔨 Build & Dependency Export
+      - name: 🔨 Build & Package (MB Aware)
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
           mvn clean package -B -DskipTests
           mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+          JAR_SIZE=$(du -m target/*.jar | cut -f1)
+          echo "APP_JAR_SIZE: ${JAR_SIZE} MB" >> ../${{ env.SIZE_REPORT }}
 
-      - name: 🐳 Container Restart & Data Merge Simulation
+      - name: 🐳 Docker Deployment & Lifecycle (Restart & Merge)
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
           docker build -t ${{ env.CONTAINER_NAME }}:latest .
-          echo "🚀 First Run: Data Staging"
+          echo "🚀 Initial Run (Staging Data)"
           docker run --name ${{ env.CONTAINER_NAME }} ${{ env.CONTAINER_NAME }}:latest
           
-          echo "🔄 Restarting Container for Data Consolidation..."
+          echo "🔄 Restarting Container (Data Recovery & Merge)"
           docker restart ${{ env.CONTAINER_NAME }}
           docker logs ${{ env.CONTAINER_NAME }}
 
-      - name: 🚀 Sync & Push
+      - name: 📤 Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-binaries-mb
+          path: ${{ env.PROJECT_ROOT }}/target/*.jar
+
+  # ======================================================
+  # JOB 3: 최종 백업 및 리포트
+  # ======================================================
+  master-backup-mb:
+    name: 💾 Master Backup (MB Report)
+    needs: [provision-infra-mb, build-and-deploy-mb]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./full-system
+      - name: 📦 Final Snapshot
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "🏦 Financial Core: Data Merge Logic & Dependabot Auto-Merge [skip ci]" || echo "No changes"
-          git push origin main
+          zip -9 -r DR_SNAPSHOT.zip ./full-system
+          du -m DR_SNAPSHOT.zip
+      - name: 📢 Final Summary
+        run: echo "✅ Enterprise Data Integration & Container Lifecycle Completed Successfully."
