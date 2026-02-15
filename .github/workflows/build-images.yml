@@ -110,13 +110,13 @@ jobs:
           ENTRYPOINT ["java", "-cp", "app.jar:lib/*", "com.bank.core.FinancialSystem"]
           EOF
 
-      - name: 🔨 CI: Build & Test
+      - name: Build & Test
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
           mvn clean package -B -DskipTests
           mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
 
-      - name: 🐳 CD: Docker Build & Data Ingestion
+      - name: Docker Build & Data Ingestion
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
           echo "🚀 Building Image: ${{ env.CONTAINER_NAME }}"
