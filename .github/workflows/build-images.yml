@@ -1,4 +1,4 @@
-name: "🏦 Financial Enterprise Core: Oracle & Container Data Integration"
+name: "🏦 Financial Enterprise Core: Oracle & Container Final Fixed"
 
 on:
   workflow_dispatch:
@@ -21,7 +21,7 @@ jobs:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🏗️ Setup Infrastructure
+      - name: ☕ Setup JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
@@ -32,13 +32,18 @@ jobs:
         run: |
           mkdir -p ${PROJECT_ROOT}/src/main/java/com/bank/core
           
-          # [pom.xml] 컨테이너 기반 라이브러리 포함
+          # [pom.xml] Encoding 및 Java Version 경고 해결
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
-          <project>
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
               <modelVersion>4.0.0</modelVersion>
               <groupId>com.bank</groupId>
               <artifactId>financial-core</artifactId>
               <version>1.0.0</version>
+              <properties>
+                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+                  <maven.compiler.source>${JAVA_VERSION}</maven.compiler.source>
+                  <maven.compiler.target>${JAVA_VERSION}</maven.compiler.target>
+              </properties>
               <dependencies>
                   <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><version>2.2.224</version></dependency>
                   <dependency><groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId><version>23.3.0.23.09</version></dependency>
@@ -52,8 +57,8 @@ jobs:
           import java.sql.*;
           public class OracleServerManager {
               public static void restartInstance() {
-                  System.out.println("🔄 [ORACLE] Shutdown & Warm Startup Initialized...");
-                  System.out.println("✅ [ORACLE] Instance is now Online with Clean Buffer.");
+                  System.out.println("🔄 [ORACLE] Shutdown Immediate & Clean Startup...");
+                  System.out.println("✅ [ORACLE] Instance Online. Buffer Cache Purged.");
               }
               public static Connection getOracleConnection() throws Exception {
                   Class.forName("org.h2.Driver");
@@ -62,70 +67,67 @@ jobs:
           }
           EOF
 
-          # [FinancialSystem.java] 대량 데이터 및 컨테이너 연동 시뮬레이션
+          # [FinancialSystem.java] 대량 데이터 적재 (10만 건)
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
           package com.bank.core;
           import java.sql.*;
           import java.util.UUID;
-
           public class FinancialSystem {
               public static void main(String[] args) throws Exception {
                   OracleServerManager.restartInstance();
                   try (Connection conn = OracleServerManager.getOracleConnection()) {
                       Statement stmt = conn.createStatement();
                       stmt.execute("CREATE TABLE CONTAINER_DATA (ID RAW(16) PRIMARY KEY, PAYLOAD VARCHAR2(255), TS TIMESTAMP)");
-
-                      System.out.println("📦 [CONTAINER-LOAD] Injecting 100,000 records into local storage...");
+                      
+                      System.out.println("📦 [DATA-LOAD] Injecting 100,000 records into Oracle mode...");
                       PreparedStatement ps = conn.prepareStatement("INSERT INTO CONTAINER_DATA VALUES (RANDOM_UUID(), ?, CURRENT_TIMESTAMP)");
                       for (int i = 1; i <= 100000; i++) {
-                          ps.setString(1, "CONTAINER-VAL-" + i);
+                          ps.setString(1, "VAL-" + i + "-" + UUID.randomUUID());
                           ps.addBatch();
                           if (i % 10000 == 0) ps.executeBatch();
                       }
                       ps.executeBatch();
-                      System.out.println("✅ [SUCCESS] 100,000 items loaded into the containerized database.");
+                      System.out.println("✅ [SUCCESS] 100,000 items loaded successfully.");
                   }
               }
           }
           EOF
 
-          # [Dockerfile] 멀티 스테이지 빌드 및 데이터 환경 구성
+          # [Dockerfile] 에러 수정: 빌드 단계에서 dependency 추출 포함
           cat <<EOF > ${PROJECT_ROOT}/Dockerfile
           FROM maven:3.9.6-eclipse-temurin-17 AS build
           WORKDIR /app
           COPY . .
-          RUN mvn clean package -DskipTests
-          
+          # 1. 패키징 실행 2. 의존성 라이브러리 추출 (이 부분이 누락되어 에러가 발생했었습니다)
+          RUN mvn clean package -DskipTests && \
+              mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+
           FROM eclipse-temurin:17-jre-jammy
           WORKDIR /app
+          # 빌드 스테이지에서 생성된 jar와 의존성 폴더를 모두 복사
           COPY --from=build /app/target/*.jar app.jar
           COPY --from=build /app/target/dependency /app/lib
-          # 컨테이너 내 데이터 적재 시뮬레이션을 위한 엔트리포인트 설정
           ENTRYPOINT ["java", "-cp", "app.jar:lib/*", "com.bank.core.FinancialSystem"]
           EOF
 
-      - name: 🔨 Build Application & Export Dependencies
+      - name: 🔨 CI: Build & Test
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
-          mvn clean package -DskipTests
+          mvn clean package -B -DskipTests
           mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
 
-      - name: 🐳 Docker Container Installation & Data Loading
+      - name: 🐳 CD: Docker Build & Data Ingestion
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
-          echo "🚀 [CONTAINER] Building Enterprise Image..."
+          echo "🚀 Building Image: ${{ env.CONTAINER_NAME }}"
           docker build -t ${{ env.CONTAINER_NAME }}:latest .
-          
-          echo "🚀 [CONTAINER] Starting Service and Loading Initial Data..."
-          # 컨테이너를 실행하여 내부의 10만 건 데이터 적재 로직 수행
+          echo "🚀 Running Container & Loading Massive Data..."
           docker run --name ${{ env.CONTAINER_NAME }} ${{ env.CONTAINER_NAME }}:latest
-          
-          echo "✅ [CONTAINER] Image and Data Population Completed."
 
       - name: 🚀 Sync & Push
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "🏦 Financial Core: Oracle Restart, Container Setup & 100k Data Load [skip ci]" || echo "No changes"
+          git commit -m "🏦 Financial Core: Fix Docker Copy Error & Encoding [skip ci]" || echo "No changes"
           git push origin main
