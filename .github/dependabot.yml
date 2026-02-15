@@ -3,24 +3,18 @@ version: 2
 # ======================================================
 # 🛡️ Global Configuration
 # ======================================================
-# 모든 업데이트 작업에 공통으로 적용되는 설정입니다.
 registries:
   dockerhub:
     type: docker-registry
     url: registry.hub.docker.com
-    # 비공개 레지스트리 사용 시 아래 주석 해제 후 secrets 등록 필요
-    # username: ${{ secrets.DOCKER_USERNAME }}
-    # password: ${{ secrets.DOCKER_PASSWORD }}
 
 updates:
-  # ======================================================
-  # 1. GitHub Actions Workflows (CI/CD 파이프라인)
-  # ======================================================
+  # 1. GitHub Actions Workflows
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"   # 매일 점검
-      time: "00:00"       # 한국 시간 오전 9시 (UTC 00:00)
+      interval: "daily"
+      time: "00:00"
       timezone: "Asia/Seoul"
     open-pull-requests-limit: 10
     labels:
@@ -30,11 +24,9 @@ updates:
     groups:
       github-actions:
         patterns:
-          - "*" # 모든 액션 업데이트를 하나의 PR로 묶음 (노이즈 감소)
+          - "*"
 
-  # ======================================================
-  # 2. Docker (Dockerfile & Kubernetes Manifests)
-  # ======================================================
+  # 2. Docker (Dockerfile & Kubernetes)
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -46,12 +38,9 @@ updates:
       - "docker"
       - "container"
       - "infrastructure"
-    # Docker 태그 전략 (SemVer 준수)
     versioning-strategy: increase-if-necessary
 
-  # ======================================================
   # 3. Java / Maven (Spring Boot Backend)
-  # ======================================================
   - package-ecosystem: "maven"
     directory: "/"
     schedule:
@@ -64,22 +53,19 @@ updates:
       - "java"
       - "spring-boot"
       - "backend"
-    # 그룹화: 스프링 관련 라이브러리는 한 번에 업데이트
     groups:
       spring-boot:
         patterns:
           - "org.springframework.boot:*"
           - "org.springframework:*"
-      junit:
+      junit-mockito:
         patterns:
           - "org.junit.jupiter:*"
           - "org.mockito:*"
 
-  # ======================================================
   # 4. Python / Pip (Data Pipeline)
-  # ======================================================
   - package-ecosystem: "pip"
-    directory: "/" # requirements.txt 위치
+    directory: "/" 
     schedule:
       interval: "daily"
       time: "00:00"
@@ -94,13 +80,3 @@ updates:
           - "pandas"
           - "numpy"
           - "scikit-learn"
-
-  # ======================================================
-  # 5. Gradle (Optional: Gradle 사용 시 활성화)
-  # ======================================================
-  # - package-ecosystem: "gradle"
-  #   directory: "/"
-  #   schedule:
-  #     interval: "daily"
-  #     time: "00:00"
-  #     timezone: "Asia/Seoul"
