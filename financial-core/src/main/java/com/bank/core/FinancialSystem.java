@@ -4,36 +4,57 @@ import java.util.UUID;
 
 public class FinancialSystem {
     private static final String URL = "jdbc:h2:mem:oracle_db;MODE=Oracle;DB_CLOSE_DELAY=-1";
-    
+    private static final int TOTAL = 100000;
+    private static final int CHUNK_SIZE = 10000; // 분할 단위
+
     public static void main(String[] args) throws Exception {
         Class.forName("org.h2.Driver");
         try (Connection conn = DriverManager.getConnection(URL, "sa", "")) {
-            Statement stmt = conn.createStatement();
-            // 1. 초기 테이블 생성 (임시 영역 및 통합 영역)
-            stmt.execute("CREATE TABLE IF NOT EXISTS RAW_STAGING (ID RAW(16), VAL NUMBER)");
-            stmt.execute("CREATE TABLE IF NOT EXISTS MERGED_LEDGER (ID RAW(16) PRIMARY KEY, TOTAL_VAL NUMBER, UPDATED_AT TIMESTAMP)");
+            setupSchema(conn);
+            
+            long startTime = System.currentTimeMillis();
+            int processed = 0;
 
-            // 2. 데이터 적재 시뮬레이션
-            System.out.println("📦 [STAGING] Loading 50,000 raw records...");
-            PreparedStatement ps = conn.prepareStatement("INSERT INTO RAW_STAGING VALUES (RANDOM_UUID(), ?)");
-            for (int i = 0; i < 50000; i++) {
-                ps.setLong(1, (long)(Math.random() * 1000));
+            // [분할 적재 시작]
+            while (processed < TOTAL) {
+                int currentChunk = Math.min(CHUNK_SIZE, TOTAL - processed);
+                loadChunk(conn, processed + 1, currentChunk);
+                processed += currentChunk;
+                
+                // 청크 단위 커밋 및 메모리 정리 시뮬레이션
+                System.out.println("📦 [PARTITION] Progress: " + processed + "/" + TOTAL + " (Completed Chunk)");
+            }
+
+            // [데이터 병합]
+            mergeData(conn);
+            
+            System.out.println("✅ [FINAL] Total Load Time: " + (System.currentTimeMillis() - startTime) + "ms");
+        }
+    }
+
+    private static void setupSchema(Connection conn) throws SQLException {
+        Statement stmt = conn.createStatement();
+        stmt.execute("CREATE TABLE IF NOT EXISTS RAW_STAGING (ID RAW(16), CHUNK_ID INT, VAL NUMBER)");
+        stmt.execute("CREATE TABLE IF NOT EXISTS MERGED_LEDGER (ID RAW(16) PRIMARY KEY, TOTAL_VAL NUMBER, TS TIMESTAMP)");
+    }
+
+    private static void loadChunk(Connection conn, int startIdx, int size) throws SQLException {
+        String sql = "INSERT INTO RAW_STAGING (ID, CHUNK_ID, VAL) VALUES (RANDOM_UUID(), ?, ?)";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            conn.setAutoCommit(false); // 트랜잭션 분리
+            for (int i = 0; i < size; i++) {
+                ps.setInt(1, (startIdx + i) / CHUNK_SIZE);
+                ps.setLong(2, (long)(Math.random() * 1000));
                 ps.addBatch();
-                if (i % 10000 == 0) ps.executeBatch();
             }
             ps.executeBatch();
-
-            // 3. 데이터 병합(Merge) 기능 수행 (Oracle MERGE 문 스타일)
-            System.out.println("🔄 [MERGE] Consolidating staging data into Merged Ledger...");
-            long start = System.currentTimeMillis();
-            stmt.execute(
-                "INSERT INTO MERGED_LEDGER (ID, TOTAL_VAL, UPDATED_AT) " +
-                "SELECT ID, VAL, CURRENT_TIMESTAMP FROM RAW_STAGING"
-            );
-            
-            ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM MERGED_LEDGER");
-            rs.next();
-            System.out.println("✅ [SUCCESS] Data Merge Completed. Total Rows: " + rs.getInt(1) + " (" + (System.currentTimeMillis()-start) + "ms)");
+            conn.commit(); // 청크 단위로 물리적 커밋
         }
+    }
+
+    private static void mergeData(Connection conn) throws SQLException {
+        System.out.println("🔄 [MERGE] Consolidating all partitioned chunks...");
+        Statement stmt = conn.createStatement();
+        stmt.execute("INSERT INTO MERGED_LEDGER SELECT ID, VAL, CURRENT_TIMESTAMP FROM RAW_STAGING");
     }
 }
