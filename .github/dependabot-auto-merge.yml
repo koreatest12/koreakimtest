@@ -9,16 +9,16 @@ permissions:
 jobs:
   dependabot:
     runs-on: ubuntu-latest
-    # Dependabot이 생성한 PR에 대해서만 실행
+    # Dependabot이 생성한 PR인 경우에만 실행 (보안상 중요)
     if: ${{ github.actor == 'dependabot[bot]' }}
     steps:
       - name: 🤖 Fetch Dependabot Metadata
         id: metadata
-        uses: dependabot/fetch-metadata@v1.6.0
+        uses: dependabot/fetch-metadata@v2.1.0 # 최신 버전(v2) 권장
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 1. 마이너/패치 버전 업데이트는 자동 승인 (메이저 버전 제외)
+      # 1. 마이너/패치 버전 업데이트는 자동 승인
       - name: ✅ Approve Minor/Patch Updates
         if: ${{ steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch' }}
         run: gh pr review --approve "$PR_URL"
@@ -26,7 +26,7 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 2. 테스트 통과 시 자동 병합 (GitHub 설정에서 Allow Auto-merge 활성화 필요)
+      # 2. 자동 병합 활성화 (CI 테스트가 통과되면 자동으로 Merge됨)
       - name: 🔀 Enable Auto-Merge
         run: gh pr merge --auto --merge "$PR_URL"
         env:
