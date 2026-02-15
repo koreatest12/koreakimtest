@@ -48,8 +48,8 @@ jobs:
           mkdir -p ${PROJECT_ROOT}/src/test/java/com/bank/core
           mkdir -p ${PROJECT_ROOT}/src/main/resources
           mkdir -p ${PROJECT_ROOT}/${REPORT_DIR}
-
-          # [pom.xml] 의존성 및 컴파일러 설정
+          
+          # [pom.xml] 생성
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
           <project xmlns="http://maven.apache.org/POM/4.0.0">
               <modelVersion>4.0.0</modelVersion>
@@ -68,26 +68,22 @@ jobs:
           </project>
           EOF
 
-          # [FinancialSystem.java] 대규모 배치 및 동시성 로직 강화
+          # [FinancialSystem.java] 대규모 배치 로직
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
           package com.bank.core;
           import java.sql.*;
           import java.util.UUID;
-          import java.util.concurrent.*;
-
+          
           public class FinancialSystem {
               private static final int BATCH_SIZE = 5000;
-              private static final int TOTAL_RECORDS = 50000; // 5만 건으로 확대
-
+              private static final int TOTAL_RECORDS = 50000;
               public static void main(String[] args) throws Exception {
                   DatabaseManager.initSchema();
                   long start = System.currentTimeMillis();
-                  
                   try (Connection conn = DatabaseManager.getConnection()) {
                       conn.setAutoCommit(false);
                       PreparedStatement pstmt = conn.prepareStatement(
                           "INSERT INTO USERS (ID, PASSWORD_HASH, BALANCE) VALUES (?, ?, ?)");
-                      
                       for (int i = 1; i <= TOTAL_RECORDS; i++) {
                           pstmt.setString(1, "USER_" + i);
                           pstmt.setString(2, "HASH_" + UUID.randomUUID());
@@ -103,12 +99,13 @@ jobs:
           }
           EOF
 
-          # [DatabaseManager.java] H2 DB 초기화
+          # [DatabaseManager.java] 드라이버 로드 수정
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/DatabaseManager.java
           package com.bank.core;
           import java.sql.*;
           public class DatabaseManager {
               public static Connection getConnection() throws Exception {
+                  Class.forName("org.h2.Driver");
                   return DriverManager.getConnection("jdbc:h2:mem:fin_db;DB_CLOSE_DELAY=-1", "sa", "");
               }
               public static void initSchema() throws Exception {
@@ -120,13 +117,12 @@ jobs:
           }
           EOF
 
-          # [Dockerfile] 멀티 스테이지 빌드 적용 (이미지 최적화)
+          # [Dockerfile]
           cat <<EOF > ${PROJECT_ROOT}/Dockerfile
           FROM maven:3.9.6-eclipse-temurin-17 AS build
           COPY . /app
           WORKDIR /app
           RUN mvn clean package -DskipTests
-
           FROM eclipse-temurin:17-jre-jammy
           WORKDIR /app
           COPY --from=build /app/target/*.jar app.jar
@@ -136,8 +132,11 @@ jobs:
       - name: 🏗️ Build & Simulation
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
-          mvn clean package -B
-          java -cp "target/classes:target/dependency/*" com.bank.core.FinancialSystem || true
+          # 의존성 JAR 복사 (H2 드라이버 확보용)
+          mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+          mvn clean package -B -DskipTests
+          # 클래스패스에 복사된 라이브러리 포함하여 실행
+          java -cp "target/classes:target/dependency/*" com.bank.core.FinancialSystem
 
       - name: 📝 Generate Audit Report
         run: |
@@ -156,5 +155,5 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "🏦 Financial Core Update: Scale Up & Security [skip ci]" || echo "No changes"
+          git commit -m "🏦 Financial Core Update: Fix Driver & Scale Up [skip ci]" || echo "No changes"
           git push origin main
