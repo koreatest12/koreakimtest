@@ -3,25 +3,28 @@ import java.sql.*;
 import java.util.UUID;
 
 public class FinancialSystem {
-    private static final int BATCH_SIZE = 5000;
-    private static final int TOTAL_RECORDS = 50000;
     public static void main(String[] args) throws Exception {
         DatabaseManager.initSchema();
-        long start = System.currentTimeMillis();
+        System.out.println("🏦 Database Schema Initialized from Resource File");
+        
+        int total = 50000;
+        int batchSize = 5000;
+        
         try (Connection conn = DatabaseManager.getConnection()) {
             conn.setAutoCommit(false);
-            PreparedStatement pstmt = conn.prepareStatement(
-                "INSERT INTO USERS (ID, PASSWORD_HASH, BALANCE) VALUES (?, ?, ?)");
-            for (int i = 1; i <= TOTAL_RECORDS; i++) {
-                pstmt.setString(1, "USER_" + i);
-                pstmt.setString(2, "HASH_" + UUID.randomUUID());
+            PreparedStatement pstmt = conn.prepareStatement("INSERT INTO USERS (ID, PASSWORD_HASH, BALANCE) VALUES (?, ?, ?)");
+            
+            long start = System.currentTimeMillis();
+            for (int i = 1; i <= total; i++) {
+                pstmt.setString(1, "USR-" + UUID.randomUUID().toString().substring(0,8));
+                pstmt.setString(2, "HASH-" + i);
                 pstmt.setLong(3, 1000000);
                 pstmt.addBatch();
-                if (i % BATCH_SIZE == 0) pstmt.executeBatch();
+                if (i % batchSize == 0) pstmt.executeBatch();
             }
             pstmt.executeBatch();
             conn.commit();
+            System.out.println("✅ Successfully injected " + total + " records in " + (System.currentTimeMillis() - start) + "ms");
         }
-        System.out.println("✅ Batch Injection: " + TOTAL_RECORDS + " records in " + (System.currentTimeMillis()-start) + "ms");
     }
 }
