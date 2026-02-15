@@ -2,8 +2,6 @@ name: "🏦 Financial Enterprise Core: DB, Concurrency & Security"
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/10 * * * *'
   push:
     branches: [ "main" ]
     paths-ignore:
@@ -14,26 +12,20 @@ permissions:
   contents: write
   packages: write
   security-events: write
-  checks: write
 
 env:
-  MAVEN_VERSION: '3.9.6'
   JAVA_VERSION: '17'
   PROJECT_ROOT: 'financial-core'
+  RESOURCE_PATH: 'financial-core/src/main/resources'
   REPORT_DIR: 'reports'
 
 jobs:
   financial-ops:
     runs-on: ubuntu-latest
-    name: 💸 FinOps & DB Simulation
+    name: 💸 FinOps & Resource Generation
     steps:
-      - name: 🕒 Set Start Time
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
-
       - name: 📥 Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: ☕ Set up JDK
         uses: actions/setup-java@v4
@@ -42,14 +34,40 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
-      - name: 🏗️ Generate Enterprise System Files
+      - name: 🏗️ Generate Enterprise Resources & Files
         run: |
+          # 디렉토리 구조 생성
+          mkdir -p ${RESOURCE_PATH}/sql
+          mkdir -p ${RESOURCE_PATH}/data
           mkdir -p ${PROJECT_ROOT}/src/main/java/com/bank/core
-          mkdir -p ${PROJECT_ROOT}/src/test/java/com/bank/core
-          mkdir -p ${PROJECT_ROOT}/src/main/resources
-          mkdir -p ${PROJECT_ROOT}/${REPORT_DIR}
-          
-          # [pom.xml] 생성
+          mkdir -p ${REPORT_DIR}
+
+          # 1. [schema.sql] DB 스키마 분리
+          cat <<EOF > ${RESOURCE_PATH}/sql/schema.sql
+          CREATE TABLE IF NOT EXISTS USERS (
+              ID VARCHAR(50) PRIMARY KEY,
+              PASSWORD_HASH VARCHAR(100),
+              BALANCE BIGINT,
+              STATUS VARCHAR(20) DEFAULT 'ACTIVE'
+          );
+          CREATE TABLE IF NOT EXISTS TRANSACTIONS (
+              TX_ID UUID PRIMARY KEY,
+              USER_ID VARCHAR(50),
+              AMOUNT BIGINT,
+              TS TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          EOF
+
+          # 2. [app-config.properties] 서비스 설정 파일
+          cat <<EOF > ${RESOURCE_PATH}/app-config.properties
+          db.url=jdbc:h2:mem:fin_db;DB_CLOSE_DELAY=-1
+          db.user=sa
+          db.password=
+          system.batch.size=5000
+          system.target.records=50000
+          EOF
+
+          # 3. [pom.xml] 의존성 설정
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
           <project xmlns="http://maven.apache.org/POM/4.0.0">
               <modelVersion>4.0.0</modelVersion>
@@ -63,105 +81,80 @@ jobs:
               </properties>
               <dependencies>
                   <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><version>2.2.224</version></dependency>
-                  <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><version>2.15.2</version></dependency>
-                  <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter-api</artifactId><version>5.10.0</version><scope>test</scope></dependency>
               </dependencies>
           </project>
           EOF
 
-          # [FinancialSystem.java] 대규모 배치 로직
-          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
-          package com.bank.core;
-          import java.sql.*;
-          import java.util.UUID;
-          
-          public class FinancialSystem {
-              private static final int BATCH_SIZE = 5000;
-              private static final int TOTAL_RECORDS = 50000;
-              public static void main(String[] args) throws Exception {
-                  DatabaseManager.initSchema();
-                  long start = System.currentTimeMillis();
-                  try (Connection conn = DatabaseManager.getConnection()) {
-                      conn.setAutoCommit(false);
-                      PreparedStatement pstmt = conn.prepareStatement(
-                          "INSERT INTO USERS (ID, PASSWORD_HASH, BALANCE) VALUES (?, ?, ?)");
-                      for (int i = 1; i <= TOTAL_RECORDS; i++) {
-                          pstmt.setString(1, "USER_" + i);
-                          pstmt.setString(2, "HASH_" + UUID.randomUUID());
-                          pstmt.setLong(3, 1000000);
-                          pstmt.addBatch();
-                          if (i % BATCH_SIZE == 0) pstmt.executeBatch();
-                      }
-                      pstmt.executeBatch();
-                      conn.commit();
-                  }
-                  System.out.println("✅ Batch Injection: " + TOTAL_RECORDS + " records in " + (System.currentTimeMillis()-start) + "ms");
-              }
-          }
-          EOF
-
-          # [DatabaseManager.java] 드라이버 로드 명시 (중요)
+          # 4. [DatabaseManager.java] 리소스 로드 로직 개선
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/DatabaseManager.java
           package com.bank.core;
           import java.sql.*;
+          import java.nio.file.*;
+          import java.io.InputStream;
+          import java.util.Scanner;
+
           public class DatabaseManager {
               public static Connection getConnection() throws Exception {
-                  // ClassNotFoundException 방지를 위해 명시적 로드
                   Class.forName("org.h2.Driver");
                   return DriverManager.getConnection("jdbc:h2:mem:fin_db;DB_CLOSE_DELAY=-1", "sa", "");
               }
               public static void initSchema() throws Exception {
-                  try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
-                      stmt.execute("CREATE TABLE USERS (ID VARCHAR(50) PRIMARY KEY, PASSWORD_HASH VARCHAR(100), BALANCE BIGINT)");
-                      stmt.execute("CREATE TABLE AUDIT_LOGS (ID IDENTITY PRIMARY KEY, ACTION VARCHAR(50), TS TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+                  try (Connection conn = getConnection(); 
+                       Statement stmt = conn.createStatement();
+                       InputStream is = DatabaseManager.class.getResourceAsStream("/sql/schema.sql")) {
+                      if (is == null) throw new RuntimeException("Schema file not found!");
+                      String sql = new Scanner(is).useDelimiter("\\\\A").next();
+                      stmt.execute(sql);
                   }
               }
           }
           EOF
 
-          # [Dockerfile]
-          cat <<EOF > ${PROJECT_ROOT}/Dockerfile
-          FROM maven:3.9.6-eclipse-temurin-17 AS build
-          COPY . /app
-          WORKDIR /app
-          RUN mvn clean package -DskipTests
-          FROM eclipse-temurin:17-jre-jammy
-          WORKDIR /app
-          COPY --from=build /app/target/*.jar app.jar
-          ENTRYPOINT ["java", "-jar", "app.jar"]
+          # 5. [FinancialSystem.java] 대량 데이터 시뮬레이션
+          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
+          package com.bank.core;
+          import java.sql.*;
+          import java.util.UUID;
+
+          public class FinancialSystem {
+              public static void main(String[] args) throws Exception {
+                  DatabaseManager.initSchema();
+                  System.out.println("🏦 Database Schema Initialized from Resource File");
+                  
+                  int total = 50000;
+                  int batchSize = 5000;
+                  
+                  try (Connection conn = DatabaseManager.getConnection()) {
+                      conn.setAutoCommit(false);
+                      PreparedStatement pstmt = conn.prepareStatement("INSERT INTO USERS (ID, PASSWORD_HASH, BALANCE) VALUES (?, ?, ?)");
+                      
+                      long start = System.currentTimeMillis();
+                      for (int i = 1; i <= total; i++) {
+                          pstmt.setString(1, "USR-" + UUID.randomUUID().toString().substring(0,8));
+                          pstmt.setString(2, "HASH-" + i);
+                          pstmt.setLong(3, 1000000);
+                          pstmt.addBatch();
+                          if (i % batchSize == 0) pstmt.executeBatch();
+                      }
+                      pstmt.executeBatch();
+                      conn.commit();
+                      System.out.println("✅ Successfully injected " + total + " records in " + (System.currentTimeMillis() - start) + "ms");
+                  }
+              }
+          }
           EOF
 
-      - name: 🏗️ Build & Simulation
+      - name: 🏗️ Build & Execute
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
-          # 1. 빌드를 먼저 수행 (target 폴더 생성 및 clean 작업 완료)
-          mvn clean package -B -DskipTests
-          
-          # 2. 빌드 후에 의존성 JAR들을 target/dependency 폴더로 추출 (clean에 의해 지워지지 않도록 순서 변경)
+          mvn clean package -DskipTests
           mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
-          
-          # 3. 드라이버 파일 존재 여부 확인 (디버깅용)
-          ls -l target/dependency/h2-*.jar
-          
-          # 4. 클래스패스에 라이브러리를 포함하여 실행
           java -cp "target/classes:target/dependency/*" com.bank.core.FinancialSystem
-
-      - name: 📝 Generate Audit Report
-        run: |
-          REPORT_PATH="${PROJECT_ROOT}/${REPORT_DIR}/AUDIT_$(date +%Y%m%d).md"
-          {
-            echo "# 🏦 FinOps Audit Report"
-            echo "- **Status**: SUCCESS"
-            echo "- **Engine**: H2 In-Memory"
-            echo "- **Data Volume**: 50,000 Records"
-            echo "---"
-            echo "Generated by GitHub Actions Bot"
-          } > "$REPORT_PATH"
 
       - name: 🚀 Sync & Push
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "🏦 Financial Core Update: Fix Driver Loading & Build Order [skip ci]" || echo "No changes"
+          git commit -m "🏦 Financial Core: Resource Separation & DB Optimization [skip ci]" || echo "No changes"
           git push origin main
