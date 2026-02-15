@@ -4,27 +4,26 @@ import java.util.UUID;
 
 public class FinancialSystem {
     public static void main(String[] args) throws Exception {
-        DatabaseManager.initSchema();
-        System.out.println("🏦 Database Schema Initialized from Resource File");
-        
-        int total = 50000;
-        int batchSize = 5000;
-        
-        try (Connection conn = DatabaseManager.getConnection()) {
-            conn.setAutoCommit(false);
-            PreparedStatement pstmt = conn.prepareStatement("INSERT INTO USERS (ID, PASSWORD_HASH, BALANCE) VALUES (?, ?, ?)");
+        // 1. 서버 재기동 기능 호출
+        OracleServerManager.restartInstance();
+
+        // 2. 재기동 후 데이터 연동
+        try (Connection conn = OracleServerManager.getOracleConnection()) {
+            Statement stmt = conn.createStatement();
+            stmt.execute("CREATE TABLE ORA_LEDGER (TX_ID RAW(16) PRIMARY KEY, ACC_ID VARCHAR2(50), BAL NUMBER)");
+
+            System.out.println("📦 [DATA] Injecting 100,000 enterprise records after reboot...");
+            PreparedStatement ps = conn.prepareStatement("INSERT INTO ORA_LEDGER VALUES (RANDOM_UUID(), ?, ?)");
             
             long start = System.currentTimeMillis();
-            for (int i = 1; i <= total; i++) {
-                pstmt.setString(1, "USR-" + UUID.randomUUID().toString().substring(0,8));
-                pstmt.setString(2, "HASH-" + i);
-                pstmt.setLong(3, 1000000);
-                pstmt.addBatch();
-                if (i % batchSize == 0) pstmt.executeBatch();
+            for (int i = 1; i <= 100000; i++) {
+                ps.setString(1, "ACC-" + i);
+                ps.setLong(2, (long)(Math.random() * 5000000));
+                ps.addBatch();
+                if (i % 10000 == 0) ps.executeBatch();
             }
-            pstmt.executeBatch();
-            conn.commit();
-            System.out.println("✅ Successfully injected " + total + " records in " + (System.currentTimeMillis() - start) + "ms");
+            ps.executeBatch();
+            System.out.println("✅ [SUCCESS] Batch load completed in " + (System.currentTimeMillis() - start) + "ms");
         }
     }
 }
