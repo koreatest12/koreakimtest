@@ -1,0 +1,100 @@
+name: "Linux Factory – Part 1 (Core Engine v1~v6)"
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Seoul
+  WORKSPACE: linux-images
+  ARTIFACT_DIR: linux-images/artifacts
+  LOG_DIR: linux-images/logs
+
+jobs:
+  core-engine:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install EchoOps Runtime
+        run: |
+          mkdir -p scripts
+          {
+            echo '#!/usr/bin/env bash'
+            echo 'safe_echo(){ printf "[SAFE] %s\n" "$1"; }'
+            echo 'echo_trace(){ printf "[TRACE] %s\n" "$1"; }'
+            echo 'download_safe(){'
+            echo '  url="$1"; out="$2";'
+            echo '  for retry in {1..5}; do'
+            echo '    safe_echo "Downloading: $url (Try $retry/5)"'
+            echo '    wget -q --timeout=20 -O "$out" "$url" && return 0'
+            echo '    safe_echo "Retry $retry failed."'
+            echo '    sleep 3'
+            echo '  done'
+            echo '  safe_echo "[WARN] Primary failed → Mirror"'
+            echo '  wget -q -O "$out" "https://kali.download/base-images/kali-cloudimg-amd64.img" || true'
+            echo '}'
+          } > scripts/echoops.sh
+          chmod +x scripts/echoops.sh
+          echo "[INIT] EchoOps installed."
+
+      - name: Init Workspace
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Init workspace..."
+          mkdir -p ${WORKSPACE}/{artifacts,logs,iso,disks,cloud,pxe,hybrid,terraform,packer,installers}
+          safe_echo "Workspace ready."
+
+      - name: Install Build Tools
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Installing base tools..."
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-system qemu-utils cloud-image-utils \
+            grub-efi-amd64-bin grub-efi-arm64-bin shim-signed \
+            xorriso squashfs-tools genisoimage syslinux pxelinux \
+            docker.io wget curl git vim lzma xz-utils \
+            debootstrap arch-install-scripts rpm yum
+          safe_echo "Build tools installed."
+
+      - name: Download Cloud Images
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Downloading cloud images..."
+
+          download_safe \
+            "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img" \
+            "${ARTIFACT_DIR}/ubuntu-cloud.img"
+
+          download_safe \
+            "https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2" \
+            "${ARTIFACT_DIR}/rocky-cloud.img"
+
+          download_safe \
+            "https://cloud-images.kali.org/kali-latest/kali-cloudimg-amd64.img" \
+            "${ARTIFACT_DIR}/kali-cloud.img"
+
+          safe_echo "Cloud images OK."
+
+      - name: Create ARM64 Disk Images
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Creating ARM64 qcow2..."
+          qemu-img create -f qcow2 ${ARTIFACT_DIR}/ubuntu-arm64.qcow2 5G
+          qemu-img create -f qcow2 ${ARTIFACT_DIR}/rocky-arm64.qcow2 5G
+          qemu-img create -f qcow2 ${ARTIFACT_DIR}/kali-arm64.qcow2 5G
+          safe_echo "ARM64 disks created."
+
+      - name: Cloud-Init Seed
+        run: |
+          source ./scripts/echoops.sh
+          safe_echo "Making cloud-init seed..."
+          cloud-localds ${ARTIFACT_DIR}/seed.img \
+            <(printf "#cloud-config\npassword: root\nchpasswd: {expire: False}\n")
+          safe_echo "Seed OK."
