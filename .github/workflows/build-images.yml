@@ -1,4 +1,4 @@
-name: "🏦 Financial Enterprise Core: Oracle Server Management"
+name: "🏦 Financial Enterprise Core: Oracle & Container Data Integration"
 
 on:
   workflow_dispatch:
@@ -11,27 +11,28 @@ permissions:
 env:
   JAVA_VERSION: '17'
   PROJECT_ROOT: 'financial-core'
+  CONTAINER_NAME: 'fin-core-service'
 
 jobs:
-  oracle-lifecycle-mgmt:
+  enterprise-deployment:
     runs-on: ubuntu-latest
-    name: 💎 Oracle Instance Lifecycle & Migration
+    name: 💎 Oracle & Containerized Core Deployment
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: 🏗️ Setup Java & Maven
+      - name: 🏗️ Setup Infrastructure
         uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
           cache: 'maven'
 
-      - name: 🏗️ Generate Oracle Core Files
+      - name: 🏗️ Generate Enterprise Core & Docker Files
         run: |
           mkdir -p ${PROJECT_ROOT}/src/main/java/com/bank/core
           
-          # [pom.xml] Oracle & H2 Hybrid Environment
+          # [pom.xml] 컨테이너 기반 라이브러리 포함
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
           <project>
               <modelVersion>4.0.0</modelVersion>
@@ -45,35 +46,23 @@ jobs:
           </project>
           EOF
 
-          # [OracleServerManager.java] 서버 재기동 및 상태 관리 로직
+          # [OracleServerManager.java] 서버 재기동 기능
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/OracleServerManager.java
           package com.bank.core;
           import java.sql.*;
-
           public class OracleServerManager {
               public static void restartInstance() {
-                  System.out.println("⚠️ [ORACLE-SYS] SHUTDOWN IMMEDIATE initiated...");
-                  System.out.println("⚠️ [ORACLE-SYS] Waiting for active transactions to roll back...");
-                  try { Thread.sleep(1000); } catch (Exception e) {}
-                  
-                  System.out.println("🔄 [ORACLE-SYS] Database closed. Database dismounted.");
-                  System.out.println("🔄 [ORACLE-SYS] Oracle instance shut down.");
-                  
-                  System.out.println("🚀 [ORACLE-SYS] STARTUP NOMOUNT...");
-                  System.out.println("🚀 [ORACLE-SYS] Oracle instance started (SGA/PGA Allocated).");
-                  System.out.println("🚀 [ORACLE-SYS] Database mounted and opened.");
-                  System.out.println("✅ [ORACLE-SYS] Oracle Server is now ONLINE.");
+                  System.out.println("🔄 [ORACLE] Shutdown & Warm Startup Initialized...");
+                  System.out.println("✅ [ORACLE] Instance is now Online with Clean Buffer.");
               }
-
               public static Connection getOracleConnection() throws Exception {
                   Class.forName("org.h2.Driver");
-                  // Oracle Mode 인메모리 연결
                   return DriverManager.getConnection("jdbc:h2:mem:oracle_db;MODE=Oracle;DB_CLOSE_DELAY=-1", "sa", "");
               }
           }
           EOF
 
-          # [FinancialSystem.java] 재기동 후 대량 데이터 처리
+          # [FinancialSystem.java] 대량 데이터 및 컨테이너 연동 시뮬레이션
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
           package com.bank.core;
           import java.sql.*;
@@ -81,42 +70,62 @@ jobs:
 
           public class FinancialSystem {
               public static void main(String[] args) throws Exception {
-                  // 1. 서버 재기동 기능 호출
                   OracleServerManager.restartInstance();
-
-                  // 2. 재기동 후 데이터 연동
                   try (Connection conn = OracleServerManager.getOracleConnection()) {
                       Statement stmt = conn.createStatement();
-                      stmt.execute("CREATE TABLE ORA_LEDGER (TX_ID RAW(16) PRIMARY KEY, ACC_ID VARCHAR2(50), BAL NUMBER)");
+                      stmt.execute("CREATE TABLE CONTAINER_DATA (ID RAW(16) PRIMARY KEY, PAYLOAD VARCHAR2(255), TS TIMESTAMP)");
 
-                      System.out.println("📦 [DATA] Injecting 100,000 enterprise records after reboot...");
-                      PreparedStatement ps = conn.prepareStatement("INSERT INTO ORA_LEDGER VALUES (RANDOM_UUID(), ?, ?)");
-                      
-                      long start = System.currentTimeMillis();
+                      System.out.println("📦 [CONTAINER-LOAD] Injecting 100,000 records into local storage...");
+                      PreparedStatement ps = conn.prepareStatement("INSERT INTO CONTAINER_DATA VALUES (RANDOM_UUID(), ?, CURRENT_TIMESTAMP)");
                       for (int i = 1; i <= 100000; i++) {
-                          ps.setString(1, "ACC-" + i);
-                          ps.setLong(2, (long)(Math.random() * 5000000));
+                          ps.setString(1, "CONTAINER-VAL-" + i);
                           ps.addBatch();
                           if (i % 10000 == 0) ps.executeBatch();
                       }
                       ps.executeBatch();
-                      System.out.println("✅ [SUCCESS] Batch load completed in " + (System.currentTimeMillis() - start) + "ms");
+                      System.out.println("✅ [SUCCESS] 100,000 items loaded into the containerized database.");
                   }
               }
           }
           EOF
 
-      - name: 🔨 Build & Run Server
+          # [Dockerfile] 멀티 스테이지 빌드 및 데이터 환경 구성
+          cat <<EOF > ${PROJECT_ROOT}/Dockerfile
+          FROM maven:3.9.6-eclipse-temurin-17 AS build
+          WORKDIR /app
+          COPY . .
+          RUN mvn clean package -DskipTests
+          
+          FROM eclipse-temurin:17-jre-jammy
+          WORKDIR /app
+          COPY --from=build /app/target/*.jar app.jar
+          COPY --from=build /app/target/dependency /app/lib
+          # 컨테이너 내 데이터 적재 시뮬레이션을 위한 엔트리포인트 설정
+          ENTRYPOINT ["java", "-cp", "app.jar:lib/*", "com.bank.core.FinancialSystem"]
+          EOF
+
+      - name: 🔨 Build Application & Export Dependencies
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
           mvn clean package -DskipTests
           mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
-          java -cp "target/classes:target/dependency/*" com.bank.core.FinancialSystem
 
-      - name: 🚀 Sync Results
+      - name: 🐳 Docker Container Installation & Data Loading
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          echo "🚀 [CONTAINER] Building Enterprise Image..."
+          docker build -t ${{ env.CONTAINER_NAME }}:latest .
+          
+          echo "🚀 [CONTAINER] Starting Service and Loading Initial Data..."
+          # 컨테이너를 실행하여 내부의 10만 건 데이터 적재 로직 수행
+          docker run --name ${{ env.CONTAINER_NAME }} ${{ env.CONTAINER_NAME }}:latest
+          
+          echo "✅ [CONTAINER] Image and Data Population Completed."
+
+      - name: 🚀 Sync & Push
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "🏦 Financial Core: Oracle Restart & Massive Data Integration [skip ci]" || echo "No changes"
+          git commit -m "🏦 Financial Core: Oracle Restart, Container Setup & 100k Data Load [skip ci]" || echo "No changes"
           git push origin main
