@@ -59,6 +59,7 @@ jobs:
               <properties>
                   <maven.compiler.source>${JAVA_VERSION}</maven.compiler.source>
                   <maven.compiler.target>${JAVA_VERSION}</maven.compiler.target>
+                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
               </properties>
               <dependencies>
                   <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><version>2.2.224</version></dependency>
@@ -99,12 +100,13 @@ jobs:
           }
           EOF
 
-          # [DatabaseManager.java] 드라이버 로드 수정
+          # [DatabaseManager.java] 드라이버 로드 명시 (중요)
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/DatabaseManager.java
           package com.bank.core;
           import java.sql.*;
           public class DatabaseManager {
               public static Connection getConnection() throws Exception {
+                  // ClassNotFoundException 방지를 위해 명시적 로드
                   Class.forName("org.h2.Driver");
                   return DriverManager.getConnection("jdbc:h2:mem:fin_db;DB_CLOSE_DELAY=-1", "sa", "");
               }
@@ -132,10 +134,16 @@ jobs:
       - name: 🏗️ Build & Simulation
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
-          # 의존성 JAR 복사 (H2 드라이버 확보용)
-          mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+          # 1. 빌드를 먼저 수행 (target 폴더 생성 및 clean 작업 완료)
           mvn clean package -B -DskipTests
-          # 클래스패스에 복사된 라이브러리 포함하여 실행
+          
+          # 2. 빌드 후에 의존성 JAR들을 target/dependency 폴더로 추출 (clean에 의해 지워지지 않도록 순서 변경)
+          mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+          
+          # 3. 드라이버 파일 존재 여부 확인 (디버깅용)
+          ls -l target/dependency/h2-*.jar
+          
+          # 4. 클래스패스에 라이브러리를 포함하여 실행
           java -cp "target/classes:target/dependency/*" com.bank.core.FinancialSystem
 
       - name: 📝 Generate Audit Report
@@ -155,5 +163,5 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add .
-          git commit -m "🏦 Financial Core Update: Fix Driver & Scale Up [skip ci]" || echo "No changes"
+          git commit -m "🏦 Financial Core Update: Fix Driver Loading & Build Order [skip ci]" || echo "No changes"
           git push origin main
