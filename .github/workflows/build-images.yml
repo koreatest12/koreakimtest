@@ -1,116 +1,84 @@
-name: "🏦 Financial Enterprise Core: DB, Concurrency & Security"
+name: "🏦 Financial Enterprise Core: Oracle & Multi-Server Simulation"
 
 on:
   workflow_dispatch:
   push:
     branches: [ "main" ]
-    paths-ignore:
-      - 'financial-core/**'
-      - 'reports/**'
 
 permissions:
   contents: write
   packages: write
-  security-events: write
 
 env:
   JAVA_VERSION: '17'
   PROJECT_ROOT: 'financial-core'
   RESOURCE_PATH: 'financial-core/src/main/resources'
-  REPORT_DIR: 'reports'
+  ORACLE_HOME: '/opt/oracle/product/19c/dbhome_1'
 
 jobs:
-  financial-ops:
+  # 1. 컴파일 서버 단계 (CI: Compile & Build)
+  compile-server:
     runs-on: ubuntu-latest
-    name: 💸 FinOps & Resource Generation
+    name: 🏗️ Central Compile Server
+    outputs:
+      artifact-path: ${{ steps.build.outputs.path }}
     steps:
-      - name: 📥 Checkout
+      - name: 📥 Checkout Source
         uses: actions/checkout@v4
 
-      - name: ☕ Set up JDK
+      - name: ☕ Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
           distribution: 'temurin'
           cache: 'maven'
 
-      - name: 🏗️ Generate Enterprise Resources & Files
+      - name: 🏗️ Generate Oracle-Compatible Files
         run: |
-          # 디렉토리 구조 생성
           mkdir -p ${RESOURCE_PATH}/sql
-          mkdir -p ${RESOURCE_PATH}/data
           mkdir -p ${PROJECT_ROOT}/src/main/java/com/bank/core
-          mkdir -p ${REPORT_DIR}
 
-          # 1. [schema.sql] DB 스키마 분리
-          cat <<EOF > ${RESOURCE_PATH}/sql/schema.sql
-          CREATE TABLE IF NOT EXISTS USERS (
-              ID VARCHAR(50) PRIMARY KEY,
-              PASSWORD_HASH VARCHAR(100),
-              BALANCE BIGINT,
-              STATUS VARCHAR(20) DEFAULT 'ACTIVE'
-          );
-          CREATE TABLE IF NOT EXISTS TRANSACTIONS (
-              TX_ID UUID PRIMARY KEY,
-              USER_ID VARCHAR(50),
-              AMOUNT BIGINT,
-              TS TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          );
-          EOF
-
-          # 2. [app-config.properties] 서비스 설정 파일
-          cat <<EOF > ${RESOURCE_PATH}/app-config.properties
-          db.url=jdbc:h2:mem:fin_db;DB_CLOSE_DELAY=-1
-          db.user=sa
-          db.password=
-          system.batch.size=5000
-          system.target.records=50000
-          EOF
-
-          # 3. [pom.xml] 의존성 설정
+          # [pom.xml] Oracle JDBC 드라이버 추가
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
           <project xmlns="http://maven.apache.org/POM/4.0.0">
               <modelVersion>4.0.0</modelVersion>
               <groupId>com.bank</groupId>
               <artifactId>financial-core</artifactId>
               <version>1.0.0</version>
-              <properties>
-                  <maven.compiler.source>${JAVA_VERSION}</maven.compiler.source>
-                  <maven.compiler.target>${JAVA_VERSION}</maven.compiler.target>
-                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-              </properties>
               <dependencies>
                   <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><version>2.2.224</version></dependency>
+                  <dependency><groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId><version>23.3.0.23.09</version></dependency>
               </dependencies>
           </project>
           EOF
 
-          # 4. [DatabaseManager.java] 리소스 로드 로직 개선
+          # [DatabaseManager.java] Oracle 모드 지원 및 재기동 로직 시뮬레이션
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/DatabaseManager.java
           package com.bank.core;
           import java.sql.*;
-          import java.nio.file.*;
-          import java.io.InputStream;
-          import java.util.Scanner;
 
           public class DatabaseManager {
               public static Connection getConnection() throws Exception {
-                  Class.forName("org.h2.Driver");
-                  return DriverManager.getConnection("jdbc:h2:mem:fin_db;DB_CLOSE_DELAY=-1", "sa", "");
+                  // Oracle/H2 하이브리드 모드 드라이버 로드
+                  Class.forName("org.h2.Driver"); 
+                  return DriverManager.getConnection("jdbc:h2:mem:oracle_db;MODE=Oracle;DB_CLOSE_DELAY=-1", "sa", "");
               }
+
+              public static void restartOracleServer() {
+                  System.out.println("🔄 [ORACLE-SYS] Initiating Oracle DB Instance Shutdown...");
+                  System.out.println("🔄 [ORACLE-SYS] Clearing Buffer Cache & Redo Logs...");
+                  System.out.println("✅ [ORACLE-SYS] Oracle Database Server Restarted Successfully.");
+              }
+
               public static void initSchema() throws Exception {
-                  try (Connection conn = getConnection(); 
-                       Statement stmt = conn.createStatement();
-                       InputStream is = DatabaseManager.class.getResourceAsStream("/sql/schema.sql")) {
-                      if (is == null) throw new RuntimeException("Schema file not found!");
-                      String sql = new Scanner(is).useDelimiter("\\\\A").next();
-                      stmt.execute(sql);
+                  try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
+                      stmt.execute("CREATE TABLE FIN_DATA (ID RAW(16) PRIMARY KEY, ACCOUNT_NO VARCHAR2(20), AMOUNT NUMBER, TS TIMESTAMP)");
                   }
               }
           }
           EOF
 
-          # 5. [FinancialSystem.java] 대량 데이터 시뮬레이션
+          # [FinancialSystem.java] 대량 데이터(10만건) 반영
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
           package com.bank.core;
           import java.sql.*;
@@ -118,43 +86,65 @@ jobs:
 
           public class FinancialSystem {
               public static void main(String[] args) throws Exception {
+                  DatabaseManager.restartOracleServer(); // 서버 재기동 기능 호출
                   DatabaseManager.initSchema();
-                  System.out.println("🏦 Database Schema Initialized from Resource File");
                   
-                  int total = 50000;
-                  int batchSize = 5000;
+                  int total = 100000; // 데이터 대량 증설 (10만건)
+                  int batchSize = 10000;
                   
                   try (Connection conn = DatabaseManager.getConnection()) {
                       conn.setAutoCommit(false);
-                      PreparedStatement pstmt = conn.prepareStatement("INSERT INTO USERS (ID, PASSWORD_HASH, BALANCE) VALUES (?, ?, ?)");
+                      PreparedStatement pstmt = conn.prepareStatement("INSERT INTO FIN_DATA VALUES (?, ?, ?, CURRENT_TIMESTAMP)");
                       
                       long start = System.currentTimeMillis();
                       for (int i = 1; i <= total; i++) {
-                          pstmt.setString(1, "USR-" + UUID.randomUUID().toString().substring(0,8));
-                          pstmt.setString(2, "HASH-" + i);
-                          pstmt.setLong(3, 1000000);
+                          pstmt.setBytes(1, java.nio.ByteBuffer.allocate(16).putLong(UUID.randomUUID().getMostSignificantBits()).putLong(UUID.randomUUID().getLeastSignificantBits()).array());
+                          pstmt.setString(2, "ACC-" + (100000 + i));
+                          pstmt.setLong(3, (long)(Math.random() * 10000000));
                           pstmt.addBatch();
                           if (i % batchSize == 0) pstmt.executeBatch();
                       }
                       pstmt.executeBatch();
                       conn.commit();
-                      System.out.println("✅ Successfully injected " + total + " records in " + (System.currentTimeMillis() - start) + "ms");
+                      System.out.println("🚀 [DATA-LOAD] Oracle Financial Data: " + total + " records injected in " + (System.currentTimeMillis() - start) + "ms");
                   }
               }
           }
           EOF
 
-      - name: 🏗️ Build & Execute
+      - name: 🔨 Compile & Package
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
           mvn clean package -DskipTests
           mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+
+      - name: 📤 Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-core
+          path: ${{ env.PROJECT_ROOT }}/target
+
+  # 2. 실행 서버 단계 (CD: Deployment & Execution)
+  execution-server:
+    needs: compile-server
+    runs-on: ubuntu-latest
+    name: 💎 Oracle Database Execution Server
+    steps:
+      - name: 📥 Download Compiled Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: compiled-core
+          path: ./target
+
+      - name: 🚀 Run Oracle Simulation & Batch Job
+        run: |
+          # 아티팩트 구조 재구성 및 실행
           java -cp "target/classes:target/dependency/*" com.bank.core.FinancialSystem
 
-      - name: 🚀 Sync & Push
+      - name: 🚀 Sync to Repository
         run: |
+          # 이 단계는 소스 변경사항을 다시 푸시하기 위해 필요한 경우 Checkout 후 진행
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "🏦 Financial Core: Resource Separation & DB Optimization [skip ci]" || echo "No changes"
-          git push origin main
+          # 실제 환경에서는 아티팩트 배포 위주로 진행하므로 소스 생성 로그만 남김
+          echo "Oracle Multi-Server Simulation Completed"
