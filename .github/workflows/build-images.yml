@@ -1,4 +1,4 @@
-name: "🏦 Financial Enterprise Core: Oracle & Multi-Server Simulation"
+name: "🏦 Financial Enterprise Core: Maven to Oracle Data Migration"
 
 on:
   workflow_dispatch:
@@ -7,40 +7,29 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 env:
   JAVA_VERSION: '17'
   PROJECT_ROOT: 'financial-core'
-  RESOURCE_PATH: 'financial-core/src/main/resources'
-  ORACLE_HOME: '/opt/oracle/product/19c/dbhome_1'
 
 jobs:
-  # 1. 컴파일 서버 단계 (CI: Compile & Build)
-  compile-server:
+  # 1. 빌드 및 데이터 생성 서버
+  build-and-prep:
     runs-on: ubuntu-latest
-    name: 🏗️ Central Compile Server
+    name: 🏗️ Maven Build & Data Prep
     outputs:
-      artifact-path: ${{ steps.build.outputs.path }}
+      artifact-path: ${{ steps.save.outputs.path }}
     steps:
-      - name: 📥 Checkout Source
+      - name: 📥 Checkout
         uses: actions/checkout@v4
 
-      - name: ☕ Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'temurin'
-          cache: 'maven'
-
-      - name: 🏗️ Generate Oracle-Compatible Files
+      - name: 🏗️ Create Enterprise Structure
         run: |
-          mkdir -p ${RESOURCE_PATH}/sql
           mkdir -p ${PROJECT_ROOT}/src/main/java/com/bank/core
-
-          # [pom.xml] Oracle JDBC 드라이버 추가
+          
+          # [pom.xml] Oracle JDBC & Migration Driver
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
-          <project xmlns="http://maven.apache.org/POM/4.0.0">
+          <project>
               <modelVersion>4.0.0</modelVersion>
               <groupId>com.bank</groupId>
               <artifactId>financial-core</artifactId>
@@ -52,99 +41,75 @@ jobs:
           </project>
           EOF
 
-          # [DatabaseManager.java] Oracle 모드 지원 및 재기동 로직 시뮬레이션
-          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/DatabaseManager.java
+          # [DataMigrator.java] Maven 데이터 -> Oracle 이관 핵심 로직
+          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/DataMigrator.java
           package com.bank.core;
           import java.sql.*;
+          import java.util.*;
 
-          public class DatabaseManager {
-              public static Connection getConnection() throws Exception {
-                  // Oracle/H2 하이브리드 모드 드라이버 로드
-                  Class.forName("org.h2.Driver"); 
-                  return DriverManager.getConnection("jdbc:h2:mem:oracle_db;MODE=Oracle;DB_CLOSE_DELAY=-1", "sa", "");
-              }
-
-              public static void restartOracleServer() {
-                  System.out.println("🔄 [ORACLE-SYS] Initiating Oracle DB Instance Shutdown...");
-                  System.out.println("🔄 [ORACLE-SYS] Clearing Buffer Cache & Redo Logs...");
-                  System.out.println("✅ [ORACLE-SYS] Oracle Database Server Restarted Successfully.");
-              }
-
-              public static void initSchema() throws Exception {
-                  try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
-                      stmt.execute("CREATE TABLE FIN_DATA (ID RAW(16) PRIMARY KEY, ACCOUNT_NO VARCHAR2(20), AMOUNT NUMBER, TS TIMESTAMP)");
-                  }
-              }
-          }
-          EOF
-
-          # [FinancialSystem.java] 대량 데이터(10만건) 반영
-          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
-          package com.bank.core;
-          import java.sql.*;
-          import java.util.UUID;
-
-          public class FinancialSystem {
+          public class DataMigrator {
               public static void main(String[] args) throws Exception {
-                  DatabaseManager.restartOracleServer(); // 서버 재기동 기능 호출
-                  DatabaseManager.initSchema();
+                  // 1. Oracle 서버 재기동 시뮬레이션
+                  System.out.println("🔄 [SYS] Restarting Oracle Instance for Migration...");
                   
-                  int total = 100000; // 데이터 대량 증설 (10만건)
-                  int batchSize = 10000;
+                  // 2. 소스 데이터(Maven/H2) 및 타겟(Oracle) 연결
+                  Class.forName("org.h2.Driver");
+                  Connection sourceConn = DriverManager.getConnection("jdbc:h2:mem:source_db;DB_CLOSE_DELAY=-1", "sa", "");
+                  Connection oracleConn = DriverManager.getConnection("jdbc:h2:mem:oracle_db;MODE=Oracle;DB_CLOSE_DELAY=-1", "sa", "");
+
+                  // 3. 스키마 초기화
+                  Statement srcStmt = sourceConn.createStatement();
+                  srcStmt.execute("CREATE TABLE MAVEN_RAW (ID INT, VAL VARCHAR(255))");
                   
-                  try (Connection conn = DatabaseManager.getConnection()) {
-                      conn.setAutoCommit(false);
-                      PreparedStatement pstmt = conn.prepareStatement("INSERT INTO FIN_DATA VALUES (?, ?, ?, CURRENT_TIMESTAMP)");
-                      
-                      long start = System.currentTimeMillis();
-                      for (int i = 1; i <= total; i++) {
-                          pstmt.setBytes(1, java.nio.ByteBuffer.allocate(16).putLong(UUID.randomUUID().getMostSignificantBits()).putLong(UUID.randomUUID().getLeastSignificantBits()).array());
-                          pstmt.setString(2, "ACC-" + (100000 + i));
-                          pstmt.setLong(3, (long)(Math.random() * 10000000));
-                          pstmt.addBatch();
-                          if (i % batchSize == 0) pstmt.executeBatch();
-                      }
-                      pstmt.executeBatch();
-                      conn.commit();
-                      System.out.println("🚀 [DATA-LOAD] Oracle Financial Data: " + total + " records injected in " + (System.currentTimeMillis() - start) + "ms");
+                  Statement oraStmt = oracleConn.createStatement();
+                  oraStmt.execute("CREATE TABLE ORA_FINANCIAL_CORE (ORA_ID RAW(16) PRIMARY KEY, DATA_VAL VARCHAR2(255), MIGRATED_AT TIMESTAMP)");
+
+                  // 4. 대량 데이터 생성 (Maven side)
+                  System.out.println("📦 [STEP 1] Generating 100,000 Maven Raw Records...");
+                  PreparedStatement ps = sourceConn.prepareStatement("INSERT INTO MAVEN_RAW VALUES (?, ?)");
+                  for(int i=0; i<100000; i++) {
+                      ps.setInt(1, i);
+                      ps.setString(2, "FIN-DATA-" + UUID.randomUUID());
+                      ps.addBatch();
+                      if(i % 10000 == 0) ps.executeBatch();
                   }
+                  ps.executeBatch();
+
+                  // 5. Oracle로 데이터 이관 (Data Migration)
+                  System.out.println("🚀 [STEP 2] Migrating Data to Oracle Server...");
+                  long start = System.currentTimeMillis();
+                  ResultSet rs = srcStmt.executeQuery("SELECT * FROM MAVEN_RAW");
+                  PreparedStatement oraPs = oracleConn.prepareStatement(
+                      "INSERT INTO ORA_FINANCIAL_CORE VALUES (RANDOM_UUID(), ?, CURRENT_TIMESTAMP)");
+
+                  int count = 0;
+                  while(rs.next()) {
+                      oraPs.setString(1, rs.getString("VAL"));
+                      oraPs.addBatch();
+                      if(++count % 10000 == 0) oraPs.executeBatch();
+                  }
+                  oraPs.executeBatch();
+                  
+                  System.out.println("✅ [COMPLETED] 100,000 records migrated to Oracle in " + (System.currentTimeMillis()-start) + "ms");
               }
           }
           EOF
 
-      - name: 🔨 Compile & Package
+      - name: 🔨 Compile
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
           mvn clean package -DskipTests
           mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
 
-      - name: 📤 Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: compiled-core
-          path: ${{ env.PROJECT_ROOT }}/target
-
-  # 2. 실행 서버 단계 (CD: Deployment & Execution)
-  execution-server:
-    needs: compile-server
-    runs-on: ubuntu-latest
-    name: 💎 Oracle Database Execution Server
-    steps:
-      - name: 📥 Download Compiled Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: compiled-core
-          path: ./target
-
-      - name: 🚀 Run Oracle Simulation & Batch Job
+      - name: 🚀 Execute Migration Server
+        working-directory: ${{ env.PROJECT_ROOT }}
         run: |
-          # 아티팩트 구조 재구성 및 실행
-          java -cp "target/classes:target/dependency/*" com.bank.core.FinancialSystem
+          java -cp "target/classes:target/dependency/*" com.bank.core.DataMigrator
 
-      - name: 🚀 Sync to Repository
+      - name: 🚀 Sync & Push
         run: |
-          # 이 단계는 소스 변경사항을 다시 푸시하기 위해 필요한 경우 Checkout 후 진행
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          # 실제 환경에서는 아티팩트 배포 위주로 진행하므로 소스 생성 로그만 남김
-          echo "Oracle Multi-Server Simulation Completed"
+          git add .
+          git commit -m "🏦 Financial Core: Maven to Oracle ETL Pipeline Integration [skip ci]" || echo "No changes"
+          git push origin main
