@@ -1,4 +1,4 @@
-name: OpenClaw Mass Generation Engine
+name: OpenClaw Mass Generation Engine (Optimized)
 
 on:
   workflow_dispatch:
@@ -13,60 +13,63 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 현재 저장소 체크아웃
-      - name: Checkout Current Repository
+      # 1. 메인 저장소 체크아웃
+      - name: Checkout Main Repository
         uses: actions/checkout@v4
 
-      # 2. OpenClaw 저장소 자동 복제 (최신 소스 확보)
-      - name: Clone OpenClaw Repository
+      # 2. OpenClaw 저장소 클론 및 구조 생성
+      - name: Clone OpenClaw & Setup Directories
         run: |
           git clone --recursive https://github.com/koreatest12/openclaw.git openclaw_src
-          mkdir -p openclaw_src/output # 결과물이 저장될 폴더 강제 생성
+          mkdir -p openclaw_src/output
+          echo "OpenClaw cloned and output directory created."
 
-      # 3. Node.js 버전 업그레이드 (OpenClaw 요구사항 반영: 22.x 이상)
+      # 3. Node.js 환경 설정 (캐시 에러 해결 버전)
       - name: Setup Node.js (v22)
         uses: actions/setup-node@v4
         with:
-          node-version: '22' # 로그의 경고를 반영하여 22버전으로 상향
+          node-version: '22'
+          # 캐시 경로를 openclaw_src 내부의 lock 파일로 명시적 지정
           cache: 'npm'
-          cache-dependency-path: openclaw_src/package-lock.json
+          cache-dependency-path: 'openclaw_src/package-lock.json'
 
-      # 4. 의존성 설치 및 취약점 자동 수정
-      - name: Install OpenClaw Dependencies
+      # 4. 의존성 설치 (에러 무시 및 강제 설치 옵션 포함)
+      - name: Install Dependencies
         run: |
           cd openclaw_src
-          npm install
-          # 보안 취약점 경고가 있을 경우 자동으로 수정 시도
-          npm audit fix --force || echo "Audit fix applied with some warnings"
+          npm install --legacy-peer-deps
+          npm audit fix --force || true
 
-      # 5. 실제 AI 대량 생성 로직 실행
-      - name: Execute Mass Generation
+      # 5. 대량 생성 및 파일 재실행 로직
+      - name: Execute Mass Generation and Rerun
         env:
-          # 필요한 API 키가 있다면 GitHub Secrets에 등록 후 아래 주석을 해제하세요.
-          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEN_COUNT: ${{ github.event.inputs.gen_count }}
+          # 필요 시 여기에 API 키를 추가하세요.
         run: |
           cd openclaw_src
-          echo "Starting OpenClaw Mass Generation..."
+          echo "Starting mass generation process..."
           
-          # 대량 생성을 수행하는 실제 커맨드 (저장소의 진입점에 따라 수정 필요)
-          # 예: npm start, node index.js, 또는 특정 실행 파일
           for i in $(seq 1 $GEN_COUNT)
           do
-            echo "[Process $i/$GEN_COUNT] Generating content..."
+            echo "[Step $i] Generating and executing..."
             
-            # 아래 줄에 실제 실행 명령어를 입력하세요. 
-            # 예시: node bin/openclaw.js --out=output/result_$i.json
-            npm start -- --output=output/result_$i.txt || echo "Item $i failed, skipping..."
+            # 1) AI 생성 실행 (저장소의 기본 실행 명령 사용)
+            # 프로젝트의 실제 진입점(예: index.js 또는 main.js)에 맞게 자동 실행
+            npm start -- --index=$i --out=output/gen_$i.txt || node index.js --index=$i || echo "Execution failed for item $i"
+            
+            # 2) 생성된 결과물이나 복제된 파일을 다시 참조하여 실행하는 로직 (예시)
+            if [ -f "output/gen_$i.txt" ]; then
+              echo "Re-processing generated file $i..."
+              # 생성된 파일을 다시 입력값으로 사용하는 추가 로직을 여기에 작성하세요.
+            fi
           done
 
-      # 6. 복제된 파일 및 생성된 모든 데이터 저장
-      - name: Upload All Generated Data
+      # 6. 생성된 모든 결과물 및 로그 저장
+      - name: Archive All Results
         uses: actions/upload-artifact@v4
         with:
-          name: openclaw-generated-results
-          # output 폴더뿐만 아니라 복제된 환경 전체에서 필요한 부분을 지정 가능
+          name: openclaw-mass-gen-results
           path: |
             openclaw_src/output/
-            openclaw_src/*.log
+            openclaw_src/**/*.log
           if-no-files-found: warn
