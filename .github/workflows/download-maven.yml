@@ -40,7 +40,7 @@ jobs:
           mkdir -p "$MCP_ARTIFACTS/java" "$MCP_ARTIFACTS/node"
           pip install bandit safety pip-audit
 
-      - name: [SCRIPT] Full Repository Security Analysis
+      - name: Full Repository Security Analysis
         continue-on-error: true
         run: |
           echo "======================================================"
