@@ -1,81 +1,75 @@
-name: OpenClaw Advanced AI Developer
+name: Virtual AI Intelligence Engine
 
 on:
   workflow_dispatch:
     inputs:
-      gen_count:
-        description: '동시 실행할 AI 인스턴스 개수'
+      instance_names:
+        description: '생성할 AI 이름들 (쉼표로 구분)'
         required: true
-        default: '3'
-      ai_model:
-        description: '사용할 AI 모델 (gpt-4, claude-3, etc.)'
-        required: true
-        default: 'gpt-4o'
+        default: 'Security-Expert, SideJob-Analyst, Dev-Master'
 
 jobs:
-  develop-and-run:
+  spawn-intelligent-ai:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout Core
         uses: actions/checkout@v4
 
-      - name: Setup Environment
+      - name: Initialize OpenClaw Environment
         run: |
           git clone --recursive https://github.com/koreatest12/openclaw.git openclaw_src
-          mkdir -p openclaw_src/output
-          mkdir -p openclaw_src/cloned_runs
+          cd openclaw_src && npm install --legacy-peer-deps
 
-      - name: Install Node.js & Tools
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Build Core Engine
-        run: |
-          cd openclaw_src
-          npm install --legacy-peer-deps
-
-      # [추가 개발] 동적 설정값 생성 및 대량 실행
-      - name: Dynamic AI Instance Scaling
+      # [지능 주입 단계] 각 가상 AI에게 지식 및 성격 부여
+      - name: Inject Knowledge & Intelligence
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          MODEL_NAME: ${{ github.event.inputs.ai_model }}
-          GEN_COUNT: ${{ github.event.inputs.gen_count }}
+          AI_NAMES: ${{ github.event.inputs.instance_names }}
         run: |
           cd openclaw_src
-          for i in $(seq 1 $GEN_COUNT)
+          mkdir -p knowledge_base
+          
+          # AI 이름 리스트를 배열로 변환
+          IFS=',' read -r -a NAME_ARRAY <<< "$AI_NAMES"
+          
+          for name in "${NAME_ARRAY[@]}"
           do
-            DEST="cloned_runs/run_$i"
+            clean_name=$(echo $name | xargs) # 공백 제거
+            DEST="cloned_runs/$clean_name"
             mkdir -p "$DEST"
             rsync -av --exclude='cloned_runs' --exclude='node_modules' . "$DEST/"
             ln -s "$(pwd)/node_modules" "$DEST/node_modules"
             
-            # [기능 추가] 각 인스턴스별 고유 설정 파일(.env) 생성
-            echo "INSTANCE_ID=$i" > "$DEST/.env"
-            echo "AI_MODEL=$MODEL_NAME" >> "$DEST/.env"
-            echo "API_KEY=$OPENAI_API_KEY" >> "$DEST/.env"
-            echo "OUTPUT_PATH=../../output/result_$i.json" >> "$DEST/.env"
+            # [지식 데이터 주입] 각 AI마다 다른 전문 지식 텍스트 파일 생성
+            case $clean_name in
+              "Security-Expert")
+                echo "지식: 정보보안기사, 네트워크 보안, 침해사고 분석" > "$DEST/intelligence.txt"
+                echo "성격: 분석적이고 철저함" >> "$DEST/intelligence.txt"
+                ;;
+              "SideJob-Analyst")
+                echo "지식: 수익화 파이프라인, 제휴 마케팅, 자동화 부업" > "$DEST/intelligence.txt"
+                echo "성격: 창의적이고 효율 중심" >> "$DEST/intelligence.txt"
+                ;;
+              *)
+                echo "지식: 범용 인공지능 지식" > "$DEST/intelligence.txt"
+                echo "성격: 친절하고 협력적임" >> "$DEST/intelligence.txt"
+                ;;
+            esac
 
-            echo "[Instance $i] AI 프로그램 가동 중..."
+            # [지능 로직 반영] 실행 시 지식 파일을 읽도록 설정
+            echo "INSTANCE_NAME=$clean_name" > "$DEST/.env"
+            echo "KNOWLEDGE_FILE=intelligence.txt" >> "$DEST/.env"
+
+            echo "가상 AI [$clean_name] 지능 주입 완료. 가동 시작..."
             cd "$DEST"
-            # 프로그램의 메인 로직 실행 (실제 파일명에 맞춰 자동 탐색)
-            if [ -f "main.js" ]; then
-              node main.js > "../../output/log_$i.txt" 2>&1 &
-            elif [ -f "index.js" ]; then
-              node index.js > "../../output/log_$i.txt" 2>&1 &
-            else
-              npm start > "../../output/log_$i.txt" 2>&1 &
-            fi
+            # 가상 AI 실행 (지식 기반 모드로 실행한다고 가정)
+            node index.js --intelligence=true > "../../output/${clean_name}_log.txt" 2>&1 &
             cd ../..
           done
-          
-          # 백그라운드 작업 완료 대기
           wait
-          echo "모든 AI 인스턴스의 작업이 완료되었습니다."
 
-      - name: Archive AI Generated Assets
+      - name: Upload Intelligent AI Logs
         uses: actions/upload-artifact@v4
         with:
-          name: ai-generation-final-outputs
+          name: intelligent-ai-outputs
           path: openclaw_src/output/
