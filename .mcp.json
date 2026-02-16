@@ -1,61 +1,30 @@
 {
   "mcpServers": {
-    "hello-mcp-js": {
+    "filesystem": {
+      "command": "cmd",
+      "args": ["/c", "npx", "@modelcontextprotocol/server-filesystem", "C:\\Users\\kwonn"],
+      "env": {
+        "ROOT": "C:\\Users\\kwonn"
+      }
+    },
+    "money-mcp": {
       "command": "node",
-      "args": ["C:\\Users\\kwonn\\mcp-hello-js\\index.js"],
-      "env": {}
+      "args": ["C:\\Users\\kwonn\\money-mcp\\index.js"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
     },
-    "hello-mcp-py": {
-      "command": "C:\\Users\\kwonn\\mcp-hello-py\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\Users\\kwonn\\mcp-hello-py\\server.py"],
-      "env": { "PYTHONUNBUFFERED": "1" }
-    },
-    "filesystem-home": {
+    "claude-code-mcp": {
       "command": "cmd",
-      "args": [
-        "/c",
-        "npx",
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "C:\\Users\\kwonn"
-      ]
+      "args": ["/c", "npx", "-y", "@steipete/claude-code-mcp@latest"]
     },
-    "filesystem-documents": {
-      "command": "cmd",
-      "args": [
-        "/c",
-        "npx",
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "C:\\Users\\kwonn\\Documents"
-      ]
+    "crypto-mcp": {
+      "command": "node",
+      "args": ["C:\\Users\\kwonn\\crypto-mcp\\index.js"]
     },
-    "filesystem-downloads": {
-      "command": "cmd",
-      "args": [
-        "/c",
-        "npx",
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "C:\\Users\\kwonn\\Downloads"
-      ]
-    },
-    "python-utils": {
-      "command": "C:\\Users\\kwonn\\mcp-python-server\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\Users\\kwonn\\mcp-python-server\\server_mcp.py"],
-      "env": { "PYTHONUNBUFFERED": "1" }
-    },
-    "apache-manager": {
-      "command": "C:\\Users\\kwonn\\mcp-apache-server\\.venv\\Scripts\\python.exe",
-      "args": ["C:\\Users\\kwonn\\mcp-apache-server\\server.py"],
-      "env": { "PYTHONUNBUFFERED": "1" }
-    },
-    "hello-mcp-java": {
-      "command": "C:\\Users\\kwonn\\.jdks\\openjdk-24.0.2+12-54\\bin\\java.exe",
-      "args": [
-        "-jar",
-        "C:\\Users\\kwonn\\mcp-hello-java\\target\\mcp-hello-java-1.0.0.jar"
-      ]
+    "chrome-mcp": {
+      "command": "node",
+      "args": ["C:\\Users\\kwonn\\chrome-mcp\\index.js"]
     }
   }
 }
