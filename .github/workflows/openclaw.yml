@@ -1,81 +1,81 @@
-name: OpenClaw Mass Copy & Rerun Engine (Fixed)
+name: OpenClaw Advanced AI Developer
 
 on:
   workflow_dispatch:
     inputs:
       gen_count:
-        description: '반복 실행 횟수 (Mass Count)'
+        description: '동시 실행할 AI 인스턴스 개수'
         required: true
-        default: '5'
+        default: '3'
+      ai_model:
+        description: '사용할 AI 모델 (gpt-4, claude-3, etc.)'
+        required: true
+        default: 'gpt-4o'
 
 jobs:
-  execute-openclaw:
+  develop-and-run:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 기본 저장소 체크아웃
-      - name: Checkout Current Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. OpenClaw 저장소 복제
-      - name: Clone OpenClaw Repository
+      - name: Setup Environment
         run: |
           git clone --recursive https://github.com/koreatest12/openclaw.git openclaw_src
           mkdir -p openclaw_src/output
           mkdir -p openclaw_src/cloned_runs
 
-      # 3. Node.js 환경 설정 (v22)
-      - name: Setup Node.js (v22)
+      - name: Install Node.js & Tools
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      # 4. 의존성 설치
-      - name: Install Dependencies
+      - name: Build Core Engine
         run: |
           cd openclaw_src
           npm install --legacy-peer-deps
 
-      # 5. [수정됨] rsync를 이용한 안전한 대량 복제 및 실행
-      - name: Mass Clone and Rerun
+      # [추가 개발] 동적 설정값 생성 및 대량 실행
+      - name: Dynamic AI Instance Scaling
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MODEL_NAME: ${{ github.event.inputs.ai_model }}
           GEN_COUNT: ${{ github.event.inputs.gen_count }}
         run: |
           cd openclaw_src
-          echo "시작: $GEN_COUNT 개의 인스턴스 복제 및 실행"
-          
-          # rsync가 설치되어 있는지 확인 (기본적으로 Ubuntu runner에 설치되어 있음)
           for i in $(seq 1 $GEN_COUNT)
           do
-            echo "[작업 $i] 인스턴스 생성 중..."
             DEST="cloned_runs/run_$i"
             mkdir -p "$DEST"
-            
-            # cp --exclude 대신 rsync를 사용하여 무한 복제 방지 및 안전한 복사
             rsync -av --exclude='cloned_runs' --exclude='node_modules' . "$DEST/"
-            
-            echo "[작업 $i] 의존성 링크 및 실행..."
-            # 용량 절약을 위해 node_modules는 심볼릭 링크로 연결 (속도 향상)
             ln -s "$(pwd)/node_modules" "$DEST/node_modules"
             
+            # [기능 추가] 각 인스턴스별 고유 설정 파일(.env) 생성
+            echo "INSTANCE_ID=$i" > "$DEST/.env"
+            echo "AI_MODEL=$MODEL_NAME" >> "$DEST/.env"
+            echo "API_KEY=$OPENAI_API_KEY" >> "$DEST/.env"
+            echo "OUTPUT_PATH=../../output/result_$i.json" >> "$DEST/.env"
+
+            echo "[Instance $i] AI 프로그램 가동 중..."
             cd "$DEST"
-            
-            # 실제 실행 (로그를 상위 output 폴더로 집계)
-            if [ -f "index.js" ]; then
-              node index.js --id=$i > "../../output/log_$i.txt" 2>&1 || echo "Run $i failed"
+            # 프로그램의 메인 로직 실행 (실제 파일명에 맞춰 자동 탐색)
+            if [ -f "main.js" ]; then
+              node main.js > "../../output/log_$i.txt" 2>&1 &
+            elif [ -f "index.js" ]; then
+              node index.js > "../../output/log_$i.txt" 2>&1 &
             else
-              npm start -- --id=$i > "../../output/log_$i.txt" 2>&1 || echo "Run $i failed"
+              npm start > "../../output/log_$i.txt" 2>&1 &
             fi
-            
             cd ../..
           done
+          
+          # 백그라운드 작업 완료 대기
+          wait
+          echo "모든 AI 인스턴스의 작업이 완료되었습니다."
 
-      # 6. 생성된 모든 결과물 저장
-      - name: Upload Results
+      - name: Archive AI Generated Assets
         uses: actions/upload-artifact@v4
         with:
-          name: openclaw-mass-results
-          path: |
-            openclaw_src/output/
-            openclaw_src/cloned_runs/run_*/output/
-          if-no-files-found: warn
+          name: ai-generation-final-outputs
+          path: openclaw_src/output/
