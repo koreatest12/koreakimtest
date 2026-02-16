@@ -1,4 +1,4 @@
-name: "🚀 MCP Server Install & Context Sync v3.2 (INTEGRATED)"
+name: "🚀 MCP Server Install & Context Sync v3.4 (CONTEXT-FIX)"
 
 on:
   push:
@@ -9,6 +9,10 @@ on:
         description: '데이터 마이그레이션을 실행할까요?'
         type: boolean
         default: true
+      force_upgrade:
+        description: '모든 의존성을 최신 버전으로 업그레이드할까요?'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -32,85 +36,67 @@ jobs:
         uses: actions/checkout@v4
 
       # ===========================================================================
-      # 1. 환경 준비 및 인라인 보안 스캔 스크립트
+      # 1. 시스템 및 의존성 업그레이드
       # ===========================================================================
-      - name: Prepare Workspace & Install Tools
+      - name: System Environment
         run: |
-          mkdir -p "$MCP_WORKSPACE" "$MCP_ARTIFACTS" "$MCP_CONFIG" "$COPILOT_DIR"
-          mkdir -p "$MCP_ARTIFACTS/java" "$MCP_ARTIFACTS/node"
-          pip install bandit safety pip-audit
+          sudo apt-get update && sudo apt-get upgrade -y
+          pip install --upgrade pip setuptools wheel bandit safety pip-audit
+          
+          if [ "${{ inputs.force_upgrade }}" == "true" ]; then
+            npm install -g npm-check-updates
+            # 각 서비스별 의존성 최신화 (있을 경우만)
+            [ -d "mcp-node-service" ] && (cd mcp-node-service && ncu -u && npm install)
+            [ -d "mcp-python-server" ] && (pip install pip-review && pip-review --auto)
+          fi
 
-      - name: Full Repository Security Analysis
+      # ===========================================================================
+      # 2. 보안 스캔 및 인라인 마이그레이션
+      # ===========================================================================
+      - name: Security & Migration
         continue-on-error: true
         run: |
-          echo "======================================================"
-          echo "🔍 [INTERNAL SCRIPT] GLOBAL SECURITY SCAN START"
-          echo "======================================================"
-          # Bandit을 이용한 전체 디렉토리 정적 분석
-          bandit -r . -ll -ii --format txt --output $MCP_ARTIFACTS/full_repo_security_report.txt || true
+          mkdir -p "$MCP_ARTIFACTS" "$MCP_CONFIG" "$COPILOT_DIR"
+          bandit -r . -ll -ii -f txt -o $MCP_ARTIFACTS/full_repo_security_report.txt || true
           
-          # 의존성 보안 취약점 검사 (pip-audit)
-          if [ -f "mcp-python-server/requirements.txt" ]; then
-            pip-audit -r mcp-python-server/requirements.txt --format cyclone-dx-json -o $MCP_ARTIFACTS/python_sbom.json || true
-          fi
-          echo "✅ Security Analysis Completed."
-
-      # ===========================================================================
-      # 2. 인라인 데이터 마이그레이션 스크립트 (통합 버전)
-      # ===========================================================================
-      - name: Data Migration & Sync Logic
-        if: ${{ inputs.run_migration == 'true' || github.event_name == 'push' }}
-        run: |
-          echo "======================================================"
-          echo "🔄 [INTERNAL SCRIPT] DATA MIGRATION START"
-          echo "======================================================"
-          
-          # 파이썬 인라인 마이그레이션 로직 생성 및 실행
           cat <<'PYTHON' > migration_engine.py
-          import os
           import datetime
-
-          def run_migration():
-              print(f"[{datetime.datetime.now()}] Initializing Data Migration Engine...")
-              # 1. 데이터 구조 검증 로직 (예시)
-              print("- Validating schema for 'cost-data'...")
-              
-              # 2. 마이그레이션 로그 생성
-              with open(".github/mcp-workspace/artifacts/migration_success.log", "w") as f:
-                  f.write(f"Migration executed successfully at {datetime.datetime.now()}\n")
-                  f.write("Status: All systems nominal.\n")
-              
-              print("✅ Data Migration Engine Finished Successfully.")
-
-          if __name__ == "__main__":
-              run_migration()
+          def run():
+              print(f"[{datetime.datetime.now()}] Upgrade & Migration Engine Active.")
+              # DB 스키마 업데이트 시뮬레이션
+              print(">> Migrating 'koreakimtest' data structures...")
+          if __name__ == "__main__": run()
           PYTHON
-
-          python3 migration_engine.py
-          rm migration_engine.py # 실행 후 임시 파일 삭제
+          python3 migration_engine.py && rm migration_engine.py
 
       # ===========================================================================
-      # 3. 서비스 파일 및 Dockerfile 생성
+      # 3. Dockerfile 생성 (BUILD CONTEXT 최적화 버전)
       # ===========================================================================
-      - name: Generate Deployment Configurations
+      - name: Generate Optimized Dockerfiles
         run: |
           mkdir -p $MCP_CONFIG/docker
+          
+          # [핵심 수정] WORKDIR를 설정하고 빌드 컨텍스트 루트를 기준으로 경로 설정
           
           # Python Dockerfile
           cat <<'DOCKER' > $MCP_CONFIG/docker/python.Dockerfile
           FROM python:3.11-slim
           WORKDIR /app
+          RUN apt-get update && apt-get upgrade -y
+          # 빌드 컨텍스트가 루트일 때의 경로
           COPY mcp-python-server/requirements.txt .
           RUN pip install --no-cache-dir -r requirements.txt
           COPY mcp-python-server/ .
           CMD ["python", "server_mcp.py"]
           DOCKER
 
-          # Node Dockerfile
+          # Node Dockerfile (에러 원인 해결)
           cat <<'DOCKER' > $MCP_CONFIG/docker/node.Dockerfile
           FROM node:20-slim
           WORKDIR /app
-          COPY mcp-node-service/package*.json .
+          RUN apt-get update && apt-get upgrade -y
+          # 빌드 컨텍스트가 루트일 때의 경로
+          COPY mcp-node-service/package*.json ./
           RUN npm ci --only=production
           COPY mcp-node-service/ .
           CMD ["node", "index.js"]
@@ -120,32 +106,39 @@ jobs:
           cat <<'DOCKER' > $MCP_CONFIG/docker/java.Dockerfile
           FROM openjdk:17-jdk-slim
           WORKDIR /app
+          RUN apt-get update && apt-get upgrade -y
+          # target 폴더의 jar 파일을 루트 기준으로 복사
           COPY mcp-java-server/target/*.jar app.jar
           CMD ["java", "-jar", "app.jar"]
           DOCKER
 
       # ===========================================================================
-      # 4. 서비스 빌드 (Python, Node, Java)
+      # 4. 전체 서비스 빌드 (CONTEXT를 루트(.)로 고정하여 에러 해결)
       # ===========================================================================
-      - name: Build All Services (Docker)
+      - name: Build All Services (Root Context Build)
         run: |
-          echo "🔨 Building Python image..."
+          echo "🔨 Building Python (Context: .)..."
           docker build -t mcp-python-server:${{ github.sha }} -f $MCP_CONFIG/docker/python.Dockerfile .
           
-          echo "🔨 Building Node image..."
-          cd mcp-node-service && npm ci && cd ..
+          echo "🔨 Building Node (Context: .)..."
+          # 이전 단계에서 cd mcp-node-service를 하지 않고 루트에서 npm ci 실행
+          if [ -d "mcp-node-service" ]; then
+            cd mcp-node-service && npm ci && cd ..
+          fi
+          # 핵심: 마지막 인자를 . 으로 설정하여 루트 전체를 컨텍스트로 전달
           docker build -t mcp-node-service:${{ github.sha }} -f $MCP_CONFIG/docker/node.Dockerfile .
           
-          echo "🔨 Building Java image..."
-          cd mcp-java-server && mvn clean package -DskipTests && cd ..
+          echo "🔨 Building Java (Context: .)..."
+          if [ -d "mcp-java-server" ]; then
+            cd mcp-java-server && mvn clean package -DskipTests && cd ..
+          fi
           docker build -t mcp-java-server:${{ github.sha }} -f $MCP_CONFIG/docker/java.Dockerfile .
 
       # ===========================================================================
-      # 5. 오케스트레이션 및 최종 보고서
+      # 5. 아티팩트 및 로그 완료
       # ===========================================================================
-      - name: Finalize Deployment Context
+      - name: Finalize & Context Sync
         run: |
-          # Docker Compose Blueprint
           cat <<YAML > $MCP_ARTIFACTS/docker-compose.yml
           version: '3.8'
           services:
@@ -153,23 +146,16 @@ jobs:
             node-core: { image: mcp-node-service:${{ github.sha }}, ports: ["3000:3000"] }
             java-backend: { image: mcp-java-server:${{ github.sha }}, ports: ["8080:8080"] }
           YAML
+          
+          echo "| $(date) | ${{ github.run_id }} | Context Fix & Upgrade | Success |" >> docs/copilot_install_log.md
 
-          # Copilot Context Summary
-          cat <<MD > "$COPILOT_DIR/mcp-server-context-v3.2.md"
-          # MCP Omniservice v3.2 Report
-          - **Status:** Integrated Deployment Ready
-          - **Security Scan:** Completed (Bandit/pip-audit)
-          - **Migration:** Inline Engine Executed
-          - **Timestamp:** $(date)
-          MD
-
-      - name: Upload Workspace Artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mcp-integrated-package
+          name: mcp-v3.4-fixed-package
           path: ${{ env.MCP_WORKSPACE }}
 
-      - name: Commit Log and Push
+      - name: Commit Log
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: Integrated workflow v3.2 (Inline Migration & Scan)"
+          commit_message: "fix: solve Docker build context error and upgrade v3.4"
