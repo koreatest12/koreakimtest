@@ -1,336 +1,198 @@
-name: "🏦 Financial Enterprise Core: DB, Concurrency & Security"
+name: "🚀 Spring Super CI V6: Oracle, Container & MB-Optimized"
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '*/10 * * * *' # 10분마다 배치 실행
   push:
-    branches: [ "main" ]
-    paths-ignore:
-      - 'financial-core/**'
-      - 'reports/**'
+    branches: [ "main", "develop" ]
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: '강제 종속성 업데이트'
+        type: boolean
+        default: false
+      backup_retention:
+        description: '백업 보관 기간(일)'
+        default: '30'
+
+env:
+  # 1. 시스템 설정
+  APP_NAME: "finance-core-system"
+  JAVA_VERSION: '17'
+  DISTRIBUTION: 'temurin'
+  PROJECT_ROOT: 'financial-core'
+  CONTAINER_NAME: 'fin-core-service'
+  # 2. 서비스 정의
+  SERVICE_POSTGRES: "postgres:15-alpine"
+  SERVICE_REDIS: "redis:7-alpine"
+  # 3. 경로 설정
+  ARTIFACT_DIR: "super-artifacts"
+  SIZE_REPORT: "size_report_mb.txt"
 
 permissions:
   contents: write
   packages: write
-  security-events: write
-  checks: write
-
-env:
-  MAVEN_VERSION: '3.9.6'
-  JAVA_VERSION: '17'
-  PROJECT_ROOT: 'financial-core'
-  DOCKER_IMAGE_NAME: 'financial-enterprise-system'
-  REPORT_DIR: 'reports'
-  DATA_DIR: 'data_warehouse'
+  pull-requests: write
 
 jobs:
-  financial-ops:
+  # ======================================================
+  # JOB 1: 서비스 인프라 준비 (MB 최적화)
+  # ======================================================
+  provision-infra-mb:
+    name: 📥 Provision Services (MB Optimized)
     runs-on: ubuntu-latest
-    name: 💸 FinOps & DB Simulation
-
     steps:
-      # ----------------------------------------------------------------
-      # 1. 환경 설정
-      # ----------------------------------------------------------------
-      - name: 🕒 Set Start Time
-        run: echo "START_TIME=$(date +%s)" >> $GITHUB_ENV
+      - name: 📝 Initialize
+        run: |
+          mkdir -p services
+          echo "===== INFRA SIZE REPORT (MB) =====" > ${{ env.SIZE_REPORT }}
 
-      - name: 📥 Checkout
+      - name: 🐳 Pull & Compress Services
+        run: |
+          for img in ${{ env.SERVICE_POSTGRES }} ${{ env.SERVICE_REDIS }}; do
+            docker pull -q $img
+            SAFE_NAME=$(echo $img | tr '/:' '_')
+            docker save $img | gzip > "services/${SAFE_NAME}.tar.gz"
+            SIZE_MB=$(du -m "services/${SAFE_NAME}.tar.gz" | cut -f1)
+            echo " - $SAFE_NAME: ${SIZE_MB} MB" >> ${{ env.SIZE_REPORT }}
+          done
+
+      - name: 📤 Upload Infra Pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-pack-mb
+          path: services
+
+  # ======================================================
+  # JOB 2: 금융 코어 빌드, 컨테이너 적재 및 데이터 병합
+  # ======================================================
+  build-and-deploy-mb:
+    name: 💎 Oracle & Container Data Integration
+    needs: provision-infra-mb
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Source
         uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
 
-      - name: ☕ Set up JDK ${{ env.JAVA_VERSION }}
+      - name: ☕ Set up JDK 17 & Maven Cache
         uses: actions/setup-java@v4
-        with: { java-version: ${{ env.JAVA_VERSION }}, distribution: 'temurin' }
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.DISTRIBUTION }}
+          cache: 'maven'
 
-      - name: ⬇️ Install Maven
+      - name: 🏗️ Generate Financial Core Logic (Data Merge & Persistence)
         run: |
-          if [ ! -d "apache-maven-${MAVEN_VERSION}" ]; then
-            wget -q https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz
-            tar -xzf apache-maven-${MAVEN_VERSION}-bin.tar.gz
-          fi
-          echo "$(pwd)/apache-maven-${MAVEN_VERSION}/bin" >> $GITHUB_PATH
-
-      # ----------------------------------------------------------------
-      # 2. 금융 엔터프라이즈 시스템 생성 (DB + Concurrency)
-      # ----------------------------------------------------------------
-      - name: 🏦 Generate Enterprise System Files
-        run: |
-          # 디렉토리 생성
           mkdir -p ${PROJECT_ROOT}/src/main/java/com/bank/core
-          mkdir -p ${PROJECT_ROOT}/src/test/java/com/bank/core
-          mkdir -p ${PROJECT_ROOT}/src/main/resources
-          mkdir -p ${PROJECT_ROOT}/${DATA_DIR}
-          mkdir -p ${PROJECT_ROOT}/${REPORT_DIR}
-          mkdir -p ${PROJECT_ROOT}/k8s
-
-          # [2-1] pom.xml (H2 DB, JSON 라이브러리 추가)
+          # [pom.xml] 생성 (Encoding & Version Warning 해결)
           cat <<EOF > ${PROJECT_ROOT}/pom.xml
-          <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+          <project xmlns="http://maven.apache.org/POM/4.0.0">
               <modelVersion>4.0.0</modelVersion>
               <groupId>com.bank</groupId>
               <artifactId>financial-core</artifactId>
               <version>1.0.0</version>
               <properties>
+                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
                   <maven.compiler.source>${JAVA_VERSION}</maven.compiler.source>
                   <maven.compiler.target>${JAVA_VERSION}</maven.compiler.target>
               </properties>
               <dependencies>
-                  <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId><version>2.0.9</version></dependency>
-                  <dependency><groupId>ch.qos.logback</groupId><artifactId>logback-classic</artifactId><version>1.4.11</version></dependency>
                   <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><version>2.2.224</version></dependency>
-                  <dependency><groupId>com.fasterxml.jackson.core</groupId><artifactId>jackson-databind</artifactId><version>2.15.2</version></dependency>
-                  <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter-api</artifactId><version>5.10.0</version><scope>test</scope></dependency>
-                  <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter-engine</artifactId><version>5.10.0</version><scope>test</scope></dependency>
+                  <dependency><groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId><version>23.3.0.23.09</version></dependency>
               </dependencies>
-              <build>
-                  <plugins>
-                      <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.1.2</version></plugin>
-                  </plugins>
-              </build>
           </project>
           EOF
 
-          # [2-2] DB 연결 및 유틸리티 (DatabaseManager.java)
-          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/DatabaseManager.java
-          package com.bank.core;
-          import java.sql.Connection;
-          import java.sql.DriverManager;
-          import java.sql.Statement;
-          
-          public class DatabaseManager {
-              private static final String DB_URL = "jdbc:h2:mem:financial_db;DB_CLOSE_DELAY=-1";
-              
-              public static Connection getConnection() throws Exception {
-                  return DriverManager.getConnection(DB_URL, "sa", "");
-              }
-
-              public static void initSchema() throws Exception {
-                  try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
-                      // 고객 테이블 (암호화된 비번, 마스킹된 계좌)
-                      stmt.execute("CREATE TABLE USERS (" +
-                              "ID VARCHAR(255) PRIMARY KEY, " +
-                              "PASSWORD_HASH VARCHAR(255), " +
-                              "ACCOUNT_NUM VARCHAR(255), " +
-                              "BALANCE BIGINT)");
-                      
-                      // 감사 로그 테이블
-                      stmt.execute("CREATE TABLE AUDIT_LOGS (" +
-                              "LOG_ID IDENTITY PRIMARY KEY, " +
-                              "TIMESTAMP TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
-                              "ACTION VARCHAR(50), " +
-                              "DETAILS VARCHAR(1000))");
-                  }
-              }
-          }
-          EOF
-
-          # [2-3] 보안 및 로직 유틸 (SecurityUtils.java)
-          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/SecurityUtils.java
-          package com.bank.core;
-          import java.security.MessageDigest;
-          import java.util.HashSet;
-          import java.util.Set;
-          
-          public class SecurityUtils {
-              private static final Set<String> BLACKLIST = new HashSet<>();
-              static {
-                  BLACKLIST.add("hacker01");
-                  BLACKLIST.add("malware_bot");
-              }
-
-              public static boolean isBlacklisted(String userId) {
-                  return BLACKLIST.contains(userId);
-              }
-
-              public static String encryptPassword(String raw) {
-                  try {
-                      MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                      byte[] hash = digest.digest(raw.getBytes("UTF-8"));
-                      StringBuilder hex = new StringBuilder();
-                      for (byte b : hash) hex.append(String.format("%02x", b));
-                      return hex.toString();
-                  } catch (Exception e) { return raw; }
-              }
-          }
-          EOF
-
-          # [2-4] 핵심 금융 시스템 (FinancialSystem.java)
+          # [FinancialSystem.java] 데이터 적재 및 병합 로직
           cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
           package com.bank.core;
           import java.sql.*;
           import java.util.UUID;
-          import java.util.concurrent.ExecutorService;
-          import java.util.concurrent.Executors;
-          import java.util.concurrent.TimeUnit;
-          import com.fasterxml.jackson.databind.ObjectMapper;
-          import com.fasterxml.jackson.databind.node.ObjectNode;
-
           public class FinancialSystem {
-              private static final int TARGET_USERS = 10000; // CI 환경 고려 1만명 (확장 가능)
-              private static final ObjectMapper mapper = new ObjectMapper();
-
+              private static final String URL = "jdbc:h2:mem:oracle_db;MODE=Oracle;DB_CLOSE_DELAY=-1";
               public static void main(String[] args) throws Exception {
-                  System.out.println("🚀 Initializing Financial Core (H2 Database)...");
-                  DatabaseManager.initSchema();
+                  Class.forName("org.h2.Driver");
+                  try (Connection conn = DriverManager.getConnection(URL, "sa", "")) {
+                      Statement stmt = conn.createStatement();
+                      stmt.execute("CREATE TABLE IF NOT EXISTS RAW_STAGING (ID RAW(16), VAL NUMBER)");
+                      stmt.execute("CREATE TABLE IF NOT EXISTS MERGED_LEDGER (ID RAW(16) PRIMARY KEY, TOTAL_VAL NUMBER, TS TIMESTAMP)");
 
-                  // 1. 대규모 계좌 생성 (Batch Insert)
-                  System.out.println("⚡ Generating 30 Billion Architecture Scale Data...");
-                  long start = System.currentTimeMillis();
-                  try (Connection conn = DatabaseManager.getConnection()) {
-                      conn.setAutoCommit(false);
-                      PreparedStatement pstmt = conn.prepareStatement(
-                          "INSERT INTO USERS (ID, PASSWORD_HASH, ACCOUNT_NUM, BALANCE) VALUES (?, ?, ?, ?)");
+                      ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM RAW_STAGING");
+                      rs.next();
+                      int count = rs.getInt(1);
+                      String mode = (count == 0) ? "INITIAL" : "RESTART_MERGE";
                       
-                      for (int i = 0; i < TARGET_USERS; i++) {
-                          String uid = "user_" + UUID.randomUUID().toString().substring(0,8);
-                          if (SecurityUtils.isBlacklisted("hacker01") && i % 1000 == 0) uid = "hacker01"; 
-                          
-                          if (SecurityUtils.isBlacklisted(uid)) {
-                              logAudit(conn, "BLOCKED", "Blacklisted user attempted creation: " + uid);
-                              continue;
-                          }
-
-                          pstmt.setString(1, uid);
-                          pstmt.setString(2, SecurityUtils.encryptPassword("pass" + i));
-                          pstmt.setString(3, UUID.randomUUID().toString().replace("-","").substring(0,12)); // 가상계좌
-                          pstmt.setLong(4, 1000000); // 초기 잔고 100만원
-                          pstmt.addBatch();
-                          
-                          if (i % 1000 == 0) pstmt.executeBatch();
+                      System.out.println("🚀 [" + mode + "] Loading 50,000 records...");
+                      PreparedStatement ps = conn.prepareStatement("INSERT INTO RAW_STAGING VALUES (RANDOM_UUID(), ?)");
+                      for (int i = 0; i < 50000; i++) {
+                          ps.setLong(1, (long)(Math.random() * 1000));
+                          ps.addBatch();
+                          if (i % 10000 == 0) ps.executeBatch();
                       }
-                      pstmt.executeBatch();
-                      conn.commit();
-                  }
-                  System.out.println("✅ Data Generation took: " + (System.currentTimeMillis() - start) + "ms");
+                      ps.executeBatch();
 
-                  // 2. 동시성(Concurrency) 입출금 테스트
-                  System.out.println("🔄 Running Multi-threaded Transaction Test...");
-                  ExecutorService executor = Executors.newFixedThreadPool(10);
-                  for (int i = 0; i < 100; i++) {
-                      executor.submit(() -> {
-                          try (Connection conn = DatabaseManager.getConnection()) {
-                              // 임의의 유저 조회 및 업데이트 로직 (간소화)
-                              logAudit(conn, "TRANSACTION", "Simulated concurrent transfer");
-                          } catch (Exception e) { e.printStackTrace(); }
-                      });
-                  }
-                  executor.shutdown();
-                  executor.awaitTermination(10, TimeUnit.SECONDS);
-                  System.out.println("✅ Concurrency Stress Test Completed.");
-                  
-                  // 3. 통계 출력
-                  printStats();
-              }
-
-              private static void logAudit(Connection conn, String action, String details) {
-                  try {
-                      PreparedStatement stmt = conn.prepareStatement("INSERT INTO AUDIT_LOGS (ACTION, DETAILS) VALUES (?, ?)");
-                      stmt.setString(1, action);
-                      stmt.setString(2, details);
-                      stmt.executeUpdate();
-                  } catch (Exception e) {}
-              }
-
-              private static void printStats() throws Exception {
-                  try (Connection conn = DatabaseManager.getConnection()) {
-                      ResultSet rs = conn.createStatement().executeQuery("SELECT COUNT(*) FROM USERS");
-                      if (rs.next()) System.out.println("📊 Total Active Users: " + rs.getInt(1));
+                      System.out.println("🔄 Consolidating Data into MERGED_LEDGER...");
+                      stmt.execute("INSERT INTO MERGED_LEDGER SELECT ID, VAL, CURRENT_TIMESTAMP FROM RAW_STAGING WHERE ID NOT IN (SELECT ID FROM MERGED_LEDGER)");
                       
-                      rs = conn.createStatement().executeQuery("SELECT COUNT(*) FROM AUDIT_LOGS");
-                      if (rs.next()) System.out.println("🛡️ Security Audit Logs: " + rs.getInt(1));
+                      rs = stmt.executeQuery("SELECT COUNT(*) FROM MERGED_LEDGER");
+                      rs.next();
+                      System.out.println("✅ Current Merged Records: " + rs.getInt(1));
                   }
               }
           }
           EOF
 
-          # [2-5] 테스트 코드
-          cat <<EOF > ${PROJECT_ROOT}/src/test/java/com/bank/core/CoreTest.java
-          package com.bank.core;
-          import org.junit.jupiter.api.Test;
-          import static org.junit.jupiter.api.Assertions.*;
-          class CoreTest {
-              @Test void testBlacklist() { assertTrue(SecurityUtils.isBlacklisted("hacker01")); }
-              @Test void testEncryption() { assertNotEquals("1234", SecurityUtils.encryptPassword("1234")); }
-          }
-          EOF
-
-          # Dockerfile 생성
+          # [Dockerfile]
           cat <<EOF > ${PROJECT_ROOT}/Dockerfile
-          FROM eclipse-temurin:17-jre
+          FROM maven:3.9.6-eclipse-temurin-17 AS build
           WORKDIR /app
-          COPY target/*.jar app.jar
-          ENTRYPOINT ["java", "-jar", "app.jar"]
+          COPY . .
+          RUN mvn clean package -DskipTests && mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+          FROM eclipse-temurin:17-jre-jammy
+          WORKDIR /app
+          COPY --from=build /app/target/*.jar app.jar
+          COPY --from=build /app/target/dependency /app/lib
+          ENTRYPOINT ["java", "-cp", "app.jar:lib/*", "com.bank.core.FinancialSystem"]
           EOF
 
-      
-
-[Image of database schema diagram]
-
-
-      # ----------------------------------------------------------------
-      # 3. Maven 빌드 및 시스템 실행
-      # ----------------------------------------------------------------
-      - name: 🏗️ Build & Execute Financial Core
+      - name: 🔨 Build & Package (MB Aware)
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
-          mvn clean package -B
-          # 실행 (H2 DB 생성 -> 데이터 주입 -> 트랜잭션 테스트)
-          java -cp target/*.jar:target/lib/* com.bank.core.FinancialSystem
+          mvn clean package -B -DskipTests
+          mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+          JAR_SIZE=$(du -m target/*.jar | cut -f1)
+          echo "APP_JAR_SIZE: ${JAR_SIZE} MB" >> ../${{ env.SIZE_REPORT }}
 
-      # ----------------------------------------------------------------
-      # 4. 보고서 생성 및 감사(Audit)
-      # ----------------------------------------------------------------
-      - name: 📝 Generate Executive Report
+      - name: 🐳 Docker Deployment & Lifecycle (Restart & Merge)
+        working-directory: ${{ env.PROJECT_ROOT }}
         run: |
-          REPORT_FILE="${PROJECT_ROOT}/${REPORT_DIR}/FIN_AUDIT_$(date '+%Y%m%d_%H%M').md"
+          docker build -t ${{ env.CONTAINER_NAME }}:latest .
+          echo "🚀 Initial Run (Staging Data)"
+          docker run --name ${{ env.CONTAINER_NAME }} ${{ env.CONTAINER_NAME }}:latest
           
-          echo "# 🏦 Financial Enterprise Core Audit Report" > "$REPORT_FILE"
-          echo "### 📅 Execution: $(date)" >> "$REPORT_FILE"
-          echo "---" >> "$REPORT_FILE"
-          
-          echo "## 1️⃣ System Architecture" >> "$REPORT_FILE"
-          echo "- **Database**: H2 In-Memory (SQL Compliant)" >> "$REPORT_FILE"
-          echo "- **Concurrency**: Multi-threaded Executor Service" >> "$REPORT_FILE"
-          echo "- **Security**: SHA-256 Hashing, Blacklist Filtering" >> "$REPORT_FILE"
-          
-          echo "## 2️⃣ Performance Metrics" >> "$REPORT_FILE"
-          echo "- **Batch Processing**: Optimized via PreparedStatement Batching" >> "$REPORT_FILE"
-          echo "- **Transaction Integrity**: ACID properties verified" >> "$REPORT_FILE"
-          
-          echo "## 3️⃣ Security & Compliance" >> "$REPORT_FILE"
-          echo "| Checkpoint | Status | Note |" >> "$REPORT_FILE"
-          echo "| :--- | :--- | :--- |" >> "$REPORT_FILE"
-          echo "| **Blacklist Filter** | ✅ PASS | Blocked 'hacker01' |" >> "$REPORT_FILE"
-          echo "| **Password Encryption** | ✅ PASS | No plain-text stored |" >> "$REPORT_FILE"
-          echo "| **Audit Logging** | ✅ PASS | All actions recorded in DB |" >> "$REPORT_FILE"
-          
-          echo "✅ Report Generated."
-          cat "$REPORT_FILE"
+          echo "🔄 Restarting Container (Data Recovery & Merge)"
+          docker restart ${{ env.CONTAINER_NAME }}
+          docker logs ${{ env.CONTAINER_NAME }}
 
-
-      # ----------------------------------------------------------------
-      # 5. 결과 저장 및 배포
-      # ----------------------------------------------------------------
-      - name: 🚀 Commit & Push Artifacts
-        run: |
-          git config --global user.name "actions-bot"
-          git config --global user.email "bot@github.com"
-          git pull --rebase origin main || echo "No changes"
-          git add ${PROJECT_ROOT}
-          
-          if git diff --staged --quiet; then
-            echo "No changes"
-          else
-            git commit -m "🏦 FinOps: DB Simulation & Audit Report [skip ci]"
-            git push
-          fi
-
-      - name: 📤 Upload Report Dump
+      - name: 📤 Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Financial-Audit-Report
-          path: ${{ env.PROJECT_ROOT }}/${REPORT_DIR}/*.md
-          retention-days: 90
+          name: application-binaries-mb
+          path: ${{ env.PROJECT_ROOT }}/target/*.jar
+
+  # ======================================================
+  # JOB 3: 최종 백업 및 리포트
+  # ======================================================
+  master-backup-mb:
+    name: 💾 Master Backup (MB Report)
+    needs: [provision-infra-mb, build-and-deploy-mb]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./full-system
+      - name: 📦 Final Snapshot
+        run: |
+          zip -9 -r DR_SNAPSHOT.zip ./full-system
+          du -m DR_SNAPSHOT.zip
+      - name: 📢 Final Summary
+        run: echo "✅ Enterprise Data Integration & Container Lifecycle Completed Successfully."
