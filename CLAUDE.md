@@ -1,146 +1,93 @@
-# CLAUDE.md
+# CLAUDE.md - Project Instructions
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Project Overview
+MCP(Model Context Protocol) 서버 모음 프로젝트. Claude Code에서 사용하는 커스텀 도구들을 개발/관리한다.
 
-## Repository Overview
+- **Repository**: https://github.com/koreatest12/koreakimtest
+- **Branch**: main
+- **Platform**: Windows 11, Node.js (ESM)
 
-This is a multi-project monorepo focused on **Anthropic API cost tracking** and **Model Context Protocol (MCP) server development**. The repository contains TypeScript/Node.js and Python implementations for cost estimation, usage reporting, and utility tools integrated with Claude.
+## Project Structure
 
-## Key Projects
-
-### 1. Anthropic Cost Tracker (`anthropic-cost-tracker/`)
-Dual-language implementation for tracking and estimating Anthropic API costs.
-
-**Node.js Implementation** (`anthropic-cost-tracker/nodejs/`):
-- **Run cost estimation**: `npm run estimate` (executes immediate cost calculator)
-- **Generate admin report**: `npm run admin-report` (fetches usage from Admin API)
-- **Development mode**: `npm run dev` (watch mode for cost estimator)
-- **Dependencies**: `@anthropic-ai/sdk`, `tsx`, TypeScript 5.3+
-- **Environment**: Requires `ANTHROPIC_API_KEY` and `ANTHROPIC_ADMIN_API_KEY` in `.env`
-
-**Python Implementation** (`anthropic-cost-tracker/python/`):
-- **Run**: `python immediate_cost_estimate.py`
-- **Dependencies**: Install via `pip install -r requirements.txt`
-- **Pricing**: Model prices defined in `PRICES` dictionary (update as needed from https://www.anthropic.com/pricing)
-
-**Cost Calculation Architecture**:
-- Token-based pricing with separate rates for input/output tokens
-- Supports cache creation/read tokens (prompt caching)
-- USD-to-KRW conversion (default exchange rate: 1350)
-- Admin API integration for historical usage reports with grouping by model and time bucketing
-
-### 2. MCP Servers
-Multiple Model Context Protocol servers providing tools for Claude integration.
-
-**MCP Python Utilities** (`mcp-python-server/`):
-- **Primary server**: `server_mcp.py` (FastMCP-based with comprehensive utilities)
-- **Standard server**: `server.py` (basic MCP SDK implementation)
-- **Available tools**:
-  - File operations: `calculate_file_hash`, `get_directory_size`, `count_words_in_file`
-  - System info: `get_system_info`, `get_current_time`
-  - JSON operations: `format_json`, `validate_json`
-  - Math: `calculate` (safe expression evaluator)
-- **Setup**: Activate `.venv` and run `python server_mcp.py`
-- **Configuration**: Registered in `.mcp.json` as `python-utils`
-
-**MCP Hello Servers** (Example implementations):
-- **JavaScript** (`mcp-hello-js/`): Basic MCP server with `greet` and `add` tools. Run: `node index.js`
-- **Python** (`mcp-hello-py/`): Example server with `ping` tool. Run: `python server.py` (uses `.venv`)
-
-**MCP Filesystem** (`mcp-fs/`):
-- Uses official `@modelcontextprotocol/server-filesystem` package
-- Provides filesystem access to Claude via MCP protocol
-- Configured in `.mcp.json` with home directory access
-
-### 3. Shared Utilities (`src/utils/`)
-
-**fetchAnthropicUsage.ts** - Admin API Integration:
-- Function: `fetchAnthropicUsage(params, apiKey?)` - Fetches usage reports from Anthropic Admin API
-- Function: `formatUsageReport(report)` - Formats usage data into human-readable tables
-- Function: `runUsageReport(startDate, endDate)` - CLI helper that fetches, displays, and saves usage reports
-- **Date validation**: Ensures valid ISO date ranges
-- **Query parameters**: Supports `groupBy` (e.g., by model), `bucketWidth` (default: '1d')
-- **Output**: Console report + JSON file (`usage-report-{start}-to-{end}.json`)
-
-**usageReportCli.ts**:
-- Command-line interface for usage reporting
-- Imports and uses functions from `fetchAnthropicUsage.ts`
-
-## MCP Configuration
-
-All MCP servers are configured in `.mcp.json` at the repository root:
-
-```json
-{
-  "mcpServers": {
-    "hello-mcp-js": { "command": "node", "args": ["C:\\Users\\kwonn\\mcp-hello-js\\index.js"] },
-    "hello-mcp-py": { "command": "C:\\Users\\kwonn\\mcp-hello-py\\.venv\\Scripts\\python.exe", "args": ["..."] },
-    "filesystem": { "command": "cmd", "args": ["/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\kwonn"] },
-    "python-utils": { "command": "C:\\Users\\kwonn\\mcp-python-server\\.venv\\Scripts\\python.exe", "args": ["..."] }
-  }
-}
+```
+C:\Users\kwonn\
+├── money-mcp/          # 금융 계산 MCP 서버
+│   └── index.js        # 급여, 대출, 투자, 저축, 환율, 부가세, 퇴직금, 전월세 등
+├── crypto-mcp/         # 암호화 MCP 서버
+│   └── index.js        # AES-256-GCM 암복호화, 해시, Base64, 비밀번호 생성
+├── chrome-mcp/         # Chrome DevTools MCP 서버
+│   └── index.js        # 스크린샷, DOM 조회, 네트워크 모니터링, 콘솔 로그
+└── .mcp.json           # MCP 서버 등록 설정
 ```
 
-**Important**: Python MCP servers require `PYTHONUNBUFFERED=1` environment variable for proper stdio communication.
+## Tech Stack
 
-## Development Workflow
+- **Runtime**: Node.js (ESM modules, `"type": "module"`)
+- **MCP SDK**: `@modelcontextprotocol/sdk` ^1.0.0
+- **Transport**: StdioServerTransport
+- **Additional**: `xlsx` (money-mcp), `chrome-remote-interface` (chrome-mcp)
 
-### TypeScript Projects
-1. **Install dependencies**: `npm install` (in respective project directory)
-2. **Run TypeScript directly**: Use `tsx` for execution without compilation
-3. **Development**: TypeScript 5.3+ with ES2022 target, ESM modules (`"type": "module"`)
+## Coding Conventions
 
-### Python Projects
-1. **Create/activate virtual environment**:
-   - `python -m venv .venv`
-   - Activate: `.venv\Scripts\activate` (Windows) or `source .venv/bin/activate` (Unix)
-2. **Install dependencies**: `pip install -r requirements.txt`
-3. **Run servers**: `python server.py` or `python server_mcp.py`
+- 언어: JavaScript (ESM, `import`/`export` 사용)
+- 모든 MCP 서버는 단일 `index.js` 파일로 구성
+- 도구 등록: `ListToolsRequestSchema` / `CallToolRequestSchema` 핸들러 패턴 사용
+- 한국어 description 사용 (한국 사용자 대상 도구)
+- 금액 단위: 원(KRW) 기본
+- 2026년 기준 세율/보험료율 적용
 
-### Testing MCP Servers
-1. After modifying `.mcp.json`, restart Claude desktop client
-2. Test tools are available in Claude's tool palette
-3. Check server logs for debugging (MCP servers output to stderr)
+## MCP Server Details
 
-## Architecture Patterns
+### money-mcp
+금융/돈 관련 계산 도구 모음:
+- `money_calculator` - 사칙연산, 세금, 할인, 환율
+- `salary_calculator` - 급여 실수령액 (4대보험 + 소득세)
+- `loan_calculator` - 대출 상환 계산
+- `savings_calculator` - 적금/복리 계산
+- `installment_calculator` - 할부 계산
+- `dutch_pay` - 더치페이 (N빵)
+- `vat_calculator` - 부가세 계산
+- `minimum_wage` - 최저임금 계산
+- `retirement_pay` - 퇴직금 계산
+- `rent_converter` - 전월세 전환
+- `investment_return` - 투자 수익률 계산
+- `currency_formatter` - 통화 포맷
+- `excel_savings_analyzer` - 엑셀 기반 저축 분석
+- `excel_savings_plan` - 엑셀 저축 플랜 생성
+- `security_news` - KISA 보호나라 보안공지
+- `kisec_exam_schedule` - 정보보안기사 시험일정
 
-### Cost Tracking Pattern
-- **Real-time estimation**: Calculate cost immediately after API calls using `usage` object
-- **Historical reporting**: Fetch aggregated data from Admin API with time bucketing
-- **Pricing updates**: Model prices in `PRICES` constant need manual updates when Anthropic changes pricing
-- **Token types**: Input, output, cache creation (write), cache read tokens all priced differently
+### crypto-mcp
+암호화/보안 도구 모음:
+- `encrypt_text` / `decrypt_text` - 텍스트 AES-256-GCM 암복호화
+- `encrypt_file` / `decrypt_file` - 파일 암복호화
+- `hash_text` / `hash_file` - 해시 생성 (SHA-256, SHA-512, MD5)
+- `generate_password` - 랜덤 비밀번호 생성
+- `base64_encode` / `base64_decode` - Base64 인코딩/디코딩
 
-### MCP Integration Pattern
-- **Stdio communication**: All MCP servers use stdin/stdout for Claude communication
-- **Tool registration**: Tools defined in `@server.list_tools()` decorator
-- **Tool execution**: Handled by `@server.call_tool()` decorator
-- **Error handling**: Return `CallToolResult` with `isError=True` for failures
-- **JSON responses**: All tool results formatted as JSON for structured data exchange
+### chrome-mcp
+Chrome 브라우저 제어 도구 (DevTools Protocol):
+- `chrome_connect` - DevTools 연결
+- `chrome_navigate` - URL 이동
+- `chrome_screenshot` - 스크린샷 캡처
+- `chrome_evaluate` - JavaScript 실행
+- `chrome_dom_query` - DOM 요소 검색
+- `chrome_console_logs` - 콘솔 로그 수집
+- `chrome_network_monitor` - 네트워크 모니터링
+- `chrome_performance` - 성능 메트릭
+- `chrome_cookies` - 쿠키 관리
+- `chrome_page_info` - 페이지 정보
 
-### Utility Function Organization
-- **Shared utilities**: Place in `src/utils/` with TypeScript for reuse
-- **Export pattern**: Named exports from utility modules, re-exported through `index.ts`
-- **API integration**: Separate concerns - fetch logic in one module, CLI in another
+## Development Guidelines
 
-## Environment Variables
-
-Required environment variables (create `.env` files as needed):
-
-```bash
-# Anthropic API keys
-ANTHROPIC_API_KEY=sk-ant-xxx           # For general API usage
-ANTHROPIC_ADMIN_API_KEY=sk-ant-xxx     # For Admin API (usage reports)
-
-# Python MCP servers
-PYTHONUNBUFFERED=1                     # Required for stdio communication
-```
+1. 새 도구 추가 시 해당 MCP 서버의 `index.js`에 직접 추가
+2. `ListToolsRequestSchema` 핸들러에 도구 스키마 등록
+3. `CallToolRequestSchema` 핸들러에 실행 로직 추가
+4. 테스트: `node index.js`로 서버 실행 후 Claude Code에서 도구 호출로 검증
+5. 커밋 메시지: 영문, 변경 내용을 명확히 기술
 
 ## Important Notes
 
-1. **No root package.json**: Each sub-project manages dependencies independently
-2. **Windows paths**: All absolute paths use Windows format (`C:\Users\kwonn\...`)
-3. **Test infrastructure**: Test directories exist (`tests/unit/`, `tests/integration/`) but are currently empty - tests should be added as projects mature
-4. **Virtual environments**: Python projects use `.venv` for isolation - always activate before running
-5. **TypeScript execution**: Use `tsx` instead of `tsc` + `node` for faster development iteration
-6. **MCP debugging**: Set `PYTHONUNBUFFERED=1` and check stderr output for Python MCP servers
-7. **Cost accuracy**: Model pricing in code may lag behind official pricing - verify at https://www.anthropic.com/pricing before financial decisions
+- Chrome MCP 사용 시 Chrome을 `--remote-debugging-port=9222` 옵션으로 실행 필요
+- money-mcp의 세율/보험료율은 연도별 업데이트 필요 (현재 2026년 기준)
+- 파일 경로는 Windows 형식 (`C:\Users\kwonn\...`) 사용
