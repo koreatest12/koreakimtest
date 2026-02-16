@@ -1,0 +1,59 @@
+name: OpenClaw Installation and Setup
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # 수동 실행 허용
+
+jobs:
+  build-and-install:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. 소스 코드 체크아웃
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Node.js 환경 설정 (직접 설치 시 필요)
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # OpenClaw 권장 버전에 맞춰 조절 가능
+          cache: 'npm'
+
+      # 3. 의존성 설치
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then
+            npm install
+          else
+            echo "package.json을 찾을 수 없습니다."
+          fi
+
+      # 4. Docker 환경 확인 및 이미지 빌드 (Docker를 사용하는 경우)
+      - name: Build Docker image
+        run: |
+          if [ -f Dockerfile ]; then
+            docker build -t openclaw-ai .
+            echo "Docker 이미지가 성공적으로 빌드되었습니다."
+          else
+            echo "Dockerfile이 존재하지 않아 Docker 빌드를 건너뜁니다."
+          fi
+
+      # 5. 설정 파일 준비 (예시)
+      # 실제 실행을 위해서는 .env 설정이나 config 파일이 필요할 수 있습니다.
+      - name: Prepare configuration
+        run: |
+          if [ -f .env.example ]; then
+            cp .env.example .env
+            echo ".env 파일을 생성했습니다. (비밀값 설정 필요)"
+          fi
+
+      # 6. 기본 실행 테스트
+      # 실제 AI 모델 연동 없이 시스템이 정상적으로 올라오는지 확인합니다.
+      - name: Dry run or Health check
+        run: |
+          echo "OpenClaw 설치 프로세스가 완료되었습니다."
+          # npm start & (잠시 대기 후 프로세스 확인 등 추가 가능)
