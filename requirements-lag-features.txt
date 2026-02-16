@@ -1,3 +1,0 @@
-# Dependencies for lag feature engineering
-pandas>=2.0.0
-pyarrow>=12.0.0

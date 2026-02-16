@@ -1,5 +1,0 @@
-
-> koreakimtest@0.1.0 test
-> node -e "console.log('ok')"
-
-ok
