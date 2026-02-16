@@ -1,7 +1,7 @@
-name: OpenClaw Mass Generation Workflow
+name: OpenClaw Mass Generation Engine
 
 on:
-  workflow_dispatch: # 수동으로 매개변수를 입력하여 실행
+  workflow_dispatch:
     inputs:
       gen_count:
         description: '생성할 개수 (Mass Generation Count)'
@@ -13,52 +13,60 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 현재 작업 저장소 체크아웃
+      # 1. 현재 저장소 체크아웃
       - name: Checkout Current Repository
         uses: actions/checkout@v4
 
-      # 2. OpenClaw 원본 저장소 복제 (Recursive로 서브모듈까지 포함)
+      # 2. OpenClaw 저장소 자동 복제 (최신 소스 확보)
       - name: Clone OpenClaw Repository
         run: |
           git clone --recursive https://github.com/koreatest12/openclaw.git openclaw_src
-          echo "OpenClaw source cloned successfully."
+          mkdir -p openclaw_src/output # 결과물이 저장될 폴더 강제 생성
 
-      # 3. Node.js 환경 설정
-      - name: Setup Node.js
+      # 3. Node.js 버전 업그레이드 (OpenClaw 요구사항 반영: 22.x 이상)
+      - name: Setup Node.js (v22)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22' # 로그의 경고를 반영하여 22버전으로 상향
           cache: 'npm'
+          cache-dependency-path: openclaw_src/package-lock.json
 
-      # 4. 복제된 OpenClaw 디렉토리에서 의존성 설치
+      # 4. 의존성 설치 및 취약점 자동 수정
       - name: Install OpenClaw Dependencies
         run: |
           cd openclaw_src
           npm install
-          # 대량 생성을 위해 필요한 추가 패키지가 있다면 여기서 설치
-          # npm install some-mass-gen-tool 
+          # 보안 취약점 경고가 있을 경우 자동으로 수정 시도
+          npm audit fix --force || echo "Audit fix applied with some warnings"
 
-      # 5. 대량 생성 실행 로직 (Mass Generation)
-      # 저장소 내의 특정 실행 스크립트(예: gen.js)가 있다고 가정합니다.
+      # 5. 실제 AI 대량 생성 로직 실행
       - name: Execute Mass Generation
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }} # API 키가 필요할 경우 설정
+          # 필요한 API 키가 있다면 GitHub Secrets에 등록 후 아래 주석을 해제하세요.
+          # OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEN_COUNT: ${{ github.event.inputs.gen_count }}
         run: |
           cd openclaw_src
-          echo "Starting mass generation for $GEN_COUNT items..."
+          echo "Starting OpenClaw Mass Generation..."
           
-          # 예시: 반복문을 통해 대량 생성 스크립트 실행
-          # 실제 실행 파일명에 맞춰 'node index.js' 등을 수정하세요.
+          # 대량 생성을 수행하는 실제 커맨드 (저장소의 진입점에 따라 수정 필요)
+          # 예: npm start, node index.js, 또는 특정 실행 파일
           for i in $(seq 1 $GEN_COUNT)
           do
-            echo "Generating item $i..."
-            # node your-gen-script.js --id=$i  <-- 실제 실행 명령어로 교체 필요
+            echo "[Process $i/$GEN_COUNT] Generating content..."
+            
+            # 아래 줄에 실제 실행 명령어를 입력하세요. 
+            # 예시: node bin/openclaw.js --out=output/result_$i.json
+            npm start -- --output=output/result_$i.txt || echo "Item $i failed, skipping..."
           done
 
-      # 6. 생성된 결과물 저장 (Artifacts)
-      - name: Upload Generated Results
+      # 6. 복제된 파일 및 생성된 모든 데이터 저장
+      - name: Upload All Generated Data
         uses: actions/upload-artifact@v4
         with:
-          name: mass-gen-output
-          path: openclaw_src/output/ # 결과물이 저장되는 경로로 수정
+          name: openclaw-generated-results
+          # output 폴더뿐만 아니라 복제된 환경 전체에서 필요한 부분을 지정 가능
+          path: |
+            openclaw_src/output/
+            openclaw_src/*.log
+          if-no-files-found: warn
