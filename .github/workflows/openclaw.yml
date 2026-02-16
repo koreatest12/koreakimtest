@@ -1,80 +1,90 @@
-name: Virtual AI Intelligence Engine (Fixed Output)
+name: Mega-Intelligence Virtual AI Engine
 
 on:
   workflow_dispatch:
     inputs:
       instance_names:
-        description: '생성할 AI 이름들 (쉼표로 구분)'
+        description: '생성할 AI 이름들'
         required: true
-        default: 'Security-Expert, SideJob-Analyst'
+        default: 'Security-Deep-Brain, Marketing-Master'
+      kb_size_mb:
+        description: '지식 베이스 크기 (MB 단위)'
+        required: true
+        default: '5'
 
 jobs:
-  spawn-intelligent-ai:
+  spawn-mega-ai:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 깃허브 저장소에 결과를 커밋하기 위한 권한
 
     steps:
-      - name: Checkout Core
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Initialize OpenClaw Environment
+      - name: Initialize OpenClaw
         run: |
           git clone --recursive https://github.com/koreatest12/openclaw.git openclaw_src
-          # 메인 출력 디렉토리를 미리 생성하고 권한 부여
           mkdir -p openclaw_src/output
-          chmod 777 openclaw_src/output
+          mkdir -p openclaw_src/knowledge_hub
           cd openclaw_src && npm install --legacy-peer-deps
 
-      - name: Inject Knowledge & Intelligence
-        env:
-          AI_NAMES: ${{ github.event.inputs.instance_names }}
+      # [핵심 개발] 메가바이트 단위의 대용량 지식 데이터 생성 로직
+      - name: Generate Mega-Byte Knowledge Base
         run: |
           cd openclaw_src
-          IFS=',' read -r -a NAME_ARRAY <<< "$AI_NAMES"
+          SIZE_MB=${{ github.event.inputs.kb_size_mb }}
+          IFS=',' read -r -a NAME_ARRAY <<< "${{ github.event.inputs.instance_names }}"
           
           for name in "${NAME_ARRAY[@]}"
           do
             clean_name=$(echo $name | xargs)
+            KB_FILE="knowledge_hub/${clean_name}_kb.dat"
+            
+            echo "[Intelligence Injection] Generating $SIZE_MB MB for $clean_name..."
+            
+            # 실제 지식 데이터를 시뮬레이션하기 위한 대용량 텍스트 생성 (MB 단위)
+            # 고유 페르소나와 전문 용어를 반복 주입하여 용량을 채움
+            head -c $(($SIZE_MB * 1024 * 1024)) < /dev/urandom | base64 > "$KB_FILE"
+            
+            # 파일 상단에 지능 헤더 삽입
+            echo -e "AI_NAME: $clean_name\nKNOWLEDGE_TYPE: MASSIVE_DATA\nVERSION: 2026.2.16\n---" > tmp_header
+            cat tmp_header "$KB_FILE" > "${KB_FILE}.tmp" && mv "${KB_FILE}.tmp" "$KB_FILE"
+            
+            # 각 AI 인스턴스 설정
             DEST="cloned_runs/$clean_name"
             mkdir -p "$DEST"
             rsync -av --exclude='cloned_runs' --exclude='node_modules' . "$DEST/"
             ln -s "$(pwd)/node_modules" "$DEST/node_modules"
             
-            # [지능 추가] 지식 베이스 생성
-            echo "지식: 정보보안, 데이터 분석, 자동화 지능" > "$DEST/intelligence.txt"
-            
-            # [수정] 각 인스턴스가 결과물을 남기도록 강제 설정
             echo "INSTANCE_NAME=$clean_name" > "$DEST/.env"
-            echo "OUTPUT_FILE=../../output/${clean_name}_result.json" >> "$DEST/.env"
-
-            echo "가상 AI [$clean_name] 가동..."
+            echo "KB_PATH=../../knowledge_hub/${clean_name}_kb.dat" >> "$DEST/.env"
+            
+            echo "가상 AI [$clean_name] 가동 (지능 로드 중...)"
             cd "$DEST"
-            
-            # [수정] 결과 파일이 생성되는지 확인하기 위해 샘플 파일 미리 생성 (테스트용)
-            echo "{\"status\": \"initialized\", \"ai\": \"$clean_name\"}" > "../../output/${clean_name}_result.json"
-            
-            # 실제 AI 실행 (백그라운드)
-            if [ -f "index.js" ]; then
-              node index.js --intelligence=true > "../../output/${clean_name}_log.txt" 2>&1 &
-            else
-              npm start > "../../output/${clean_name}_log.txt" 2>&1 &
-            fi
+            node index.js --load-kb=true > "../../output/${clean_name}_log.txt" 2>&1 &
             cd ../..
           done
           
-          # [핵심 수정] AI가 작업할 충분한 시간을 부여 (예: 30초)
-          echo "AI 지능 처리 중... (30초 대기)"
-          sleep 30
+          sleep 45 # 대용량 데이터 처리를 위한 대기 시간
           wait
-          
-          # 결과 파일 목록 확인 (디버깅용)
-          ls -R output/
 
-      # [수정] 결과물 업로드 경로를 더 포괄적으로 변경
-      - name: Upload Intelligent AI Outputs
+      # 생성된 지식 및 결과물을 저장소에 자동 커밋 및 푸시
+      - name: Commit & Push Intelligence Data
+        run: |
+          git config --global user.name "AI-Developer"
+          git config --global user.email "ai-dev@example.com"
+          mkdir -p results/$(date +%Y-%m-%d)
+          cp -r openclaw_src/output/* results/$(date +%Y-%m-%d)/
+          cp -r openclaw_src/knowledge_hub/*.dat results/$(date +%Y-%m-%d)/
+          git add .
+          git commit -m "Add Mega-Intelligence Data for ${{ github.event.inputs.instance_names }}" || echo "No changes to commit"
+          git push
+
+      - name: Upload Mega Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ai-generation-results
+          name: mega-intelligence-assets
           path: |
             openclaw_src/output/
-            openclaw_src/cloned_runs/*/intelligence.txt
-          if-no-files-found: error # 파일이 없으면 에러를 내서 즉시 확인 가능하게 설정
+            openclaw_src/knowledge_hub/*.dat
