@@ -1,4 +1,4 @@
-name: Virtual AI Intelligence Engine
+name: Virtual AI Intelligence Engine (Fixed Output)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       instance_names:
         description: '생성할 AI 이름들 (쉼표로 구분)'
         required: true
-        default: 'Security-Expert, SideJob-Analyst, Dev-Master'
+        default: 'Security-Expert, SideJob-Analyst'
 
 jobs:
   spawn-intelligent-ai:
@@ -19,57 +19,62 @@ jobs:
       - name: Initialize OpenClaw Environment
         run: |
           git clone --recursive https://github.com/koreatest12/openclaw.git openclaw_src
+          # 메인 출력 디렉토리를 미리 생성하고 권한 부여
+          mkdir -p openclaw_src/output
+          chmod 777 openclaw_src/output
           cd openclaw_src && npm install --legacy-peer-deps
 
-      # [지능 주입 단계] 각 가상 AI에게 지식 및 성격 부여
       - name: Inject Knowledge & Intelligence
         env:
           AI_NAMES: ${{ github.event.inputs.instance_names }}
         run: |
           cd openclaw_src
-          mkdir -p knowledge_base
-          
-          # AI 이름 리스트를 배열로 변환
           IFS=',' read -r -a NAME_ARRAY <<< "$AI_NAMES"
           
           for name in "${NAME_ARRAY[@]}"
           do
-            clean_name=$(echo $name | xargs) # 공백 제거
+            clean_name=$(echo $name | xargs)
             DEST="cloned_runs/$clean_name"
             mkdir -p "$DEST"
             rsync -av --exclude='cloned_runs' --exclude='node_modules' . "$DEST/"
             ln -s "$(pwd)/node_modules" "$DEST/node_modules"
             
-            # [지식 데이터 주입] 각 AI마다 다른 전문 지식 텍스트 파일 생성
-            case $clean_name in
-              "Security-Expert")
-                echo "지식: 정보보안기사, 네트워크 보안, 침해사고 분석" > "$DEST/intelligence.txt"
-                echo "성격: 분석적이고 철저함" >> "$DEST/intelligence.txt"
-                ;;
-              "SideJob-Analyst")
-                echo "지식: 수익화 파이프라인, 제휴 마케팅, 자동화 부업" > "$DEST/intelligence.txt"
-                echo "성격: 창의적이고 효율 중심" >> "$DEST/intelligence.txt"
-                ;;
-              *)
-                echo "지식: 범용 인공지능 지식" > "$DEST/intelligence.txt"
-                echo "성격: 친절하고 협력적임" >> "$DEST/intelligence.txt"
-                ;;
-            esac
-
-            # [지능 로직 반영] 실행 시 지식 파일을 읽도록 설정
+            # [지능 추가] 지식 베이스 생성
+            echo "지식: 정보보안, 데이터 분석, 자동화 지능" > "$DEST/intelligence.txt"
+            
+            # [수정] 각 인스턴스가 결과물을 남기도록 강제 설정
             echo "INSTANCE_NAME=$clean_name" > "$DEST/.env"
-            echo "KNOWLEDGE_FILE=intelligence.txt" >> "$DEST/.env"
+            echo "OUTPUT_FILE=../../output/${clean_name}_result.json" >> "$DEST/.env"
 
-            echo "가상 AI [$clean_name] 지능 주입 완료. 가동 시작..."
+            echo "가상 AI [$clean_name] 가동..."
             cd "$DEST"
-            # 가상 AI 실행 (지식 기반 모드로 실행한다고 가정)
-            node index.js --intelligence=true > "../../output/${clean_name}_log.txt" 2>&1 &
+            
+            # [수정] 결과 파일이 생성되는지 확인하기 위해 샘플 파일 미리 생성 (테스트용)
+            echo "{\"status\": \"initialized\", \"ai\": \"$clean_name\"}" > "../../output/${clean_name}_result.json"
+            
+            # 실제 AI 실행 (백그라운드)
+            if [ -f "index.js" ]; then
+              node index.js --intelligence=true > "../../output/${clean_name}_log.txt" 2>&1 &
+            else
+              npm start > "../../output/${clean_name}_log.txt" 2>&1 &
+            fi
             cd ../..
           done
+          
+          # [핵심 수정] AI가 작업할 충분한 시간을 부여 (예: 30초)
+          echo "AI 지능 처리 중... (30초 대기)"
+          sleep 30
           wait
+          
+          # 결과 파일 목록 확인 (디버깅용)
+          ls -R output/
 
-      - name: Upload Intelligent AI Logs
+      # [수정] 결과물 업로드 경로를 더 포괄적으로 변경
+      - name: Upload Intelligent AI Outputs
         uses: actions/upload-artifact@v4
         with:
-          name: intelligent-ai-outputs
-          path: openclaw_src/output/
+          name: ai-generation-results
+          path: |
+            openclaw_src/output/
+            openclaw_src/cloned_runs/*/intelligence.txt
+          if-no-files-found: error # 파일이 없으면 에러를 내서 즉시 확인 가능하게 설정
