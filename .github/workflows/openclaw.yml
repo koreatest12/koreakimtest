@@ -1,0 +1,112 @@
+name: Mega-Intelligence AI Engine (Safe Cleanup)
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_names:
+        description: '생성할 AI 이름들'
+        required: true
+        default: 'Security-Deep-Brain, Marketing-Master'
+      kb_size_mb:
+        description: '지식 베이스 크기 (MB 단위)'
+        required: true
+        default: '10'
+
+jobs:
+  spawn-mega-ai:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # [해결] Git이 관리하지 않는 독립된 경로에서 작업 시작
+      - name: Clone & Sanitize OpenClaw
+        run: |
+          # 1. 외부 저장소를 별도 위치에 클론
+          git clone --recursive https://github.com/koreatest12/openclaw.git ../openclaw_temp
+          
+          # 2. .git 관련 모든 메타데이터 삭제 (서브모듈 충돌 원인 제거)
+          rm -rf ../openclaw_temp/.git
+          rm -rf ../openclaw_temp/.gitmodules
+          
+          # 3. 깨끗한 소스만 현재 워킹 디렉토리로 이동
+          mv ../openclaw_temp ./openclaw_src
+          
+          mkdir -p openclaw_src/output
+          mkdir -p openclaw_src/knowledge_hub
+          echo "OpenClaw sanitized and integrated as a local directory."
+
+      - name: Setup Node.js (v22)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Core Dependencies
+        run: |
+          cd openclaw_src
+          npm install --legacy-peer-deps
+
+      # [핵심] MB 단위 지식 데이터 생성 및 지능 주입
+      - name: Massive Knowledge Generation
+        env:
+          AI_NAMES: ${{ github.event.inputs.instance_names }}
+          SIZE_MB: ${{ github.event.inputs.kb_size_mb }}
+        run: |
+          cd openclaw_src
+          IFS=',' read -r -a NAME_ARRAY <<< "$AI_NAMES"
+          
+          for name in "${NAME_ARRAY[@]}"
+          do
+            clean_name=$(echo $name | xargs)
+            KB_FILE="knowledge_hub/${clean_name}_kb.dat"
+            
+            echo "[Intelligence] $SIZE_MB MB 데이터 생성 중: $clean_name"
+            # MB 단위 지식 데이터 생성 (지능 베이스)
+            dd if=/dev/urandom bs=1M count=$SIZE_MB | base64 | head -c $(($SIZE_MB * 1024 * 1024)) > "$KB_FILE"
+            
+            # 인스턴스 복제 및 지능 설정
+            DEST="cloned_runs/$clean_name"
+            mkdir -p "$DEST"
+            rsync -av --exclude='cloned_runs' --exclude='node_modules' . "$DEST/"
+            ln -s "$(pwd)/node_modules" "$DEST/node_modules"
+            
+            echo "INSTANCE_NAME=$clean_name" > "$DEST/.env"
+            echo "KB_PATH=../../$KB_FILE" >> "$DEST/.env"
+            
+            echo "AI [$clean_name] 가상 지능 로드 및 가동..."
+            cd "$DEST"
+            node index.js --mode=mega > "../../output/${clean_name}_log.txt" 2>&1 &
+            cd ../..
+          done
+          
+          echo "대량 데이터 처리 대기 (60초)..."
+          sleep 60
+          wait
+
+      # [결과 반영] 생성된 모든 데이터 저장소에 커밋
+      - name: Sync Intelligence to Repo
+        run: |
+          git config --global user.name "AI-Intelligence-Bot"
+          git config --global user.email "bot@ai.dev"
+          
+          # 결과 폴더 구조 생성
+          RESULT_DIR="intelligence_results/$(date +%Y-%m-%d_%H-%M)"
+          mkdir -p "$RESULT_DIR"
+          
+          # 로그 및 MB 단위 데이터 복사
+          cp -r openclaw_src/output/* "$RESULT_DIR/" || true
+          cp -r openclaw_src/knowledge_hub/*.dat "$RESULT_DIR/" || true
+          
+          # [중요] Git 작업 시 서브모듈 에러 방지를 위해 openclaw_src 제외
+          git add "$RESULT_DIR"
+          git commit -m "Inject Mega-Intelligence: $SIZE_MB MB for ${{ github.event.inputs.instance_names }}" || echo "No changes"
+          git push origin main
+
+      - name: Final Artifact Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: mega-ai-intelligence-package
+          path: intelligence_results/

@@ -1,0 +1,8 @@
+version: '3.8'
+services:
+  python-api:
+    image: mcp-python-server:906c9c804e1bdb062bc716b769787810bef9ff4d
+  node-core:
+    image: mcp-node-service:906c9c804e1bdb062bc716b769787810bef9ff4d
+  java-backend:
+    image: mcp-java-server:906c9c804e1bdb062bc716b769787810bef9ff4d
