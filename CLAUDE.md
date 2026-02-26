@@ -78,6 +78,21 @@ Chrome 브라우저 제어 도구 (DevTools Protocol):
 - `chrome_cookies` - 쿠키 관리
 - `chrome_page_info` - 페이지 정보
 
+### claude.ai Google Calendar (원격 MCP)
+Google Calendar 연동 도구 (OAuth 인증 완료):
+- `gcal_list_calendars` - 캘린더 목록 조회
+- `gcal_list_events` - 일정 목록 조회
+- `gcal_get_event` - 특정 일정 상세 조회
+- `gcal_find_my_free_time` - 빈 시간 검색
+- `gcal_find_meeting_times` - 회의 가능 시간 찾기
+- `gcal_create_event` - 일정 생성
+- `gcal_update_event` - 일정 수정
+- `gcal_delete_event` - 일정 삭제
+- `gcal_respond_to_event` - 일정 초대 응답
+
+> 인증 방식: Claude Code OAuth (`/mcp` 명령으로 연결)
+> `.mcp.json` 설정 불필요 (claude.ai 원격 서버)
+
 ## Development Guidelines
 
 1. 새 도구 추가 시 해당 MCP 서버의 `index.js`에 직접 추가
