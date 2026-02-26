@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Provision service containers for Dependabot updates
     timeout-minutes: 60
-    
+        
     steps:
       - name: 🧾 Echo start context
         run: |
@@ -55,7 +55,7 @@ jobs:
           log "  - DRY_RUN     : ${DRY_RUN:-}"
           echo "============================================"
 
-      # [핵심 추가] 체크아웃 이전에 불필요한 패키지를 지우고 디스크 용량을 최대화합니다.
+      # [수정 반영 1] 디스크 용량 증설: 반드시 Checkout 이전에 실행하여 공간 확보
       - name: 🧹 Maximize Build Space (용량 증설)
         uses: easimon/maximize-build-space@master
         with:
@@ -67,7 +67,7 @@ jobs:
           remove-codeql: 'true'
           remove-docker-images: 'true'
 
-      # 용량 증설 이후에 저장소를 체크아웃해야 코드가 날아가지 않습니다.
+      # 용량 증설 완료 후 안전하게 저장소 코드 체크아웃
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -86,7 +86,7 @@ jobs:
           log "Repository files  :"
           ls -al
           echo "============================================"
-          
+                
       - name: 🧱 Build custom Scala runtime base image
         run: |
           set -euo pipefail
@@ -317,6 +317,8 @@ jobs:
             done
           fi
 
+      # [수정 반영 2] YAML Parsing 에러 방지: run 블록을 파이프(|)로 감싸 멀티라인 처리
       - name: ✅ Echo final status
         if: always()
-        run: echo "Workflow finished with status: ${{ job.status }}"
+        run: |
+          echo "Workflow finished with status: ${{ job.status }}"
