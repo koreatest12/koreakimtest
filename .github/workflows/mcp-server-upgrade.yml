@@ -1,156 +1,322 @@
-name: "🚀 Spring Super CI V6: Partitioned Data Loading & Merge"
+name: Dependabot Service Provisioning
 
 on:
-  push:
-    branches: [ "main", "develop" ]
+  pull_request:
+    types: [opened, reopened, synchronize]
   workflow_dispatch:
-
-env:
-  JAVA_VERSION: '17'
-  PROJECT_ROOT: 'financial-core'
-  CONTAINER_NAME: 'fin-core-service'
-  TOTAL_RECORDS: 100000
-  CHUNK_SIZE: 10000  # 데이터를 1만 건씩 쪼개서 적재
+    inputs:
+      dry_run:
+        description: "디렉터리/파일만 생성 (이미지 빌드/컨테이너 실행 스킵)"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+  pull-requests: read
+
+env:
+  TZ: Asia/Seoul
+  ECHO_PREFIX: "[Dependabot Provision]"
+  ECHO_LOG_FILE: "/tmp/echoops-dependabot.log"
+  DRY_RUN: ${{ inputs.dry_run }}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: dependabot-service-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build-and-deploy-partitioned:
+  provision:
+    if: github.event_name == 'workflow_dispatch' || github.actor == 'dependabot[bot]' || github.actor == 'dependabot-preview[bot]'
     runs-on: ubuntu-latest
-    name: 💎 Partitioned Data Load & Merge
+    name: Provision service containers for Dependabot updates
+    timeout-minutes: 60
+    
     steps:
-      - name: 📥 Checkout Source
+      - name: 🧾 Echo start context
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Workflow started"
+          log "  - Event       : ${{ github.event_name }}"
+          log "  - Actor       : ${{ github.actor }}"
+          log "  - Ref         : ${{ github.ref }}"
+          log "  - SHA         : ${{ github.sha }}"
+          log "  - Run ID      : ${{ github.run_id }}"
+          log "  - Run Number  : ${{ github.run_number }}"
+          log "  - DRY_RUN     : ${DRY_RUN:-}"
+          echo "============================================"
+
+      # [핵심 추가] 체크아웃 이전에 불필요한 패키지를 지우고 디스크 용량을 최대화합니다.
+      - name: 🧹 Maximize Build Space (용량 증설)
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      # 용량 증설 이후에 저장소를 체크아웃해야 코드가 날아가지 않습니다.
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: ☕ Setup JDK 17 & Maven Cache
-        uses: actions/setup-java@v4
-        with:
-          java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'temurin'
-          cache: 'maven'
-
-      - name: 🏗️ Generate Partitioned Loading Logic
+      - name: ✅ Verify checkout
         run: |
-          mkdir -p ${PROJECT_ROOT}/src/main/java/com/bank/core
-          
-          # [FinancialSystem.java] 분할 적재 로직 반영
-          cat <<EOF > ${PROJECT_ROOT}/src/main/java/com/bank/core/FinancialSystem.java
-          package com.bank.core;
-          import java.sql.*;
-          import java.util.UUID;
-
-          public class FinancialSystem {
-              private static final String URL = "jdbc:h2:mem:oracle_db;MODE=Oracle;DB_CLOSE_DELAY=-1";
-              private static final int TOTAL = 100000;
-              private static final int CHUNK_SIZE = 10000; // 분할 단위
-
-              public static void main(String[] args) throws Exception {
-                  Class.forName("org.h2.Driver");
-                  try (Connection conn = DriverManager.getConnection(URL, "sa", "")) {
-                      setupSchema(conn);
-                      
-                      long startTime = System.currentTimeMillis();
-                      int processed = 0;
-
-                      // [분할 적재 시작]
-                      while (processed < TOTAL) {
-                          int currentChunk = Math.min(CHUNK_SIZE, TOTAL - processed);
-                          loadChunk(conn, processed + 1, currentChunk);
-                          processed += currentChunk;
-                          
-                          // 청크 단위 커밋 및 메모리 정리 시뮬레이션
-                          System.out.println("📦 [PARTITION] Progress: " + processed + "/" + TOTAL + " (Completed Chunk)");
-                      }
-
-                      // [데이터 병합]
-                      mergeData(conn);
-                      
-                      System.out.println("✅ [FINAL] Total Load Time: " + (System.currentTimeMillis() - startTime) + "ms");
-                  }
-              }
-
-              private static void setupSchema(Connection conn) throws SQLException {
-                  Statement stmt = conn.createStatement();
-                  stmt.execute("CREATE TABLE IF NOT EXISTS RAW_STAGING (ID RAW(16), CHUNK_ID INT, VAL NUMBER)");
-                  stmt.execute("CREATE TABLE IF NOT EXISTS MERGED_LEDGER (ID RAW(16) PRIMARY KEY, TOTAL_VAL NUMBER, TS TIMESTAMP)");
-              }
-
-              private static void loadChunk(Connection conn, int startIdx, int size) throws SQLException {
-                  String sql = "INSERT INTO RAW_STAGING (ID, CHUNK_ID, VAL) VALUES (RANDOM_UUID(), ?, ?)";
-                  try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                      conn.setAutoCommit(false); // 트랜잭션 분리
-                      for (int i = 0; i < size; i++) {
-                          ps.setInt(1, (startIdx + i) / CHUNK_SIZE);
-                          ps.setLong(2, (long)(Math.random() * 1000));
-                          ps.addBatch();
-                      }
-                      ps.executeBatch();
-                      conn.commit(); // 청크 단위로 물리적 커밋
-                  }
-              }
-
-              private static void mergeData(Connection conn) throws SQLException {
-                  System.out.println("🔄 [MERGE] Consolidating all partitioned chunks...");
-                  Statement stmt = conn.createStatement();
-                  stmt.execute("INSERT INTO MERGED_LEDGER SELECT ID, VAL, CURRENT_TIMESTAMP FROM RAW_STAGING");
-              }
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
           }
-          EOF
-
-          # [pom.xml] 및 [Dockerfile] 생성 로직은 이전과 동일하게 유지 (생략 없이 처리됨)
-          cat <<EOF > ${PROJECT_ROOT}/pom.xml
-          <project xmlns="http://maven.apache.org/POM/4.0.0">
-              <modelVersion>4.0.0</modelVersion>
-              <groupId>com.bank</groupId>
-              <artifactId>financial-core</artifactId>
-              <version>1.0.0</version>
-              <properties>
-                  <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-                  <maven.compiler.source>${JAVA_VERSION}</maven.compiler.source>
-                  <maven.compiler.target>${JAVA_VERSION}</maven.compiler.target>
-              </properties>
-              <dependencies>
-                  <dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId><version>2.2.224</version></dependency>
-                  <dependency><groupId>com.oracle.database.jdbc</groupId><artifactId>ojdbc11</artifactId><version>23.3.0.23.09</version></dependency>
-              </dependencies>
-          </project>
-          EOF
-
-          cat <<EOF > ${PROJECT_ROOT}/Dockerfile
-          FROM maven:3.9.6-eclipse-temurin-17 AS build
-          WORKDIR /app
-          COPY . .
-          RUN mvn clean package -DskipTests && mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
-          FROM eclipse-temurin:17-jre-jammy
-          WORKDIR /app
-          COPY --from=build /app/target/*.jar app.jar
-          COPY --from=build /app/target/dependency /app/lib
-          ENTRYPOINT ["java", "-cp", "app.jar:lib/*", "com.bank.core.FinancialSystem"]
-          EOF
-
-      - name: 🔨 Build & Package
-        working-directory: ${{ env.PROJECT_ROOT }}
-        run: |
-          mvn clean package -B -DskipTests
-          mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
-
-      - name: 🐳 Docker Deploy & Partitioned Load
-        working-directory: ${{ env.PROJECT_ROOT }}
-        run: |
-          docker build -t ${{ env.CONTAINER_NAME }}:latest .
-          # 컨테이너 실행 및 분할 적재 수행
-          docker run --name ${{ env.CONTAINER_NAME }} ${{ env.CONTAINER_NAME }}:latest
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Verify checkout"
+          echo "--------------------------------------------"
+          log "Working directory : $(pwd)"
+          log "Repository files  :"
+          ls -al
+          echo "============================================"
           
-          echo "🔄 Restarting for Persistence Check..."
-          docker restart ${{ env.CONTAINER_NAME }}
-          docker logs ${{ env.CONTAINER_NAME }}
-
-      - name: 🚀 Sync & Push
+      - name: 🧱 Build custom Scala runtime base image
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git commit -m "🏦 Financial Core: Partitioned Data Loading & Consolidation [skip ci]" || echo "No changes"
-          git push origin main
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Build Scala runtime base image"
+          echo "============================================"
+          
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            log "${ECHO_PREFIX} DRY-RUN 모드: Scala runtime base image 빌드를 스킵합니다."
+            echo "============================================"
+            exit 0
+          fi
+          
+          if [ ! -d docker/scala-runtime ]; then
+            echo "::error::docker/scala-runtime not found"
+            log "ERROR: docker/scala-runtime not found"
+            exit 1
+          fi
+          
+          docker build --tag dependabot/scala-runtime:latest docker/scala-runtime
+          log "✓ Built image dependabot/scala-runtime:latest"
+          echo "============================================"
+
+      - name: 🏗 Prepare service directories and assets (ALL services)
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          echo "============================================"
+          log "${ECHO_PREFIX} Step: Prepare service directories and assets"
+          echo "============================================"
+          log "Initializing service asset generation"
+          
+          declare -A images
+          images[python]='python:3.11-slim'
+          images[java]='eclipse-temurin:17-jdk'
+          images[linux]='debian:stable-slim'
+          images[ubuntu]='ubuntu:22.04'
+          images[nodejs]='node:20-alpine'
+          images[golang]='golang:1.22'
+          images[ruby]='ruby:3.3'
+          images[php]='php:8.3-cli'
+          images[dotnet]='mcr.microsoft.com/dotnet/sdk:8.0'
+          images[scala]='dependabot/scala-runtime:latest'
+          images[rust]='rust:1.81'
+          images[perl]='perl:5'
+          images[elixir]='elixir:1.16'
+          images[erlang]='erlang:26'
+          images[docker]='docker:dind'
+          images[buildx]='docker/buildx-bin:latest'
+          images[terraform]='hashicorp/terraform:1.9'
+          images[ansible]='willhallonline/ansible:latest'
+          images[packer]='hashicorp/packer:latest'
+          images[gitlab_runner]='gitlab/gitlab-runner:latest'
+          images[teradata]='alpine:3.19'
+          images[mysql]='mysql:8.0'
+          images[postgres]='postgres:16'
+          images[mariadb]='mariadb:11'
+          images[redis]='redis:7-alpine'
+          images[mongodb]='mongo:7'
+          images[rabbitmq]='rabbitmq:3-management'
+          images[kafka]='eclipse-temurin:17-jdk'
+          images[activemq]='rmohr/activemq:latest'
+          images[nginx]='nginx:stable-alpine'
+          images[apache]='httpd:2.4'
+          images[caddy]='caddy:2'
+          images[tomcat]='tomcat:10-jdk17'
+          images[wildfly]='jboss/wildfly:latest'
+          images[prometheus]='prom/prometheus:latest'
+          images[grafana]='grafana/grafana:latest'
+          images[loki]='grafana/loki:latest'
+          images[jaeger]='jaegertracing/all-in-one:latest'
+          images[elasticsearch]='docker.elastic.co/elasticsearch/elasticsearch:8.15.0'
+          images[logstash]='docker.elastic.co/logstash/logstash:8.15.0'
+          images[kibana]='docker.elastic.co/kibana/kibana:8.15.0'
+          images[opensearch]='opensearchproject/opensearch:latest'
+          images[opensearch_dashboards]='opensearchproject/opensearch-dashboards:latest'
+          images[trivy]='aquasec/trivy:latest'
+          images[grype]='anchore/grype:latest'
+          images[clair]='quay.io/projectquay/clair:4.8.0'
+          images[sonarqube]='sonarqube:latest'
+          images[zap]='owasp/zap2docker-stable'
+          images[banking_pipeline]='python:3.11-slim'
+          images[mcp_hello_js]='node:20-alpine'
+          images[mcp_fs]='node:20-alpine'
+          images[mcp_hello_py]='python:3.11-slim'
+          images[mcp_python_server]='python:3.11-slim'
+          images[mcp_apache_server]='python:3.11-slim'
+          images[mcp_hello_java]='eclipse-temurin:17-jdk'
+          images[cost_tracker_nodejs]='node:20-alpine'
+          images[cost_tracker_python]='python:3.11-slim'
+          
+          log "Configured image map (ALL services): ${!images[@]}"
+          mkdir -p infrastructure
+          > infrastructure/.services
+          
+          for service in "${!images[@]}"; do
+            echo "${service}" >> infrastructure/.services
+          done
+          log "Service list written to infrastructure/.services"
+          
+          while read -r service; do
+            [ -z "${service}" ] && continue
+            echo "--------------------------------------------"
+            log "${ECHO_PREFIX} Generating assets for ${service}"
+            echo "--------------------------------------------"
+            
+            service_dir="infrastructure/${service}"
+            image="${images[$service]}"
+            title="${service^}"
+            
+            log "Creating directory: ${service_dir}/config"
+            mkdir -p "${service_dir}/config"
+            
+            log "Writing Dockerfile for ${service}"
+            {
+              echo "# ${title} 서비스를 위한 자동 생성된 Dockerfile"
+              echo "FROM ${image}"
+              echo "LABEL org.opencontainers.image.title=\"${title} service\""
+              echo "LABEL org.opencontainers.image.description=\"Container for ${title} workloads managed by Dependabot workflows\""
+              echo ""
+              echo "RUN mkdir -p /tmp/service && \\"
+              echo "    echo \"Provisioning ${title} runtime\" > /tmp/service/INSTALLATION.log"
+              echo ""
+              echo "COPY config /tmp/service/config"
+              echo "WORKDIR /tmp/service"
+              echo ""
+              echo "CMD [\"/bin/sh\", \"-c\", \"echo '${title} container ready'; sleep 5\"]"
+            } > "${service_dir}/Dockerfile"
+            
+            log "Creating scripts and documentation for ${service}"
+            echo "#!/usr/bin/env bash" > "${service_dir}/server-install.sh"
+            echo "echo \"[${title}] Starting server installation\"" >> "${service_dir}/server-install.sh"
+            chmod +x "${service_dir}/server-install.sh"
+            
+            echo "#!/usr/bin/env bash" > "${service_dir}/firewall-rules.sh"
+            echo "echo 'allow from 10.0.0.0/8 to any port 443'" >> "${service_dir}/firewall-rules.sh"
+            chmod +x "${service_dir}/firewall-rules.sh"
+            
+            echo "#!/usr/bin/env bash" > "${service_dir}/network-setup.sh"
+            echo "docker network create \"${service}-network\" || true" >> "${service_dir}/network-setup.sh"
+            chmod +x "${service_dir}/network-setup.sh"
+            
+            echo "# ${title} Service Blueprint" > "${service_dir}/${service}.md"
+            touch "${service_dir}/config/${service}-config.yaml"
+            
+          done < infrastructure/.services
+          
+          echo "============================================"
+          log "Completed service asset generation (ALL services)"
+          echo "============================================"
+
+      - name: 🐳 Build container images (ALL services)
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            log "DRY-RUN 모드: 이미지 빌드를 스킵합니다."
+            exit 0
+          fi
+          
+          mapfile -t services < infrastructure/.services
+          docker network create dependabot-ci-network >/dev/null 2>&1 || true
+          
+          for service in "${services[@]}"; do
+            log "Building image for ${service}"
+            docker build --tag "dependabot/${service}-service:ci" "infrastructure/${service}"
+          done
+
+      - name: 🔍 Smoke test containers (ALL services)
+        run: |
+          set -euo pipefail
+          LOG_FILE="${ECHO_LOG_FILE:-/tmp/echoops-dependabot.log}"
+          log() {
+            echo "$@"
+            echo "$(date +'%F %T') $@" >> "${LOG_FILE}"
+          }
+          
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            log "DRY-RUN 모드: 컨테이너 실행/스모크 테스트를 스킵합니다."
+            exit 0
+          fi
+          
+          mapfile -t services < infrastructure/.services
+          for service in "${services[@]}"; do
+            log "Running container for ${service}"
+            output="$(docker run --rm --network dependabot-ci-network "dependabot/${service}-service:ci" 2>&1 || true)"
+            if [[ "${output}" != *"container ready"* ]]; then
+              echo "::error::${service} container did not report ready state"
+              exit 1
+            fi
+          done
+
+      - name: 📂 Summarize generated structure
+        run: |
+          count=$(find infrastructure -type f | wc -l)
+          echo "Service asset file count: ${count}"
+
+      - name: 📤 Upload service artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependabot-service-assets
+          path: infrastructure/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 🧹 Cleanup provisioned networks (ALL services)
+        if: always()
+        run: |
+          docker network rm dependabot-ci-network >/dev/null 2>&1 || true
+          if [ -f infrastructure/.services ]; then
+            mapfile -t services < infrastructure/.services
+            for service in "${services[@]}"; do
+              docker network rm "${service}-network" >/dev/null 2>&1 || true
+            done
+          fi
+
+      - name: ✅ Echo final status
+        if: always()
+        run: echo "Workflow finished with status: ${{ job.status }}"
