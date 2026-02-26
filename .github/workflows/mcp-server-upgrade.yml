@@ -55,6 +55,7 @@ jobs:
           log "  - DRY_RUN     : ${DRY_RUN:-}"
           echo "============================================"
 
+      # 1단계: GitHub Actions 기본 불필요 패키지 삭제 및 LVM 병합 (용량 최대화)
       - name: 🧹 Maximize Build Space (용량 증설)
         uses: easimon/maximize-build-space@master
         with:
@@ -126,21 +127,22 @@ jobs:
           echo "============================================"
           log "Initializing service asset generation"
           
+          # [DevOps 패치 1] 가능한 모든 이미지를 Slim / Alpine / Jammy 경량 버전으로 교체
           declare -A images
           images[python]='python:3.11-slim'
-          images[java]='eclipse-temurin:17-jdk'
+          images[java]='eclipse-temurin:17-jdk-jammy'
           images[linux]='debian:stable-slim'
           images[ubuntu]='ubuntu:22.04'
           images[nodejs]='node:20-alpine'
-          images[golang]='golang:1.22'
-          images[ruby]='ruby:3.3'
-          images[php]='php:8.3-cli'
-          images[dotnet]='mcr.microsoft.com/dotnet/sdk:8.0'
+          images[golang]='golang:1.22-alpine'
+          images[ruby]='ruby:3.3-slim'
+          images[php]='php:8.3-cli-alpine'
+          images[dotnet]='mcr.microsoft.com/dotnet/sdk:8.0-alpine'
           images[scala]='dependabot/scala-runtime:latest'
-          images[rust]='rust:1.81'
-          images[perl]='perl:5'
-          images[elixir]='elixir:1.16'
-          images[erlang]='erlang:26'
+          images[rust]='rust:1.81-slim'
+          images[perl]='perl:5-slim'
+          images[elixir]='elixir:1.16-alpine'
+          images[erlang]='erlang:26-alpine'
           images[docker]='docker:dind'
           images[buildx]='docker/buildx-bin:latest'
           images[terraform]='hashicorp/terraform:1.9'
@@ -149,17 +151,17 @@ jobs:
           images[gitlab_runner]='gitlab/gitlab-runner:latest'
           images[teradata]='alpine:3.19'
           images[mysql]='mysql:8.0'
-          images[postgres]='postgres:16'
+          images[postgres]='postgres:16-alpine'
           images[mariadb]='mariadb:11'
           images[redis]='redis:7-alpine'
           images[mongodb]='mongo:7'
-          images[rabbitmq]='rabbitmq:3-management'
-          images[kafka]='eclipse-temurin:17-jdk'
+          images[rabbitmq]='rabbitmq:3-management-alpine'
+          images[kafka]='eclipse-temurin:17-jdk-jammy'
           images[activemq]='rmohr/activemq:latest'
           images[nginx]='nginx:stable-alpine'
-          images[apache]='httpd:2.4'
-          images[caddy]='caddy:2'
-          images[tomcat]='tomcat:10-jdk17'
+          images[apache]='httpd:2.4-alpine'
+          images[caddy]='caddy:2-alpine'
+          images[tomcat]='tomcat:10-jdk17-corretto'
           images[wildfly]='jboss/wildfly:latest'
           images[prometheus]='prom/prometheus:latest'
           images[grafana]='grafana/grafana:latest'
@@ -181,7 +183,7 @@ jobs:
           images[mcp_hello_py]='python:3.11-slim'
           images[mcp_python_server]='python:3.11-slim'
           images[mcp_apache_server]='python:3.11-slim'
-          images[mcp_hello_java]='eclipse-temurin:17-jdk'
+          images[mcp_hello_java]='eclipse-temurin:17-jdk-jammy'
           images[cost_tracker_nodejs]='node:20-alpine'
           images[cost_tracker_python]='python:3.11-slim'
           
@@ -215,14 +217,14 @@ jobs:
               echo "LABEL org.opencontainers.image.description=\"Container for ${title} workloads managed by Dependabot workflows\""
               echo ""
               
-              # [패치 1] 권한 문제로 인한 튕김 방지 (|| true 추가)
+              # 권한 문제로 인한 튕김 방지 (|| true 유지)
               echo "RUN mkdir -p /tmp/service && chmod 777 /tmp/service && echo \"Provisioning ${title} runtime\" > /tmp/service/INSTALLATION.log || true"
               echo ""
               echo "COPY config /tmp/service/config"
               echo "WORKDIR /tmp/service"
               echo ""
               
-              # [패치 2] 베이스 이미지의 ENTRYPOINT 완전 무력화 (빈 배열 처리)
+              # 베이스 이미지의 ENTRYPOINT 완전 무력화 (빈 배열 처리 유지)
               echo "ENTRYPOINT []"
               echo "CMD [\"/bin/sh\", \"-c\", \"echo '${title} container ready'; sleep 5\"]"
             } > "${service_dir}/Dockerfile"
@@ -264,12 +266,14 @@ jobs:
           fi
           
           mapfile -t services < infrastructure/.services
-          docker network create dependabot-ci-network >/dev/null 2>&1 || true
           
           for service in "${services[@]}"; do
             echo "--------------------------------------------"
             log "Processing ${service} ..."
             echo "--------------------------------------------"
+            
+            # [DevOps 패치 2] Prune으로 인해 네트워크가 지워졌을 수 있으므로 매 루프마다 확인 후 생성
+            docker network create dependabot-ci-network >/dev/null 2>&1 || true
             
             # 1. 빌드 수행
             log "[1/3] Building image for ${service}"
@@ -284,16 +288,21 @@ jobs:
             fi
             log "✓ ${service} container passed smoke test"
             
-            # 3. 사용 완료된 도커 이미지 및 베이스 이미지 즉시 삭제 (디스크 확보)
-            log "[3/3] Cleaning up Docker space for ${service}"
+            # 3. 사용 완료된 도커 캐시 및 이미지 강제 완전 삭제 (제안해주신 docker prune 반영)
+            log "[3/3] Deep cleaning Docker space for ${service} (GC)"
+            
+            # 현재 만들어진 이미지 삭제
             docker rmi -f "dependabot/${service}-service:ci" >/dev/null 2>&1 || true
             
+            # Dockerfile 분석 후 베이스 이미지 삭제
             base_image=$(awk '/^FROM/ {print $2}' "infrastructure/${service}/Dockerfile")
             if [ -n "$base_image" ]; then
               docker rmi -f "$base_image" >/dev/null 2>&1 || true
             fi
             
-            docker builder prune -f >/dev/null 2>&1 || true
+            # 사용하지 않는 모든 빌드 캐시 및 댕글링 이미지 완전 삭제 (가장 핵심)
+            docker builder prune -a -f >/dev/null 2>&1 || true
+            docker image prune -a -f >/dev/null 2>&1 || true
             
           done
 
