@@ -19,8 +19,8 @@
     "update-disable": "tsx src/utils/updateCli.ts disable",
     "build": "tsc",
     "test": "npm run lint && npm run format:check && npm run build",
-    "lint": "eslint src/**/*.ts",
-    "lint:fix": "eslint src/**/*.ts --fix",
+    "lint": "eslint --no-error-on-unmatched-pattern \"src/**/*.ts\"",
+    "lint:fix": "eslint --no-error-on-unmatched-pattern \"src/**/*.ts\" --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\""
   },
