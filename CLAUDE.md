@@ -69,6 +69,7 @@ C:\Users\kwonn\
 ### chrome-mcp
 Chrome 브라우저 제어 도구 (DevTools Protocol):
 - `chrome_connect` - DevTools 연결
+- `chrome_list_tabs` - 열린 탭 목록 조회
 - `chrome_navigate` - URL 이동
 - `chrome_screenshot` - 스크린샷 캡처
 - `chrome_evaluate` - JavaScript 실행
