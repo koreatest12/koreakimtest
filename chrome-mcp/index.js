@@ -1,4 +1,7 @@
 import CDP from "chrome-remote-interface";
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -218,6 +221,46 @@ const tools = [
       },
     },
   },
+  {
+    name: "file_server_start",
+    description: "로컬 HTTP 파일 공유 서버 시작 - 웹 브라우저에서 URL로 파일 열람/다운로드/업로드 가능한 홈페이지 제공",
+    inputSchema: {
+      type: "object",
+      properties: {
+        directory: { type: "string", description: "공유할 디렉토리 절대 경로" },
+        port: { type: "number", description: "서버 포트 (기본값 8080)" },
+        host: { type: "string", description: "바인딩 호스트 (기본값 localhost, 외부 접근 허용 시 0.0.0.0)" },
+      },
+      required: ["directory"],
+    },
+  },
+  {
+    name: "file_server_stop",
+    description: "HTTP 파일 공유 서버 중지",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "file_server_list",
+    description: "파일 공유 서버의 공유 폴더 파일 목록과 다운로드 URL 조회",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "file_server_upload",
+    description: "로컬 파일을 파일 공유 서버의 공유 폴더에 복사",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sourcePath: { type: "string", description: "복사할 파일의 로컬 절대 경로" },
+        targetName: { type: "string", description: "저장할 파일명 (선택, 미입력 시 원본 파일명 사용)" },
+      },
+      required: ["sourcePath"],
+    },
+  },
+  {
+    name: "file_server_info",
+    description: "파일 공유 서버 상태, 접속 URL, 공유 폴더 정보 조회",
+    inputSchema: { type: "object", properties: {} },
+  },
 ];
 
 /* =========================
@@ -227,6 +270,180 @@ let consoleLogs = [];
 let consoleListening = false;
 let networkRequests = [];
 let networkListening = false;
+let fileServer = null;
+let fileServerConfig = { directory: '', port: 8080, host: 'localhost' };
+
+/* =========================
+   FILE SERVER HELPERS
+========================= */
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+  return (bytes / 1024 / 1024 / 1024).toFixed(1) + ' GB';
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function getHomePage(directory, port, host) {
+  let fileRows = '';
+  try {
+    const entries = fs.readdirSync(directory, { withFileTypes: true });
+    const files = entries.filter((e) => e.isFile());
+    if (files.length === 0) {
+      fileRows = '<tr><td colspan="4" style="text-align:center;padding:32px;color:#999;">공유된 파일이 없습니다</td></tr>';
+    } else {
+      for (const entry of files) {
+        const stat = fs.statSync(path.join(directory, entry.name));
+        const size = formatSize(stat.size);
+        const date = stat.mtime.toLocaleString('ko-KR');
+        const encodedName = encodeURIComponent(entry.name);
+        fileRows += `
+          <tr>
+            <td class="name">📄 ${escapeHtml(entry.name)}</td>
+            <td>${size}</td>
+            <td>${date}</td>
+            <td><a href="/file/${encodedName}" class="btn-dl">⬇ 다운로드</a></td>
+          </tr>`;
+      }
+    }
+  } catch {
+    fileRows = '<tr><td colspan="4" style="text-align:center;padding:20px;color:#c00;">디렉토리를 읽을 수 없습니다</td></tr>';
+  }
+
+  const displayHost = host === '0.0.0.0' ? 'localhost' : host;
+  return `<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>📁 파일 공유 서버</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Tahoma,sans-serif;background:#f0f2f5;min-height:100vh}
+.header{background:#1a73e8;color:#fff;padding:18px 24px}
+.header h1{font-size:1.3rem;font-weight:600}
+.header small{opacity:.85;font-size:.82rem}
+.container{max-width:960px;margin:24px auto;padding:0 16px}
+.card{background:#fff;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,.08);margin-bottom:20px;overflow:hidden}
+.card-header{padding:13px 20px;border-bottom:1px solid #eee;font-weight:600;color:#333;font-size:.93rem}
+.info-grid{display:grid;grid-template-columns:110px 1fr;gap:8px;padding:14px 20px;font-size:.88rem;color:#555}
+.info-grid strong{color:#333}
+.info-grid a{color:#1a73e8;text-decoration:none}
+.upload-form{padding:16px 20px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+input[type="file"]{flex:1;min-width:200px;font-size:.88rem}
+.btn-up{background:#1a73e8;color:#fff;border:none;padding:9px 20px;border-radius:6px;cursor:pointer;font-size:.88rem;white-space:nowrap}
+.btn-up:hover{background:#1557b0}
+table{width:100%;border-collapse:collapse}
+thead th{background:#f8f9fa;color:#555;font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:10px 16px;text-align:left;border-bottom:2px solid #eee}
+tbody td{padding:11px 16px;border-bottom:1px solid #f0f0f0;font-size:.88rem;color:#333}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:#fafbff}
+.name{font-weight:500;word-break:break-all}
+.btn-dl{background:#34a853;color:#fff;padding:5px 13px;border-radius:5px;text-decoration:none;font-size:.8rem;white-space:nowrap}
+.btn-dl:hover{background:#2d9048}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📁 파일 공유 서버</h1>
+  <small>http://${displayHost}:${port}</small>
+</div>
+<div class="container">
+  <div class="card">
+    <div class="card-header">ℹ️ 서버 정보</div>
+    <div class="info-grid">
+      <strong>접속 URL</strong>
+      <a href="http://${displayHost}:${port}">http://${displayHost}:${port}</a>
+      <strong>공유 폴더</strong>
+      <span>${escapeHtml(directory)}</span>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">📤 파일 업로드</div>
+    <form class="upload-form" action="/upload" method="POST" enctype="multipart/form-data">
+      <input type="file" name="files" multiple>
+      <button type="submit" class="btn-up">업로드</button>
+    </form>
+  </div>
+  <div class="card">
+    <div class="card-header">📋 파일 목록</div>
+    <table>
+      <thead><tr><th>파일명</th><th>크기</th><th>수정일</th><th>다운로드</th></tr></thead>
+      <tbody>${fileRows}</tbody>
+    </table>
+  </div>
+</div>
+</body>
+</html>`;
+}
+
+async function parseMultipartUpload(req, uploadDir) {
+  return new Promise((resolve, reject) => {
+    const contentType = req.headers['content-type'] || '';
+    const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^\s;]+))/);
+    if (!boundaryMatch) return reject(new Error('multipart boundary를 찾을 수 없습니다'));
+
+    const boundary = boundaryMatch[1] || boundaryMatch[2];
+    const chunks = [];
+
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('error', reject);
+    req.on('end', () => {
+      try {
+        const body = Buffer.concat(chunks);
+        const savedFiles = [];
+        const firstBoundary = '--' + boundary + '\r\n';
+        const partSeparator = '\r\n--' + boundary;
+
+        let partStart = body.indexOf(Buffer.from(firstBoundary));
+        if (partStart === -1) { resolve(savedFiles); return; }
+        partStart += firstBoundary.length;
+
+        while (partStart < body.length) {
+          const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), partStart);
+          if (headerEnd === -1) break;
+
+          const headers = body.slice(partStart, headerEnd).toString('utf8');
+          const dataStart = headerEnd + 4;
+
+          const separatorIdx = body.indexOf(Buffer.from(partSeparator), dataStart);
+          const dataEnd = separatorIdx === -1 ? body.length : separatorIdx;
+
+          const cdMatch = headers.match(/content-disposition:[^\r\n]*/i);
+          if (cdMatch) {
+            const filenameMatch = cdMatch[0].match(/filename="([^"]+)"/);
+            if (filenameMatch && filenameMatch[1]) {
+              const filename = path.basename(filenameMatch[1]);
+              if (filename) {
+                fs.writeFileSync(path.join(uploadDir, filename), body.slice(dataStart, dataEnd));
+                savedFiles.push(filename);
+              }
+            }
+          }
+
+          if (separatorIdx === -1) break;
+          const afterSep = separatorIdx + partSeparator.length;
+          if (body[afterSep] === 0x2D && body[afterSep + 1] === 0x2D) break;
+          if (body[afterSep] === 0x0D && body[afterSep + 1] === 0x0A) {
+            partStart = afterSep + 2;
+          } else {
+            break;
+          }
+        }
+        resolve(savedFiles);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
 
 /* =========================
    TOOL HANDLERS
@@ -498,6 +715,116 @@ async function handleTool(name, args) {
         `  상태: ${info.readyState}`,
         `  HTML 크기: ${Math.round(outerHTML.length / 1024)} KB`,
       ].join("\n");
+    }
+
+    case "file_server_start": {
+      if (fileServer) return "⚠️ 서버가 이미 실행 중입니다. file_server_stop으로 먼저 중지하세요.";
+      const dir = path.resolve(args.directory);
+      if (!fs.existsSync(dir)) return `❌ 디렉토리가 존재하지 않습니다: ${dir}`;
+      const sPort = args.port || 8080;
+      const sHost = args.host || 'localhost';
+      fileServerConfig = { directory: dir, port: sPort, host: sHost };
+
+      fileServer = http.createServer(async (req, res) => {
+        try {
+          const pathname = new URL(req.url, 'http://localhost').pathname;
+          if (req.method === 'GET' && pathname === '/') {
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(getHomePage(dir, sPort, sHost));
+          } else if (req.method === 'GET' && pathname.startsWith('/file/')) {
+            const filename = decodeURIComponent(pathname.slice(6));
+            const filePath = path.resolve(path.join(dir, filename));
+            if (!filePath.startsWith(path.resolve(dir))) {
+              res.writeHead(403); res.end('접근 거부'); return;
+            }
+            if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+              res.writeHead(404); res.end('파일을 찾을 수 없습니다'); return;
+            }
+            const stat = fs.statSync(filePath);
+            res.writeHead(200, {
+              'Content-Type': 'application/octet-stream',
+              'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`,
+              'Content-Length': stat.size,
+            });
+            fs.createReadStream(filePath).pipe(res);
+          } else if (req.method === 'POST' && pathname === '/upload') {
+            const saved = await parseMultipartUpload(req, dir);
+            const msg = saved.length === 0
+              ? '업로드할 파일을 선택하세요.'
+              : `${saved.map((f) => escapeHtml(f)).join(', ')} 업로드 완료!`;
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`<script>alert(${JSON.stringify(msg)});location.href='/';</script>`);
+          } else {
+            res.writeHead(404); res.end('Not Found');
+          }
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end(`서버 오류: ${err.message}`);
+        }
+      });
+
+      await new Promise((resolve, reject) => {
+        fileServer.on('error', reject);
+        fileServer.listen(sPort, sHost, resolve);
+      });
+
+      const displayHost = sHost === '0.0.0.0' ? 'localhost' : sHost;
+      return `✅ 파일 공유 서버 시작\n🌐 홈페이지 URL: http://${displayHost}:${sPort}\n📁 공유 폴더: ${dir}\n\n브라우저에서 위 URL로 접속하면 파일 목록과 업로드 기능을 사용할 수 있습니다.`;
+    }
+
+    case "file_server_stop": {
+      if (!fileServer) return "❌ 실행 중인 파일 서버가 없습니다.";
+      await new Promise((resolve, reject) => {
+        fileServer.close((err) => (err ? reject(err) : resolve()));
+      });
+      fileServer = null;
+      fileServerConfig = { directory: '', port: 8080, host: 'localhost' };
+      return "✅ 파일 공유 서버 중지 완료";
+    }
+
+    case "file_server_list": {
+      if (!fileServer) return "❌ 서버가 실행되지 않았습니다. 먼저 file_server_start로 서버를 시작하세요.";
+      const { directory: lDir, port: lPort, host: lHost } = fileServerConfig;
+      const entries = fs.readdirSync(lDir, { withFileTypes: true });
+      const files = entries.filter((e) => e.isFile());
+      if (files.length === 0) return "📂 공유 폴더에 파일이 없습니다.";
+      const lDisplayHost = lHost === '0.0.0.0' ? 'localhost' : lHost;
+      const baseUrl = `http://${lDisplayHost}:${lPort}`;
+      const lines = [`📁 공유 폴더: ${lDir}`, `🌐 서버 URL: ${baseUrl}`, '', `파일 ${files.length}개:`];
+      for (const entry of files) {
+        const stat = fs.statSync(path.join(lDir, entry.name));
+        lines.push(`  📄 ${entry.name}  (${formatSize(stat.size)})\n     🔗 ${baseUrl}/file/${encodeURIComponent(entry.name)}`);
+      }
+      return lines.join('\n');
+    }
+
+    case "file_server_upload": {
+      if (!fileServerConfig.directory) return "❌ 서버가 실행되지 않았습니다. 먼저 file_server_start로 서버를 시작하세요.";
+      const srcPath = path.resolve(args.sourcePath);
+      if (!fs.existsSync(srcPath) || !fs.statSync(srcPath).isFile()) return `❌ 파일이 존재하지 않습니다: ${srcPath}`;
+      const targetName = args.targetName ? path.basename(args.targetName) : path.basename(srcPath);
+      const destPath = path.join(fileServerConfig.directory, targetName);
+      fs.copyFileSync(srcPath, destPath);
+      const stat = fs.statSync(destPath);
+      const { host: uHost, port: uPort } = fileServerConfig;
+      const uDisplayHost = uHost === '0.0.0.0' ? 'localhost' : uHost;
+      const downloadUrl = fileServer ? `http://${uDisplayHost}:${uPort}/file/${encodeURIComponent(targetName)}` : '(서버 미실행)';
+      return `✅ 파일 복사 완료\n  원본: ${srcPath}\n  저장: ${destPath}\n  크기: ${formatSize(stat.size)}\n  다운로드 URL: ${downloadUrl}`;
+    }
+
+    case "file_server_info": {
+      if (!fileServer) return "⏹ 파일 공유 서버가 실행되지 않았습니다.";
+      const { directory: iDir, port: iPort, host: iHost } = fileServerConfig;
+      const iDisplayHost = iHost === '0.0.0.0' ? 'localhost' : iHost;
+      let fileCount = 0;
+      try { fileCount = fs.readdirSync(iDir, { withFileTypes: true }).filter((e) => e.isFile()).length; } catch {}
+      return [
+        "✅ 서버 실행 중",
+        `  🌐 홈페이지: http://${iDisplayHost}:${iPort}`,
+        `  📁 공유 폴더: ${iDir}`,
+        `  📄 파일 수: ${fileCount}개`,
+        `  🏠 바인딩: ${iHost}:${iPort}`,
+      ].join('\n');
     }
 
     default:

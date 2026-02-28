@@ -79,6 +79,11 @@ Chrome 브라우저 제어 도구 (DevTools Protocol):
 - `chrome_performance` - 성능 메트릭
 - `chrome_cookies` - 쿠키 관리
 - `chrome_page_info` - 페이지 정보
+- `file_server_start` - HTTP 파일 공유 서버 시작 (웹 홈페이지 UI 포함)
+- `file_server_stop` - 파일 공유 서버 중지
+- `file_server_list` - 공유 파일 목록 및 다운로드 URL 조회
+- `file_server_upload` - 로컬 파일을 공유 폴더에 복사
+- `file_server_info` - 서버 상태 및 접속 URL 조회
 
 ### claude.ai Google Calendar (원격 MCP)
 Google Calendar 연동 도구 (OAuth 인증 완료):
