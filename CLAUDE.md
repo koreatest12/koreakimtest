@@ -56,6 +56,7 @@ C:\Users\kwonn\
 - `excel_savings_plan` - 엑셀 저축 플랜 생성
 - `security_news` - KISA 보호나라 보안공지
 - `kisec_exam_schedule` - 정보보안기사 시험일정
+- `stock_tax_calculator` - 주식 세금 계산 (국내 증권거래세, 해외 양도소득세, 배당소득세)
 
 ### crypto-mcp
 암호화/보안 도구 모음:
