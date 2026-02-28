@@ -238,6 +238,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           round: { type: "number", description: "회차 (1 또는 2). 미지정 시 전체 회차 표시" }
         }
       }
+    },
+    {
+      name: "stock_tax_calculator",
+      description: "주식 투자 세금 계산기 - 국내주식 매매 증권거래세, 해외주식 양도소득세, 배당소득세 계산 (2026년 기준)",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", description: "계산 유형: domestic_transaction (국내주식 매매), overseas_capital_gains (해외주식 양도), dividend (배당소득)" },
+          sell_price: { type: "number", description: "매도 총액 (원) - domestic_transaction, overseas_capital_gains 시 사용" },
+          buy_price: { type: "number", description: "매수 총액 (원) - domestic_transaction, overseas_capital_gains 시 사용" },
+          market: { type: "string", description: "시장 구분: KOSPI (기본값), KOSDAQ, KONEX - domestic_transaction 시 사용" },
+          is_major_shareholder: { type: "boolean", description: "대주주 여부 (기본값 false) - domestic_transaction 시 사용. 종목당 10억 이상 또는 지분율 초과 시 true" },
+          dividend_amount: { type: "number", description: "배당금 총액 (원) - dividend 시 사용" },
+          annual_financial_income: { type: "number", description: "연간 금융소득 합계 (원) - dividend 시 금융소득종합과세 판단용 (기본값 0)" }
+        },
+        required: ["type"]
+      }
     }
   ]
 }));
@@ -1357,6 +1374,141 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     return { content: [{ type: "text", text }] };
+  }
+
+  /* --- stock_tax_calculator --- */
+  if (name === "stock_tax_calculator") {
+    const { type } = args;
+    const f = (n) => Math.round(n).toLocaleString();
+
+    if (type === "domestic_transaction") {
+      const { sell_price, buy_price, market = "KOSPI", is_major_shareholder = false } = args;
+      if (!sell_price || sell_price <= 0) {
+        return { content: [{ type: "text", text: "오류: 매도 총액(sell_price)을 입력해주세요." }] };
+      }
+
+      // 2026년 증권거래세율 (KOSPI: 농어촌특별세 0.15%, KOSDAQ: 거래세 0.15%, KONEX: 0.10%)
+      const marketKey = (market || "KOSPI").toUpperCase();
+      const taxRates = { KOSPI: 0.0015, KOSDAQ: 0.0015, KONEX: 0.001 };
+      const taxRate = taxRates[marketKey] ?? 0.0015;
+      const transactionTax = sell_price * taxRate;
+
+      const gain = (buy_price != null) ? sell_price - buy_price : null;
+      let capitalGainsTax = 0;
+      let capitalGainsTaxDetail = "";
+
+      if (is_major_shareholder && gain != null && gain > 0) {
+        // 대주주 양도소득세: 3억 이하 20%, 3억 초과 25% + 지방소득세 10%
+        const under3B = Math.min(gain, 300000000);
+        const over3B = Math.max(0, gain - 300000000);
+        const baseTax = under3B * 0.20 + over3B * 0.25;
+        const localTax = baseTax * 0.10;
+        capitalGainsTax = baseTax + localTax;
+        capitalGainsTaxDetail = `양도세 ${f(baseTax)}원 + 지방세 ${f(localTax)}원`;
+      }
+
+      let text = `[ 국내주식 매매 세금 계산 ]\n`;
+      text += `시장: ${marketKey}\n`;
+      text += `매도금액: ${f(sell_price)}원\n`;
+      if (buy_price != null) text += `매수금액: ${f(buy_price)}원\n`;
+      if (gain != null) text += `손익: ${gain >= 0 ? "+" : ""}${f(gain)}원\n`;
+      text += `──────────────\n`;
+      text += `증권거래세 (${(taxRate * 100).toFixed(2)}%): ${f(transactionTax)}원\n`;
+      if (is_major_shareholder && gain != null && gain > 0) {
+        text += `양도소득세 (대주주): ${f(capitalGainsTax)}원 (${capitalGainsTaxDetail})\n`;
+      } else if (is_major_shareholder && gain != null && gain <= 0) {
+        text += `양도소득세: 없음 (손실)\n`;
+      } else {
+        text += `양도소득세: 비과세 (소액주주)\n`;
+      }
+      text += `──────────────\n`;
+      text += `총 세금: ${f(transactionTax + capitalGainsTax)}원\n`;
+      text += `실수령액: ${f(sell_price - transactionTax - capitalGainsTax)}원\n`;
+      text += `\n※ 2026년 기준: KOSPI 농어촌특별세 0.15%, KOSDAQ 거래세 0.15%, KONEX 0.10%\n`;
+      if (!is_major_shareholder) {
+        text += `※ 소액주주 기준: 종목당 보유액 10억 미만 & 지분율 1%(KOSPI)/2%(KOSDAQ)/4%(KONEX) 미만`;
+      }
+      return { content: [{ type: "text", text }] };
+    }
+
+    if (type === "overseas_capital_gains") {
+      const { sell_price, buy_price } = args;
+      if (!sell_price || sell_price <= 0 || !buy_price || buy_price <= 0) {
+        return { content: [{ type: "text", text: "오류: 매도 총액(sell_price)과 매수 총액(buy_price)을 모두 입력해주세요." }] };
+      }
+
+      const gain = sell_price - buy_price;
+      const basicDeduction = 2500000; // 연 250만원 기본공제
+      const taxableGain = Math.max(0, gain - basicDeduction);
+      const incomeTax = taxableGain * 0.20;
+      const localTax = taxableGain * 0.02;
+      const totalTax = incomeTax + localTax;
+
+      let text = `[ 해외주식 양도소득세 계산 ]\n`;
+      text += `매도금액: ${f(sell_price)}원\n`;
+      text += `매수금액: ${f(buy_price)}원\n`;
+      text += `양도차익: ${gain >= 0 ? "+" : ""}${f(gain)}원\n`;
+      text += `──────────────\n`;
+      if (gain <= 0) {
+        text += `손실 발생 → 세금 없음\n`;
+        text += `\n※ 손실은 같은 연도 다른 해외주식 이익과 통산 가능`;
+      } else {
+        text += `기본공제: -${f(Math.min(gain, basicDeduction))}원 (연 250만원)\n`;
+        text += `과세표준: ${f(taxableGain)}원\n`;
+        text += `양도소득세 (20%): ${f(incomeTax)}원\n`;
+        text += `지방소득세 (2%): ${f(localTax)}원\n`;
+        text += `──────────────\n`;
+        if (taxableGain === 0) {
+          text += `기본공제 범위 내 → 세금 없음\n`;
+        } else {
+          text += `총 세금: ${f(totalTax)}원 (실효세율 ${((totalTax / gain) * 100).toFixed(2)}%)\n`;
+          text += `실수령액: ${f(sell_price - totalTax)}원\n`;
+        }
+        text += `\n※ 기본공제 250만원은 연간 전체 해외주식 손익 합산 기준\n`;
+        text += `※ 신고: 다음 해 5월 양도소득세 종합신고`;
+      }
+      return { content: [{ type: "text", text }] };
+    }
+
+    if (type === "dividend") {
+      const { dividend_amount, annual_financial_income = 0 } = args;
+      if (!dividend_amount || dividend_amount <= 0) {
+        return { content: [{ type: "text", text: "오류: 배당금(dividend_amount)을 입력해주세요." }] };
+      }
+
+      const withholdingTax = dividend_amount * 0.14;
+      const localTax = dividend_amount * 0.014;
+      const totalTax = withholdingTax + localTax;
+      const netDividend = dividend_amount - totalTax;
+      const totalFinancialIncome = annual_financial_income + dividend_amount;
+      const isGlobalTaxable = totalFinancialIncome > 20000000;
+
+      let text = `[ 배당소득세 계산 ]\n`;
+      text += `배당금: ${f(dividend_amount)}원\n`;
+      text += `──────────────\n`;
+      text += `배당소득세 (14%): -${f(withholdingTax)}원\n`;
+      text += `지방소득세 (1.4%): -${f(localTax)}원\n`;
+      text += `──────────────\n`;
+      text += `원천징수 세금: ${f(totalTax)}원 (15.4%)\n`;
+      text += `실수령 배당금: ${f(netDividend)}원\n`;
+      if (annual_financial_income > 0) {
+        text += `\n연간 금융소득 합계: ${f(totalFinancialIncome)}원\n`;
+        if (isGlobalTaxable) {
+          text += `⚠️ 금융소득종합과세 대상 (2,000만원 초과)\n`;
+          text += `  초과분: ${f(totalFinancialIncome - 20000000)}원\n`;
+          text += `  → 다음 해 5월 종합소득세 신고 필요 (최고세율 45%+지방세)`;
+        } else {
+          text += `✅ 금융소득종합과세 비대상 (2,000만원 이하)\n`;
+          text += `  잔여 한도: ${f(20000000 - totalFinancialIncome)}원`;
+        }
+      } else {
+        text += `\n※ 금융소득 연 2,000만원 초과 시 종합과세 대상\n`;
+        text += `※ annual_financial_income 입력 시 종합과세 여부 판단 가능`;
+      }
+      return { content: [{ type: "text", text }] };
+    }
+
+    return { content: [{ type: "text", text: "오류: type은 domestic_transaction, overseas_capital_gains, dividend 중 하나여야 합니다." }] };
   }
 
   return { content: [{ type: "text", text: "오류: 알 수 없는 도구입니다." }] };
