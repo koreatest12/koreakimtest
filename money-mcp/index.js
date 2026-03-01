@@ -230,7 +230,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "kisec_exam_schedule",
-      description: "2026년 정보보안기사/정보보안산업기사 시험일정 조회 - 회차별 필기/실기 원서접수, 시험일, 합격발표 일정표",
+      description: "2026년 정보보안기사/정보보안산업기사 시험일정 조회 - 회차별 필기/실기 원서접수, 시험일, 합격발표 일정표 + 법규 과목 주요 법률 자료 링크",
       inputSchema: {
         type: "object",
         properties: {
@@ -1372,6 +1372,28 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       if (diff === 0) text += ` (오늘!)`;
       else if (diff > 0) text += ` (${diff}일 남음)`;
     }
+
+    // 법규 과목 주요 법률 자료
+    text += `\n\n══════════════════════════════════════`;
+    text += `\n[ 법규 과목 주요 법률 자료 (국가법령정보센터) ]\n`;
+    const laws = [
+      { name: "개인정보 보호법", url: "https://www.law.go.kr/법령/개인정보보호법", note: "개인정보 수집·처리·보호 의무" },
+      { name: "정보통신망 이용촉진 및 정보보호 등에 관한 법률", url: "https://www.law.go.kr/법령/정보통신망이용촉진및정보보호등에관한법률", note: "온라인 정보보호·해킹·스팸" },
+      { name: "정보통신기반 보호법", url: "https://www.law.go.kr/법령/정보통신기반보호법", note: "주요정보통신기반시설 보호" },
+      { name: "정보보호산업의 진흥에 관한 법률", url: "https://www.law.go.kr/법령/정보보호산업의진흥에관한법률", note: "정보보호 산업 육성·CISO 지정" },
+      { name: "전자서명법", url: "https://www.law.go.kr/법령/전자서명법", note: "공인/사설 전자서명 체계" },
+      { name: "지능정보화 기본법", url: "https://www.law.go.kr/법령/지능정보화기본법", note: "정보화·AI 기반 정책" },
+      { name: "전자정부법", url: "https://www.law.go.kr/법령/전자정부법", note: "행정정보 공유·전자민원" },
+      { name: "사이버보안기본법", url: "https://www.law.go.kr/법령/사이버보안기본법", note: "국가 사이버보안 체계 (2024 신설)" },
+      { name: "국가기술자격법", url: "https://www.law.go.kr/법령/국가기술자격법", note: "기사 자격시험 근거법" },
+    ];
+    for (const law of laws) {
+      text += `\n▸ ${law.name}\n`;
+      text += `  - ${law.note}\n`;
+      text += `  - ${law.url}\n`;
+    }
+    text += `\n※ 국가법령정보센터: https://www.law.go.kr\n`;
+    text += `※ 시험 원서접수·공고: https://cq.or.kr\n`;
 
     return { content: [{ type: "text", text }] };
   }
