@@ -9,7 +9,7 @@ lxml>=5.0.0
 
 # Data analysis
 numpy>=1.26.0
-scipy>=1.11.0
+scipy>=1.17.1
 
 # Image processing (advanced)
 opencv-python>=4.8.0
