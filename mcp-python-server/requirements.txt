@@ -16,7 +16,7 @@ opencv-python>=4.8.0
 pillow>=10.0.0
 
 # Automation and system monitoring
-schedule>=1.2.0
+schedule>=1.2.2
 psutil>=5.9.0
 
 # Testing
