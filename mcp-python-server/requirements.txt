@@ -13,7 +13,7 @@ scipy>=1.11.0
 
 # Image processing (advanced)
 opencv-python>=4.8.0
-pillow>=10.0.0
+pillow>=12.2.0
 
 # Automation and system monitoring
 schedule>=1.2.0
