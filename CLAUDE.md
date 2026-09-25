@@ -43,3 +43,20 @@ AGENTS.md의 과금 방지 정책을 Claude Code 고유 도구에 다음과 같�
 - 과금 여부가 불확실하면 과금된다고 가정하고 승인을 요청합니다.
 - Claude Code 모델 사용 자체의 요금은 이 정책으로 막을 수 없습니다. 이 정책은
   추가 도구·커넥터·네트워크·원격 실행으로 인한 과금을 방지하기 위한 것입니다.
+
+### 강제 설정 (`~/.claude/settings.json`, git 미추적)
+
+위 규칙은 사용자 설정으로도 강제됩니다. 변경 시 이 목록도 함께 갱신합니다.
+
+- `permissions.deny`: 브라우저 자동화, `WebSearch`, `WebFetch`, `RemoteTrigger`,
+  `Workflow`, `CronCreate`, `ScheduleWakeup`, `Artifact`/`ArtifactData`/`ArtifactComments`.
+- `permissions.ask` (호출마다 확인): claude.ai 커넥터 5종, 원격 git·`gh`,
+  npm/yarn/pnpm/pip/uv 설치, `npx`, `curl`/`wget`/`Invoke-WebRequest` 등 다운로드,
+  `claude`/`codex`/`gemini` CLI 실행 (Bash·PowerShell 모두).
+- 기능 끄기: `enableArtifact: false`, `disableWorkflows: true`,
+  `workflowKeywordTriggerEnabled: false`, `disableRemoteControl: true`,
+  `remoteControlAtStartup: false`, `autoUploadSessions: false`,
+  `fastMode: false` + `fastModePerSessionOptIn: true`,
+  `autoContinueAtUsageLimit: false`.
+- ask 규칙은 명령 앞부분 일치 기준이라 `cd x && npm install` 같은 복합 명령은
+  확인 창을 우회할 수 있습니다. 이런 경우에도 위 승인 절차를 따릅니다.
