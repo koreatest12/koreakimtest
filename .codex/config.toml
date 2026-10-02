@@ -1,0 +1,22 @@
+# Windows configuration: preserves existing local deployment paths.
+# Review paths and filesystem scope before trusting this project.
+
+[mcp_servers.filesystem]
+command = "cmd"
+args = ["/c", "npx", "@modelcontextprotocol/server-filesystem", "C:\\Users\\kwonn"]
+[mcp_servers.filesystem.env]
+ROOT = "C:\\Users\\kwonn"
+
+[mcp_servers.money-mcp]
+command = "node"
+args = ["C:\\Users\\kwonn\\money-mcp\\index.js"]
+[mcp_servers.money-mcp.env]
+PYTHONIOENCODING = "utf-8"
+
+[mcp_servers.crypto-mcp]
+command = "node"
+args = ["C:\\Users\\kwonn\\crypto-mcp\\index.js"]
+
+[mcp_servers.chrome-mcp]
+command = "node"
+args = ["C:\\Users\\kwonn\\chrome-mcp\\index.js"]
