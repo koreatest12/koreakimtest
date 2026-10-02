@@ -3,6 +3,11 @@ name: "🛰 API Curl Test Server — EchoOps / Safe-Continue / Service Perms / D
 on:
   workflow_dispatch:
     inputs:
+      enable_anthropic_api:
+        description: "Optional legacy Anthropic API call (separate API billing)"
+        type: boolean
+        required: false
+        default: false
       target_url:            # 1
         description: "호출할 API URL (빈값이면 Anthropic Claude messages)"
         required: false
@@ -326,6 +331,7 @@ jobs:
       #    - 실패하더라도 워크플로우 계속
       ##################################################################
       - name: "[api] Curl call Anthropic Claude messages API (Echo Safe)"
+        if: ${{ inputs.enable_anthropic_api }}
         continue-on-error: true
         env:
           INPUT_URL: ${{ github.event.inputs.target_url }}
@@ -343,6 +349,15 @@ jobs:
           TARGET_URL="${INPUT_URL}"
           if [ -z "$TARGET_URL" ]; then
             TARGET_URL="https://api.anthropic.com/v1/messages"
+          fi
+
+          if [ "$TARGET_URL" != "https://api.anthropic.com/v1/messages" ]; then
+            echo "::error::Legacy API credentials may only be sent to the Anthropic messages endpoint"
+            exit 1
+          fi
+          if [ -z "$SECR_KEY" ]; then
+            echo "::error::ANTHROPIC_API_KEY is required for the opt-in legacy API call"
+            exit 1
           fi
 
           echo "[api] TARGET_URL=${TARGET_URL}" | tee -a "${LOG_DIR}/curl_init.log"
@@ -449,7 +464,7 @@ jobs:
         run: |
           echo "✅ [FINAL] API Curl Test Server workflow finished."
           echo "   - 모든 단계는 echo 기반 safe_run/safe_logdir 로 디렉토리 보장 후 로깅했습니다."
-          echo "   - Anthropic Claude 엔드포인트(${INPUT_URL})에 curl POST를 시도했고 실패해도 continue-on-error로 워크플로우는 계속 진행했습니다."
+          echo "   - Anthropic API 호출은 enable_anthropic_api=true인 경우에만 시도됩니다. 결과는 API 단계 로그를 확인하세요."
           echo "   - claude_api / dr_center / iso_builder 서비스 디렉토리를 만들고 status.log / permissions.txt / README.md를 구성했습니다."
           echo "   - DR 백업 계획(dr_backup_plan.txt)과 ISO 매니페스트(iso_manifest.txt)를 준비해 재해복구/스냅샷 흐름까지 템플릿화했습니다."
           echo "   - 환경 스냅샷(df -h, uname, env)을 기록했습니다."
